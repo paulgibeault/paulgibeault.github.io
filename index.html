@@ -176,25 +176,105 @@
         #view-launcher {
             padding: 80px 40px;
             min-height: 100vh;
+            display: flex;
+            align-items: center;
         }
 
         .launcher-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-            gap: 32px;
-            max-width: 1400px;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 20px;
+            width: 100%;
+            max-width: 1000px;
             margin: 0 auto;
-            align-content: start;
+        }
+
+        .launcher-btn {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            overflow: hidden;
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            transition: transform 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+                        box-shadow 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+                        border-color 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+            text-decoration: none;
+            display: flex;
+            flex-direction: column;
+            cursor: pointer;
+            opacity: 0; 
+            animation: launcher-fade-in 0.6s ease forwards;
+        }
+
+        .launcher-btn:hover {
+            transform: translateY(-6px);
+            border-color: var(--field-gold);
+            box-shadow:
+                0 12px 40px rgba(0, 0, 0, 0.4),
+                0 0 30px var(--field-gold-dim);
+        }
+
+        .launcher-btn__image-wrap {
+            overflow: hidden;
+            width: 100%;
+            aspect-ratio: 16 / 10;
+            border-bottom: 1px solid var(--card-border);
+        }
+
+        .launcher-btn__image {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+            transition: transform 0.4s ease;
+        }
+
+        .launcher-btn:hover .launcher-btn__image {
+            transform: scale(1.05);
+        }
+
+        .launcher-btn__body {
+            padding: 14px;
+            text-align: center;
+            background: rgba(10, 10, 20, 0.4);
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        .launcher-btn__name {
+            font-family: var(--font-display);
+            font-weight: 700;
+            font-size: 1.1rem;
+            color: var(--snow-white);
+            margin-bottom: 4px;
+            letter-spacing: 1px;
+        }
+
+        .launcher-btn__subtitle {
+            font-family: var(--font-mono);
+            font-size: 0.65rem;
+            color: var(--field-gold);
+            letter-spacing: 1px;
+        }
+        
+        @keyframes launcher-fade-in {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
         }
 
         @media (max-width: 768px) {
             .launcher-grid {
-                grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-                gap: 20px;
+                grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+                gap: 16px;
             }
             #view-launcher {
                 padding: 40px 16px;
             }
+            .launcher-btn__name { font-size: 0.95rem; }
+            .launcher-btn__subtitle { font-size: 0.6rem; }
         }
 
         /* ---- STARFIELD ---- */
@@ -1213,7 +1293,41 @@
     <!-- ========== GAME LAUNCHER ========== -->
     <div id="view-launcher" class="app-mode hidden">
         <div class="launcher-grid" id="launcher-grid-container">
-            <!-- Cards populated via JS clone -->
+            <a href="https://paulgibeault.github.io/pi-game/" class="launcher-btn" style="animation-delay: 0.0s" target="_blank" rel="noopener">
+                <div class="launcher-btn__image-wrap"><img class="launcher-btn__image" src="images/pi-game.png" alt="Pi Game"></div>
+                <div class="launcher-btn__body">
+                    <h3 class="launcher-btn__name">Pi Game</h3>
+                    <p class="launcher-btn__subtitle">Memorization</p>
+                </div>
+            </a>
+            <a href="https://paulgibeault.github.io/si-syn/" class="launcher-btn" style="animation-delay: 0.1s" target="_blank" rel="noopener">
+                <div class="launcher-btn__image-wrap"><img class="launcher-btn__image" src="images/si-syn.png" alt="Silicon Syndicate"></div>
+                <div class="launcher-btn__body">
+                    <h3 class="launcher-btn__name">Si Syndicate</h3>
+                    <p class="launcher-btn__subtitle">Assembly Logic</p>
+                </div>
+            </a>
+            <a href="https://paulgibeault.github.io/hecknsic/" class="launcher-btn" style="animation-delay: 0.2s" target="_blank" rel="noopener">
+                <div class="launcher-btn__image-wrap"><img class="launcher-btn__image" src="images/hecknsic.png" alt="HecknSic"></div>
+                <div class="launcher-btn__body">
+                    <h3 class="launcher-btn__name">HecknSic</h3>
+                    <p class="launcher-btn__subtitle">Hex Puzzle</p>
+                </div>
+            </a>
+            <a href="https://paulgibeault.github.io/cozy-solitaire/" class="launcher-btn" style="animation-delay: 0.3s" target="_blank" rel="noopener">
+                <div class="launcher-btn__image-wrap"><img class="launcher-btn__image" src="images/cozy-solitaire.png" alt="Cozy Solitaire"></div>
+                <div class="launcher-btn__body">
+                    <h3 class="launcher-btn__name">Solitaire</h3>
+                    <p class="launcher-btn__subtitle">Card Games</p>
+                </div>
+            </a>
+            <a href="https://paulgibeault.github.io/QRCodeP2P/" class="launcher-btn" style="animation-delay: 0.4s" target="_blank" rel="noopener">
+                <div class="launcher-btn__image-wrap"><img class="launcher-btn__image" src="images/qrcodep2p.png" alt="QRCodeP2P"></div>
+                <div class="launcher-btn__body">
+                    <h3 class="launcher-btn__name">QRCodeP2P</h3>
+                    <p class="launcher-btn__subtitle">Multiplayer</p>
+                </div>
+            </a>
         </div>
     </div>
 
@@ -1264,30 +1378,7 @@
         }
     })();
 
-    // ==========================================
-    // BUILD LAUNCHER GRID — Clones cards for launcher
-    // ==========================================
-    (function buildLauncherGrid() {
-        const launcherGrid = document.getElementById('launcher-grid-container');
-        if (!launcherGrid) return;
-        
-        const cards = document.querySelectorAll('#view-portfolio .project-card');
-        
-        cards.forEach((card) => {
-            const clone = card.cloneNode(true);
-            
-            // Ensure clones are visible regardless of scroll reveal state
-            clone.classList.add('visible'); 
-            
-            // Adjust IDs to prevent duplicates
-            if (clone.id) clone.id = clone.id + '-launcher';
-            clone.querySelectorAll('[id]').forEach(el => {
-                el.id = el.id + '-launcher';
-            });
 
-            launcherGrid.appendChild(clone);
-        });
-    })();
 
     // ==========================================
     // SCROLL REVEAL — Cards animate in on scroll
