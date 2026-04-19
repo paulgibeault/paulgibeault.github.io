@@ -3,10 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <script>
-        // Apply font scale immediately to avoid a flash of unstyled content
+        // Apply settings immediately to avoid a flash of unstyled content
         (function() {
             const scale = localStorage.getItem('fontScale') || '1';
+            const mode = localStorage.getItem('appMode') || 'portfolio';
             document.documentElement.style.setProperty('--font-scale', scale);
+            document.documentElement.setAttribute('data-theme', mode);
+            document.documentElement.classList.add('mode-' + mode);
         })();
     </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -25,7 +28,7 @@
            DESIGN SYSTEM — Retro Arcade Portfolio
            ======================================== */
 
-        :root {
+        :root, html[data-theme="portfolio"] {
             --deep-space: #1a1a2e;
             --deep-space-light: #24243e;
             --field-gold: #D4AF37;
@@ -43,6 +46,15 @@
             --font-pixel: 'Press Start 2P', cursive;
             --font-body: 'Inter', sans-serif;
             --font-mono: 'JetBrains Mono', monospace;
+        }
+
+        html[data-theme="launcher"] {
+            /* Slightly darker/richer for the launcher mode */
+            --deep-space: #0a0a14;
+            --deep-space-light: #16162a;
+            --card-bg: rgba(20, 20, 35, 0.90);
+            --field-gold: #E5C158;
+            --field-gold-dim: rgba(229, 193, 88, 0.35);
         }
 
         /* ---- RESET ---- */
@@ -64,27 +76,75 @@
             line-height: 1.6;
         }
 
-        /* ---- FONT CONTROLS ---- */
-        .font-controls {
+        /* ---- GLOBAL CONTROLS ---- */
+        .global-controls {
             position: fixed;
             bottom: 24px;
             right: 24px;
             display: flex;
-            gap: 2px;
-            background: rgba(20, 20, 40, 0.7);
+            align-items: center;
+            gap: 12px;
+            background: rgba(20, 20, 40, 0.85);
             backdrop-filter: blur(8px);
             -webkit-backdrop-filter: blur(8px);
             border: 1px solid var(--card-border);
             border-radius: 8px;
-            padding: 4px;
-            z-index: 900;
-            opacity: 0.4;
-            transition: opacity 0.3s ease, transform 0.3s ease;
+            padding: 6px 12px;
+            z-index: 1000;
+            opacity: 0.6;
+            transition: opacity 0.3s ease, transform 0.3s ease, border-color 0.3s ease;
         }
 
-        .font-controls:hover, .font-controls:focus-within {
+        .global-controls:hover, .global-controls:focus-within {
             opacity: 1;
             transform: translateY(-2px);
+            border-color: var(--field-gold);
+        }
+
+        .global-controls__section {
+            display: flex;
+            gap: 2px;
+            align-items: center;
+        }
+
+        .global-controls__divider {
+            width: 1px;
+            height: 24px;
+            background: var(--card-border);
+            margin: 0 4px;
+        }
+
+        .mode-select-wrap {
+            position: relative;
+            display: flex;
+            align-items: center;
+        }
+
+        .mode-select {
+            appearance: none;
+            background: transparent;
+            color: var(--field-gold);
+            font-family: var(--font-mono);
+            font-size: 0.8rem;
+            border: none;
+            outline: none;
+            cursor: pointer;
+            text-transform: uppercase;
+            padding: 8px 24px 8px 8px;
+        }
+        
+        .mode-select option {
+            background: var(--deep-space);
+            color: var(--snow-white);
+        }
+
+        .mode-select-wrap::after {
+            content: '▼';
+            font-size: 0.6rem;
+            color: var(--field-gold);
+            position: absolute;
+            right: 8px;
+            pointer-events: none;
         }
 
         .font-btn {
@@ -102,6 +162,39 @@
         .font-btn:hover {
             background: var(--field-gold-dim);
             color: var(--field-gold);
+        }
+
+        /* ---- APP MODES ---- */
+        .app-mode {
+            width: 100%;
+        }
+        .app-mode.hidden {
+            display: none !important;
+        }
+
+        /* ---- LAUNCHER GRID ---- */
+        #view-launcher {
+            padding: 80px 40px;
+            min-height: 100vh;
+        }
+
+        .launcher-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+            gap: 32px;
+            max-width: 1400px;
+            margin: 0 auto;
+            align-content: start;
+        }
+
+        @media (max-width: 768px) {
+            .launcher-grid {
+                grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+                gap: 20px;
+            }
+            #view-launcher {
+                padding: 40px 16px;
+            }
         }
 
         /* ---- STARFIELD ---- */
@@ -304,10 +397,14 @@
             overflow: hidden;
             backdrop-filter: blur(12px);
             -webkit-backdrop-filter: blur(12px);
-            transition: all 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+            transition: transform 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+                        opacity 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+                        box-shadow 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+                        border-color 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
             opacity: 0;
             transform: translateY(30px);
             cursor: pointer;
+            will-change: transform, opacity;
         }
 
         .project-card.visible {
@@ -831,14 +928,28 @@
 
 <div id="starfield" aria-hidden="true"></div>
 
-<!-- ========== FONT CONTROLS ========== -->
-<div class="font-controls" aria-label="Adjust font size">
-    <button class="font-btn" id="font-decrease" aria-label="Decrease font size" title="Decrease Font">A-</button>
-    <button class="font-btn" id="font-reset" aria-label="Reset font size" title="Reset Font">A</button>
-    <button class="font-btn" id="font-increase" aria-label="Increase font size" title="Increase Font">A+</button>
+<!-- ========== GLOBAL CONTROLS ========== -->
+<div class="global-controls" aria-label="Global Settings">
+    <div class="global-controls__section">
+        <label for="mode-select" class="visually-hidden" style="display:none;">App Mode</label>
+        <div class="mode-select-wrap">
+            <select id="mode-select" class="mode-select" title="Switch App Mode">
+                <option value="portfolio">Portfolio</option>
+                <option value="launcher">Launcher</option>
+            </select>
+        </div>
+    </div>
+    <div class="global-controls__divider"></div>
+    <div class="global-controls__section" aria-label="Adjust font size">
+        <button class="font-btn" id="font-decrease" aria-label="Decrease font size" title="Decrease Font">A-</button>
+        <button class="font-btn" id="font-reset" aria-label="Reset font size" title="Reset Font">A</button>
+        <button class="font-btn" id="font-increase" aria-label="Increase font size" title="Increase Font">A+</button>
+    </div>
 </div>
 
 <div class="page-wrapper">
+
+    <div id="view-portfolio" class="app-mode">
 
     <!-- ========== HERO ========== -->
     <header class="hero" id="hero">
@@ -1097,6 +1208,14 @@
             <a href="https://linkedin.com/in/paulgibeault" target="_blank" rel="noopener">LinkedIn</a>
         </p>
     </footer>
+    </div> <!-- end view-portfolio -->
+
+    <!-- ========== GAME LAUNCHER ========== -->
+    <div id="view-launcher" class="app-mode hidden">
+        <div class="launcher-grid" id="launcher-grid-container">
+            <!-- Cards populated via JS clone -->
+        </div>
+    </div>
 
 </div>
 
@@ -1143,6 +1262,31 @@
             star.style.animationDelay = (Math.random() * 6) + 's';
             container.appendChild(star);
         }
+    })();
+
+    // ==========================================
+    // BUILD LAUNCHER GRID — Clones cards for launcher
+    // ==========================================
+    (function buildLauncherGrid() {
+        const launcherGrid = document.getElementById('launcher-grid-container');
+        if (!launcherGrid) return;
+        
+        const cards = document.querySelectorAll('#view-portfolio .project-card');
+        
+        cards.forEach((card) => {
+            const clone = card.cloneNode(true);
+            
+            // Ensure clones are visible regardless of scroll reveal state
+            clone.classList.add('visible'); 
+            
+            // Adjust IDs to prevent duplicates
+            if (clone.id) clone.id = clone.id + '-launcher';
+            clone.querySelectorAll('[id]').forEach(el => {
+                el.id = el.id + '-launcher';
+            });
+
+            launcherGrid.appendChild(clone);
+        });
     })();
 
     // ==========================================
@@ -1226,14 +1370,14 @@
     })();
 
     // ==========================================
-    // FONT CONTROL — Adjust global font scale
+    // GLOBAL SETTINGS — Adjust mode & font scale
     // ==========================================
-    (function fontControl() {
-        let scale = parseFloat(localStorage.getItem('fontScale')) || 1;
+    (function globalSettings() {
         const d = document.documentElement;
-
+        
+        // --- Font Control ---
+        let scale = parseFloat(localStorage.getItem('fontScale')) || 1;
         function setScale(s) {
-            // Keep bounds sane (between 70% and 150%)
             scale = Math.max(0.7, Math.min(s, 1.6));
             d.style.setProperty('--font-scale', scale);
             localStorage.setItem('fontScale', scale);
@@ -1242,6 +1386,39 @@
         document.getElementById('font-decrease').addEventListener('click', () => setScale(scale - 0.15));
         document.getElementById('font-increase').addEventListener('click', () => setScale(scale + 0.15));
         document.getElementById('font-reset').addEventListener('click', () => setScale(1));
+
+        // --- App Mode Control ---
+        const modeSelect = document.getElementById('mode-select');
+        const viewPortfolio = document.getElementById('view-portfolio');
+        const viewLauncher = document.getElementById('view-launcher');
+        
+        let currentMode = localStorage.getItem('appMode') || 'portfolio';
+        modeSelect.value = currentMode;
+        
+        function setMode(newMode) {
+            currentMode = newMode;
+            localStorage.setItem('appMode', currentMode);
+            
+            d.setAttribute('data-theme', currentMode);
+            d.classList.remove('mode-portfolio', 'mode-launcher');
+            d.classList.add('mode-' + currentMode);
+
+            if (currentMode === 'launcher') {
+                viewPortfolio.classList.add('hidden');
+                viewLauncher.classList.remove('hidden');
+            } else {
+                viewLauncher.classList.add('hidden');
+                viewPortfolio.classList.remove('hidden');
+            }
+        }
+        
+        modeSelect.addEventListener('change', (e) => {
+            setMode(e.target.value);
+            window.scrollTo(0, 0);
+        });
+        
+        // Initialize visibility
+        setMode(currentMode);
     })();
 </script>
 
