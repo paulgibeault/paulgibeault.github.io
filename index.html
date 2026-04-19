@@ -182,8 +182,8 @@
 
         .launcher-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-            gap: 20px;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 48px;
             width: 100%;
             max-width: 1000px;
             margin: 0 auto;
@@ -267,14 +267,27 @@
 
         @media (max-width: 768px) {
             .launcher-grid {
-                grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-                gap: 16px;
+                grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+                gap: 28px;
             }
             #view-launcher {
-                padding: 40px 16px;
+                padding: 40px 24px;
             }
             .launcher-btn__name { font-size: 0.95rem; }
             .launcher-btn__subtitle { font-size: 0.6rem; }
+        }
+
+        @media (max-width: 480px) {
+            .launcher-grid {
+                grid-template-columns: 1fr;
+                gap: 24px;
+                max-width: 320px;
+            }
+            #view-launcher {
+                padding: 30px 16px;
+            }
+            .launcher-btn__name { font-size: 1.1rem; }
+            .launcher-btn__subtitle { font-size: 0.7rem; }
         }
 
         /* ---- STARFIELD ---- */
