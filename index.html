@@ -1125,6 +1125,7 @@
     <main>
 
         <!-- ========== MY GAMES ========== -->
+        <!-- SYNC: Game list is duplicated in #view-launcher below. Update both when adding games. -->
         <section class="section container" id="games">
             <h2 class="section__header">
                 My Games <span class="section__separator">//</span> Arcade
@@ -1358,6 +1359,7 @@
     </div> <!-- end view-portfolio -->
 
     <!-- ========== GAME LAUNCHER ========== -->
+    <!-- SYNC: Game list is duplicated in #games section above. Update both when adding games. -->
     <div id="view-launcher" class="app-mode hidden">
         <div class="launcher-grid" id="launcher-grid-container">
             <a href="https://paulgibeault.github.io/pi-game/" class="launcher-btn" style="animation-delay: 0.0s">
@@ -1400,7 +1402,7 @@
                 <span class="quit-btn__icon">✕</span>
             </button>
         </div>
-        <iframe id="game-iframe" src="about:blank" allowfullscreen></iframe>
+        <iframe id="game-iframe" src="about:blank" sandbox="allow-scripts allow-same-origin" allowfullscreen></iframe>
     </div>
 
 </div>
@@ -1426,7 +1428,7 @@
     // ==========================================
     (function createStarfield() {
         const container = document.getElementById('starfield');
-        const count = 500;
+        const count = 150;
         const colorClasses = ['', 'star--warm', 'star--cool'];
 
         for (let i = 0; i < count; i++) {
@@ -1493,7 +1495,11 @@
 
             zoomImg.src = img.src;
             zoomImg.alt = img.alt;
-            zoomBody.innerHTML = body.innerHTML;
+            // Deep-clone DOM nodes instead of innerHTML to prevent XSS
+            zoomBody.replaceChildren();
+            for (const child of body.childNodes) {
+                zoomBody.appendChild(child.cloneNode(true));
+            }
 
             // Prevent button clicks inside zoom from bubbling to overlay
             zoomBody.querySelectorAll('.btn').forEach(btn => {
@@ -1535,13 +1541,12 @@
     })();
 
     // ==========================================
-    // GLOBAL SETTINGS — Adjust mode & font scale
+    // FONT CONTROL — Adjust root font scale
     // ==========================================
-    (function globalSettings() {
+    (function fontControl() {
         const d = document.documentElement;
-        
-        // --- Font Control ---
         let scale = parseFloat(localStorage.getItem('fontScale')) || 1;
+
         function setScale(s) {
             scale = Math.max(0.7, Math.min(s, 1.6));
             d.style.setProperty('--font-scale', scale);
@@ -1551,11 +1556,22 @@
         document.getElementById('font-decrease').addEventListener('click', () => setScale(scale - 0.15));
         document.getElementById('font-increase').addEventListener('click', () => setScale(scale + 0.15));
         document.getElementById('font-reset').addEventListener('click', () => setScale(1));
+    })();
 
-        // --- App Mode Control ---
+    // ==========================================
+    // APP CONTROLLER — Mode switching & game view
+    // ==========================================
+    (function appController() {
+        const d = document.documentElement;
+
         const modeSelect = document.getElementById('mode-select');
         const viewPortfolio = document.getElementById('view-portfolio');
         const viewLauncher = document.getElementById('view-launcher');
+        const viewGame = document.getElementById('view-game');
+        const gameIframe = document.getElementById('game-iframe');
+        const quitGameBtn = document.getElementById('quit-game-btn');
+        const globalControls = document.querySelector('.global-controls');
+        const launcherBtns = document.querySelectorAll('.launcher-btn');
         
         let currentMode = localStorage.getItem('appMode') || 'portfolio';
         modeSelect.value = currentMode;
@@ -1576,13 +1592,11 @@
                 viewPortfolio.classList.remove('hidden');
             }
 
-            // Ensure Game View shuts down natively on mode switch
-            const viewGame = document.getElementById('view-game');
-            const gameIframe = document.getElementById('game-iframe');
-            if (viewGame && !viewGame.classList.contains('hidden')) {
+            // Tear down game view on mode switch
+            if (!viewGame.classList.contains('hidden')) {
                 viewGame.classList.add('hidden');
-                if (gameIframe) gameIframe.src = "about:blank";
-                document.querySelector('.global-controls').style.display = 'flex';
+                gameIframe.src = 'about:blank';
+                globalControls.style.display = 'flex';
             }
         }
         
@@ -1591,85 +1605,71 @@
             window.scrollTo(0, 0);
         });
         
-        // Initialize visibility
         setMode(currentMode);
 
-        // --- GAME LAUNCHER OVERRIDE ---
-        const viewGame = document.getElementById('view-game');
-        const gameIframe = document.getElementById('game-iframe');
-        const quitGameBtn = document.getElementById('quit-game-btn');
-        const launcherBtns = document.querySelectorAll('.launcher-btn');
-
+        // --- Game Launcher ---
         launcherBtns.forEach(btn => {
             btn.addEventListener('click', (e) => {
                 e.preventDefault();
-                const targetUrl = btn.getAttribute('href');
-                if (gameIframe) gameIframe.src = targetUrl;
-                
+                gameIframe.src = btn.getAttribute('href');
                 viewPortfolio.classList.add('hidden');
                 viewLauncher.classList.add('hidden');
-                document.querySelector('.global-controls').style.display = 'none';
-                if (viewGame) viewGame.classList.remove('hidden');
+                globalControls.style.display = 'none';
+                viewGame.classList.remove('hidden');
             });
         });
 
-        if (quitGameBtn) {
-            quitGameBtn.addEventListener('click', () => {
-                if (viewGame) viewGame.classList.add('hidden');
-                if (gameIframe) gameIframe.src = 'about:blank';
-                document.querySelector('.global-controls').style.display = 'flex';
-                setMode('launcher');
-            });
+        quitGameBtn.addEventListener('click', () => {
+            viewGame.classList.add('hidden');
+            gameIframe.src = 'about:blank';
+            globalControls.style.display = 'flex';
+            setMode('launcher');
+        });
+    })();
+
+    // ==========================================
+    // PWA INSTALL — Service worker & install flow
+    // ==========================================
+    (function pwaInstall() {
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('sw.js').catch(err => console.log('SW registration failed', err));
         }
 
-        // --- PWA Custom Install Flow ---
         const installBtn = document.getElementById('install-btn');
-        const installDiv = document.getElementById('install-divider');
+        const installDivider = document.getElementById('install-divider');
         let deferredPrompt;
 
-        if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('sw.js?v=3').catch(err => console.log('SW setup failed', err));
+        function showInstallUI() {
+            if (installBtn) installBtn.style.display = 'inline-block';
+            if (installDivider) installDivider.style.display = 'block';
+        }
+
+        function hideInstallUI() {
+            if (installBtn) installBtn.style.display = 'none';
+            if (installDivider) installDivider.style.display = 'none';
         }
 
         window.addEventListener('beforeinstallprompt', (e) => {
-            // Prevent the mini-infobar from appearing on mobile
             e.preventDefault();
-            // Stash the event so it can be triggered later.
             deferredPrompt = e;
-            // Update UI to notify the user they can install the PWA
-            if (installBtn && installDiv) {
-                installBtn.style.display = 'inline-block';
-                installDiv.style.display = 'block';
-            }
+            showInstallUI();
         });
 
         if (installBtn) {
             installBtn.addEventListener('click', async () => {
                 if (!deferredPrompt) return;
-                // Show the native install prompt
                 deferredPrompt.prompt();
-                // Wait for the user to respond to the prompt
                 const { outcome } = await deferredPrompt.userChoice;
-                if (outcome === 'accepted') {
-                    console.log('User accepted the install prompt');
-                }
-                // We've used the prompt, and can't use it again, discard it
                 deferredPrompt = null;
-                installBtn.style.display = 'none';
-                installDiv.style.display = 'none';
+                hideInstallUI();
+                if (outcome === 'accepted') console.log('PWA installed');
             });
         }
 
         window.addEventListener('appinstalled', () => {
-            // Hide the app-provided install promotion
-            if (installBtn && installDiv) {
-                installBtn.style.display = 'none';
-                installDiv.style.display = 'none';
-            }
             deferredPrompt = null;
-            console.log('PWA was installed');
+            hideInstallUI();
         });
-
     })();
 </script>
 

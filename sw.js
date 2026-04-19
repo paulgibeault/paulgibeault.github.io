@@ -1,9 +1,17 @@
-const CACHE_NAME = 'paul-arcade-v2';
+const CACHE_NAME = 'paul-arcade-v3';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
   './manifest.json',
-  './images/pi-game.png'
+  './images/icon-192.png',
+  './images/icon-512.png',
+  './images/pi-game.png',
+  './images/si-syn.png',
+  './images/hecknsic.png',
+  './images/cozy-solitaire.png',
+  './images/qrcodep2p.png',
+  './images/zibaldone.png',
+  './images/usai.png'
 ];
 
 self.addEventListener('install', (event) => {
