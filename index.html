@@ -1590,52 +1590,59 @@
         setMode(currentMode);
 
         // --- PWA Installation Logic ---
-        const installBtn = document.getElementById('install-btn');
-        const installModal = document.getElementById('install-modal');
-        const installClose = document.getElementById('install-close');
-        const installDesc = document.getElementById('install-desc');
-        
-        let deferredPrompt;
-
-        if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('sw.js').catch(err => console.log('SW setup failed', err));
-        }
-
-        window.addEventListener('beforeinstallprompt', (e) => {
-            e.preventDefault();
-            deferredPrompt = e;
-        });
-
-        installBtn.addEventListener('click', () => {
-            if (deferredPrompt) {
-                deferredPrompt.prompt();
-                deferredPrompt.userChoice.then((choiceResult) => {
-                    if (choiceResult.outcome === 'accepted') {
-                        console.log('User accepted the install prompt');
-                    }
-                    deferredPrompt = null;
-                });
-            } else {
-                // Show manual instructions
-                const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
-                const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
-                
-                if (isIOS && isSafari) {
-                    installDesc.innerHTML = "To install this app, tap the <span class='install-icon'>Share</span> icon down below, then select <span class='install-icon'>Add to Home Screen</span>.";
-                } else {
-                    installDesc.innerHTML = "To install this app, tap the browser's menu <span class='install-icon'>⋮</span> and select <span class='install-icon'>Add to Home Screen</span> or <span class='install-icon'>Install App</span>.";
-                }
-                
-                installModal.classList.add('active');
+        document.addEventListener('DOMContentLoaded', () => {
+            const installBtn = document.getElementById('install-btn');
+            const installModal = document.getElementById('install-modal');
+            const installClose = document.getElementById('install-close');
+            const installDesc = document.getElementById('install-desc');
+            
+            if (!installBtn || !installModal || !installClose || !installDesc) {
+                console.warn("PWA installation elements not found.");
+                return;
             }
-        });
 
-        installClose.addEventListener('click', () => {
-            installModal.classList.remove('active');
-        });
+            let deferredPrompt;
 
-        installModal.addEventListener('click', (e) => {
-            if(e.target === installModal) installModal.classList.remove('active');
+            if ('serviceWorker' in navigator) {
+                navigator.serviceWorker.register('sw.js').catch(err => console.log('SW setup failed', err));
+            }
+
+            window.addEventListener('beforeinstallprompt', (e) => {
+                e.preventDefault();
+                deferredPrompt = e;
+            });
+
+            installBtn.addEventListener('click', () => {
+                if (deferredPrompt) {
+                    deferredPrompt.prompt();
+                    deferredPrompt.userChoice.then((choiceResult) => {
+                        if (choiceResult.outcome === 'accepted') {
+                            console.log('User accepted the install prompt');
+                        }
+                        deferredPrompt = null;
+                    });
+                } else {
+                    // Show manual instructions
+                    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+                    const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+                    
+                    if (isIOS && isSafari) {
+                        installDesc.innerHTML = "To install this app, tap the <span class='install-icon'>Share</span> icon down below, then select <span class='install-icon'>Add to Home Screen</span>.";
+                    } else {
+                        installDesc.innerHTML = "To install this app, tap the browser's menu <span class='install-icon'>⋮</span> and select <span class='install-icon'>Add to Home Screen</span> or <span class='install-icon'>Install App</span>.";
+                    }
+                    
+                    installModal.classList.add('active');
+                }
+            });
+
+            installClose.addEventListener('click', () => {
+                installModal.classList.remove('active');
+            });
+
+            installModal.addEventListener('click', (e) => {
+                if(e.target === installModal) installModal.classList.remove('active');
+            });
         });
 
     })();
