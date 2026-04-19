@@ -1059,6 +1059,10 @@
         <button class="font-btn" id="font-reset" aria-label="Reset font size" title="Reset Font">A</button>
         <button class="font-btn" id="font-increase" aria-label="Increase font size" title="Increase Font">A+</button>
     </div>
+    <div class="global-controls__divider" id="install-divider" style="display:none;"></div>
+    <div class="global-controls__section">
+        <button class="font-btn" id="install-btn" aria-label="Install App" title="Install App" style="display:none;">INSTALL</button>
+    </div>
 </div>
 
 <div class="page-wrapper">
@@ -1538,10 +1542,53 @@
         // Initialize visibility
         setMode(currentMode);
 
-        // --- PWA Service Worker ---
+        // --- PWA Custom Install Flow ---
+        const installBtn = document.getElementById('install-btn');
+        const installDiv = document.getElementById('install-divider');
+        let deferredPrompt;
+
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('sw.js').catch(err => console.log('SW setup failed', err));
         }
+
+        window.addEventListener('beforeinstallprompt', (e) => {
+            // Prevent the mini-infobar from appearing on mobile
+            e.preventDefault();
+            // Stash the event so it can be triggered later.
+            deferredPrompt = e;
+            // Update UI to notify the user they can install the PWA
+            if (installBtn && installDiv) {
+                installBtn.style.display = 'inline-block';
+                installDiv.style.display = 'block';
+            }
+        });
+
+        if (installBtn) {
+            installBtn.addEventListener('click', async () => {
+                if (!deferredPrompt) return;
+                // Show the native install prompt
+                deferredPrompt.prompt();
+                // Wait for the user to respond to the prompt
+                const { outcome } = await deferredPrompt.userChoice;
+                if (outcome === 'accepted') {
+                    console.log('User accepted the install prompt');
+                }
+                // We've used the prompt, and can't use it again, discard it
+                deferredPrompt = null;
+                installBtn.style.display = 'none';
+                installDiv.style.display = 'none';
+            });
+        }
+
+        window.addEventListener('appinstalled', () => {
+            // Hide the app-provided install promotion
+            if (installBtn && installDiv) {
+                installBtn.style.display = 'none';
+                installDiv.style.display = 'none';
+            }
+            deferredPrompt = null;
+            console.log('PWA was installed');
+        });
 
     })();
 </script>
