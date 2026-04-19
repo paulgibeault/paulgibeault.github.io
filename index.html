@@ -1047,19 +1047,27 @@
         #game-iframe {
             flex-grow: 1; width: 100%; height: 100%; border: none; background: #000;
         }
+        .game-topbar {
+            width: 100%; height: 40px; background: rgba(10, 10, 25, 0.85);
+            border-bottom: 1px solid var(--field-gold); display: flex;
+            align-items: center; justify-content: space-between; padding: 0 16px;
+            box-sizing: border-box; flex-shrink: 0; z-index: 3001;
+        }
+        .game-topbar__title {
+            font-family: var(--font-display); color: var(--field-gold);
+            font-size: 1rem; letter-spacing: 2px; text-transform: uppercase; opacity: 0.8;
+            margin: 0; padding: 0;
+        }
         .quit-btn {
-            position: absolute; top: 16px; right: 16px; z-index: 3001;
-            background: rgba(10, 10, 25, 0.85); border: 1px solid var(--field-gold);
-            color: var(--snow-white); padding: 8px 12px; border-radius: 6px;
-            font-family: var(--font-display); font-size: 0.85rem; cursor: pointer;
-            backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px);
-            transition: all 0.2s ease; box-shadow: 0 4px 15px rgba(0,0,0,0.5);
-            display: flex; align-items: center; justify-content: center;
+            background: rgba(0, 0, 0, 0.5); border: 1px solid var(--field-gold);
+            color: var(--snow-white); padding: 4px 10px; border-radius: 4px;
+            font-family: var(--font-display); font-size: 0.8rem; cursor: pointer;
+            transition: all 0.2s ease; display: flex; align-items: center; justify-content: center;
         }
         .quit-btn:hover {
-            background: var(--field-gold); color: #000; transform: translateY(-2px);
+            background: var(--field-gold); color: #000;
         }
-        .quit-btn__icon { font-size: 1.1rem; line-height: 1; }
+        .quit-btn__icon { font-size: 1rem; line-height: 1; margin-top: 1px; }
     </style>
 </head>
 <body>
@@ -1386,9 +1394,12 @@
 
     <!-- ========== GAME VIEW ========== -->
     <div id="view-game" class="app-mode hidden">
-        <button class="quit-btn" id="quit-game-btn" aria-label="Quit Game" title="Return to Launcher">
-            <span class="quit-btn__icon">✕</span>
-        </button>
+        <div class="game-topbar">
+            <h2 class="game-topbar__title">Paul's Arcade</h2>
+            <button class="quit-btn" id="quit-game-btn" aria-label="Quit Game" title="Return to Launcher">
+                <span class="quit-btn__icon">✕</span>
+            </button>
+        </div>
         <iframe id="game-iframe" src="about:blank" allowfullscreen></iframe>
     </div>
 
