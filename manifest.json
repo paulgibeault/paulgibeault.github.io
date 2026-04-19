@@ -1,0 +1,16 @@
+{
+  "name": "Paul's Arcade Launcher",
+  "short_name": "Paul's Arcade",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#1a1a2e",
+  "theme_color": "#1a1a2e",
+  "description": "Portfolio of Paul Gibeault — browser games, open source tools, and creative projects.",
+  "icons": [
+    {
+      "src": "images/pi-game.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

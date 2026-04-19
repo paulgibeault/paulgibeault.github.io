@@ -20,6 +20,12 @@
     <meta property="og:description" content="Browser games, open source tools, and creative projects by Paul Gibeault.">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://paulgibeault.github.io/">
+    <link rel="manifest" href="manifest.json">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Paul's Arcade">
+    <link rel="apple-touch-icon" href="images/pi-game.png">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@500;700;900&family=Press+Start+2P&display=swap" rel="stylesheet">
@@ -1030,6 +1036,41 @@
                 opacity: 0.7; /* Make slightly more visible on mobile */
             }
         }
+        /* ---- INSTALL MODAL ---- */
+        .install-modal {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(10, 10, 25, 0.94);
+            z-index: 2000;
+            display: flex; align-items: center; justify-content: center;
+            opacity: 0; visibility: hidden;
+            transition: opacity 0.35s ease, visibility 0.35s ease;
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+        }
+        .install-modal.active { opacity: 1; visibility: visible; }
+        .install-card {
+            background: var(--card-bg);
+            border: 2px solid var(--field-gold);
+            border-radius: 12px;
+            max-width: 400px; width: 90%;
+            padding: 24px; text-align: center;
+            transform: translateY(30px);
+            transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+            box-shadow: 0 24px 80px rgba(0,0,0,0.7), 0 0 50px var(--field-gold-dim);
+            position: relative;
+        }
+        .install-modal.active .install-card { transform: translateY(0); }
+        .install-modal__close {
+            position: absolute; top: 12px; right: 12px;
+            background: transparent; border: none; color: var(--field-gold);
+            font-size: 1.5rem; cursor: pointer; opacity: 0.7;
+            transition: opacity 0.2s; font-family: var(--font-body); line-height: 1;
+        }
+        .install-modal__close:hover { opacity: 1; }
+        .install-modal h3 { font-family: var(--font-display); color: var(--snow-white); margin-bottom: 12px; letter-spacing: 1px; }
+        .install-modal p { color: var(--text-secondary); font-size: 0.95rem; margin-bottom: 16px; line-height: 1.5; }
+        .install-modal .install-icon { display: inline-block; background: rgba(255,255,255,0.1); padding: 4px 8px; border-radius: 4px; color: var(--snow-white); font-weight: 500; font-size: 0.85rem; margin: 0 2px; border: 1px solid rgba(255,255,255,0.2); }
     </style>
 </head>
 <body>
@@ -1052,6 +1093,10 @@
         <button class="font-btn" id="font-decrease" aria-label="Decrease font size" title="Decrease Font">A-</button>
         <button class="font-btn" id="font-reset" aria-label="Reset font size" title="Reset Font">A</button>
         <button class="font-btn" id="font-increase" aria-label="Increase font size" title="Increase Font">A+</button>
+    </div>
+    <div class="global-controls__divider"></div>
+    <div class="global-controls__section">
+        <button class="font-btn" id="install-btn" aria-label="Install App" title="Install App">INSTALL</button>
     </div>
 </div>
 
@@ -1535,8 +1580,66 @@
         
         // Initialize visibility
         setMode(currentMode);
+
+        // --- PWA Installation Logic ---
+        const installBtn = document.getElementById('install-btn');
+        const installModal = document.getElementById('install-modal');
+        const installClose = document.getElementById('install-close');
+        const installDesc = document.getElementById('install-desc');
+        
+        let deferredPrompt;
+
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('sw.js').catch(err => console.log('SW setup failed', err));
+        }
+
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            deferredPrompt = e;
+        });
+
+        installBtn.addEventListener('click', () => {
+            if (deferredPrompt) {
+                deferredPrompt.prompt();
+                deferredPrompt.userChoice.then((choiceResult) => {
+                    if (choiceResult.outcome === 'accepted') {
+                        console.log('User accepted the install prompt');
+                    }
+                    deferredPrompt = null;
+                });
+            } else {
+                // Show manual instructions
+                const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+                const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+                
+                if (isIOS && isSafari) {
+                    installDesc.innerHTML = "To install this app, tap the <span class='install-icon'>Share</span> icon down below, then select <span class='install-icon'>Add to Home Screen</span>.";
+                } else {
+                    installDesc.innerHTML = "To install this app, tap the browser's menu <span class='install-icon'>⋮</span> and select <span class='install-icon'>Add to Home Screen</span> or <span class='install-icon'>Install App</span>.";
+                }
+                
+                installModal.classList.add('active');
+            }
+        });
+
+        installClose.addEventListener('click', () => {
+            installModal.classList.remove('active');
+        });
+
+        installModal.addEventListener('click', (e) => {
+            if(e.target === installModal) installModal.classList.remove('active');
+        });
+
     })();
 </script>
+
+<div id="install-modal" class="install-modal" aria-hidden="true" role="dialog" aria-modal="true">
+    <div class="install-card">
+        <button class="install-modal__close" id="install-close" aria-label="Close modal">×</button>
+        <h3>Install Arcade</h3>
+        <p id="install-desc"></p>
+    </div>
+</div>
 
 </body>
 </html>
