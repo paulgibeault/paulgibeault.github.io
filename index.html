@@ -182,7 +182,7 @@
 
         .launcher-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
             gap: 48px;
             width: 100%;
             max-width: 1000px;
@@ -267,8 +267,8 @@
 
         @media (max-width: 768px) {
             .launcher-grid {
-                grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-                gap: 28px;
+                grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+                gap: 32px;
             }
             #view-launcher {
                 padding: 40px 24px;
@@ -277,11 +277,11 @@
             .launcher-btn__subtitle { font-size: 0.6rem; }
         }
 
-        @media (max-width: 480px) {
+        @media (max-width: 600px) {
             .launcher-grid {
                 grid-template-columns: 1fr;
                 gap: 24px;
-                max-width: 320px;
+                max-width: 380px;
             }
             #view-launcher {
                 padding: 30px 16px;
