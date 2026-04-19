@@ -13,7 +13,7 @@
         })();
     </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Paul Gibeault — Software Engineer, Brewer, Patriot</title>
+    <title>Paul Gibeault — Software Engineer, Snowboarder, Patriot</title>
     <meta name="description" content="Portfolio of Paul Gibeault — browser games, open source tools, and creative projects. Play Pi Game, Silicon Syndicate, HecknSic, Cozy Solitaire, and more.">
     <meta name="author" content="Paul Gibeault">
     <meta property="og:title" content="Paul Gibeault — Portfolio">
@@ -182,8 +182,8 @@
 
         .launcher-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: 48px;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 24px;
             width: 100%;
             max-width: 1000px;
             margin: 0 auto;
@@ -220,6 +220,7 @@
             width: 100%;
             aspect-ratio: 16 / 10;
             border-bottom: 1px solid var(--card-border);
+            flex-shrink: 0;
         }
 
         .launcher-btn__image {
@@ -247,7 +248,7 @@
         .launcher-btn__name {
             font-family: var(--font-display);
             font-weight: 700;
-            font-size: 1.1rem;
+            font-size: 1rem;
             color: var(--snow-white);
             margin-bottom: 4px;
             letter-spacing: 1px;
@@ -267,26 +268,40 @@
 
         @media (max-width: 768px) {
             .launcher-grid {
-                grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-                gap: 32px;
+                grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+                gap: 16px;
             }
             #view-launcher {
-                padding: 40px 24px;
+                padding: 40px 16px;
             }
             .launcher-btn__name { font-size: 0.95rem; }
             .launcher-btn__subtitle { font-size: 0.6rem; }
         }
 
-        @media (max-width: 600px) {
+        @media (max-width: 480px) {
             .launcher-grid {
                 grid-template-columns: 1fr;
-                gap: 24px;
-                max-width: 380px;
+                gap: 12px;
             }
             #view-launcher {
-                padding: 30px 16px;
+                padding: 24px 16px;
             }
-            .launcher-btn__name { font-size: 1.1rem; }
+            .launcher-btn {
+                flex-direction: row;
+                align-items: center;
+                text-align: left;
+            }
+            .launcher-btn__image-wrap {
+                width: 80px;
+                aspect-ratio: 1 / 1;
+                border-bottom: none;
+                border-right: 1px solid var(--card-border);
+            }
+            .launcher-btn__body {
+                padding: 12px 16px;
+                align-items: flex-start;
+            }
+            .launcher-btn__name { font-size: 1rem; margin-bottom: 2px; }
             .launcher-btn__subtitle { font-size: 0.7rem; }
         }
 
@@ -1060,13 +1075,7 @@
         </svg>
 
         <h1 class="hero__name">Paul <span>Gibeault</span></h1>
-        <p class="hero__tagline">Software Engineer · Brewer · Patriot</p>
-        <p class="hero__org">Micron Technology Inc. · Boise, ID</p>
-
-        <nav class="hero__links" aria-label="Social links">
-            <a href="https://github.com/paulgibeault" class="hero__link" target="_blank" rel="noopener" id="link-github">GitHub</a>
-            <a href="https://linkedin.com/in/paulgibeault" class="hero__link" target="_blank" rel="noopener" id="link-linkedin">LinkedIn</a>
-        </nav>
+        <p class="hero__tagline"><a href="https://linkedin.com/in/paulgibeault" target="_blank" rel="noopener" style="color: inherit; text-decoration: underline;">Software Engineer</a> · <a href="https://www.bogusbasin.org/" target="_blank" rel="noopener" style="color: inherit; text-decoration: underline;">Snowboarder</a> · <a href="https://www.archives.gov/founding-docs/constitution-transcript" target="_blank" rel="noopener" style="color: inherit; text-decoration: underline;">Patriot</a></p>
 
         <div class="hero__divider" aria-hidden="true"></div>
     </header>
@@ -1295,10 +1304,13 @@
                   fill="#16162a"/>
         </svg>
 
+        <nav class="hero__links" aria-label="Social links" style="margin-bottom: 20px;">
+            <a href="https://github.com/paulgibeault" class="hero__link" target="_blank" rel="noopener" id="link-github">GitHub</a>
+            <a href="https://linkedin.com/in/paulgibeault" class="hero__link" target="_blank" rel="noopener" id="link-linkedin">LinkedIn</a>
+        </nav>
         <p class="footer__text">
-            © 2026 Paul Gibeault ·
-            <a href="https://github.com/paulgibeault" target="_blank" rel="noopener">GitHub</a> ·
-            <a href="https://linkedin.com/in/paulgibeault" target="_blank" rel="noopener">LinkedIn</a>
+            © 2026 Paul Gibeault<br><br>
+            <span style="opacity: 0.7;">Note: All of this was AI Generated.</span>
         </p>
     </footer>
     </div> <!-- end view-portfolio -->
