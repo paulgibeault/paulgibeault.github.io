@@ -1402,7 +1402,7 @@
                 <span class="quit-btn__icon">✕</span>
             </button>
         </div>
-        <iframe id="game-iframe" src="about:blank" sandbox="allow-scripts allow-same-origin" allowfullscreen></iframe>
+        <iframe id="game-iframe" src="about:blank" sandbox="allow-scripts" allowfullscreen></iframe>
     </div>
 
 </div>
@@ -1624,6 +1624,130 @@
             gameIframe.src = 'about:blank';
             globalControls.style.display = 'flex';
             setMode('launcher');
+        });
+    })();
+
+    // ==========================================
+    // LOCALSTORAGE PROXY — postMessage bridge for sandboxed game iframes
+    // ==========================================
+    // Game iframes are sandboxed without `allow-same-origin`, so they run
+    // in an opaque origin and cannot touch their own localStorage. This
+    // proxy lets them persist state through the launcher.
+    //
+    // Protocol — request (iframe -> launcher):
+    //   { type: 'ls-proxy-request', requestId: string,
+    //     op: 'getItem'|'setItem'|'removeItem'|'clear'|'key'|'length',
+    //     key?: string, value?: string, index?: number }
+    //
+    // Response (launcher -> iframe):
+    //   { type: 'ls-proxy-response', requestId: string, ok: boolean,
+    //     value?: string|null, error?: string }
+    //
+    // Storage is namespaced by the first path segment of the iframe src
+    // (e.g. "pi-game", "cozy-solitaire") so games cannot read each
+    // other's data or the launcher's own keys. Stored key shape:
+    //   __game_proxy__/<namespace>/<key>
+    (function gameStorageProxy() {
+        const gameIframe = document.getElementById('game-iframe');
+        if (!gameIframe) return;
+
+        const KEY_PREFIX = '__game_proxy__/';
+
+        function namespaceFor(src) {
+            try {
+                const u = new URL(src, window.location.href);
+                if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+                const seg = u.pathname.replace(/^\/+|\/+$/g, '').split('/')[0];
+                return seg || null;
+            } catch {
+                return null;
+            }
+        }
+
+        function fullKey(ns, key) { return KEY_PREFIX + ns + '/' + key; }
+
+        function nsKeys(ns) {
+            const prefix = KEY_PREFIX + ns + '/';
+            const out = [];
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                if (k && k.startsWith(prefix)) out.push(k);
+            }
+            return out;
+        }
+
+        function handle(op, data, ns) {
+            switch (op) {
+                case 'getItem':
+                    if (typeof data.key !== 'string') throw new Error('key required');
+                    return { value: localStorage.getItem(fullKey(ns, data.key)) };
+                case 'setItem':
+                    if (typeof data.key !== 'string' || typeof data.value !== 'string') {
+                        throw new Error('key and value required');
+                    }
+                    localStorage.setItem(fullKey(ns, data.key), data.value);
+                    return {};
+                case 'removeItem':
+                    if (typeof data.key !== 'string') throw new Error('key required');
+                    localStorage.removeItem(fullKey(ns, data.key));
+                    return {};
+                case 'clear':
+                    nsKeys(ns).forEach(k => localStorage.removeItem(k));
+                    return {};
+                case 'key': {
+                    if (typeof data.index !== 'number') throw new Error('index required');
+                    const stripped = nsKeys(ns).map(k => k.slice((KEY_PREFIX + ns + '/').length));
+                    return { value: stripped[data.index] !== undefined ? stripped[data.index] : null };
+                }
+                case 'length':
+                    return { value: nsKeys(ns).length };
+                case 'dump': {
+                    const prefix = KEY_PREFIX + ns + '/';
+                    const out = {};
+                    for (let i = 0; i < localStorage.length; i++) {
+                        const k = localStorage.key(i);
+                        if (k && k.startsWith(prefix)) out[k.slice(prefix.length)] = localStorage.getItem(k);
+                    }
+                    return { data: out };
+                }
+                default:
+                    throw new Error('unsupported op: ' + op);
+            }
+        }
+
+        window.addEventListener('message', (event) => {
+            if (event.source !== gameIframe.contentWindow) return;
+            if (event.origin !== 'null') return;
+            const data = event.data;
+            if (!data || data.type !== 'ls-proxy-request') return;
+            if (typeof data.requestId !== 'string') return;
+
+            const ns = namespaceFor(gameIframe.getAttribute('src') || '');
+            if (!ns) {
+                event.source.postMessage({
+                    type: 'ls-proxy-response',
+                    requestId: data.requestId,
+                    ok: false,
+                    error: 'no active game'
+                }, '*');
+                return;
+            }
+
+            try {
+                const result = handle(data.op, data, ns);
+                event.source.postMessage(Object.assign({
+                    type: 'ls-proxy-response',
+                    requestId: data.requestId,
+                    ok: true
+                }, result), '*');
+            } catch (err) {
+                event.source.postMessage({
+                    type: 'ls-proxy-response',
+                    requestId: data.requestId,
+                    ok: false,
+                    error: String(err && err.message || err)
+                }, '*');
+            }
         });
     })();
 
