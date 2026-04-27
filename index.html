@@ -1068,6 +1068,17 @@
             background: var(--field-gold); color: #000;
         }
         .quit-btn__icon { font-size: 1rem; line-height: 1; margin-top: 1px; }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation-duration: 0.001s !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.001s !important;
+                scroll-behavior: auto !important;
+            }
+            #starfield { display: none; }
+            .project-card { opacity: 1 !important; transform: none !important; }
+        }
     </style>
 </head>
 <body>
@@ -1427,6 +1438,7 @@
     // STARFIELD — Dense animated twinkling stars
     // ==========================================
     (function createStarfield() {
+        if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
         const container = document.getElementById('starfield');
         const count = 150;
         const colorClasses = ['', 'star--warm', 'star--cool'];
