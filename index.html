@@ -1044,9 +1044,14 @@
             display: flex; flex-direction: column;
         }
         #view-game.hidden { display: none !important; }
-        #game-iframe {
-            flex-grow: 1; width: 100%; height: 100%; border: none; background: #000;
+        #iframe-host {
+            flex-grow: 1; position: relative; width: 100%; background: #000;
         }
+        #iframe-host iframe {
+            position: absolute; inset: 0;
+            width: 100%; height: 100%; border: none; background: #000;
+        }
+        #iframe-host iframe[hidden] { display: none !important; }
         .game-topbar {
             width: 100%; height: 40px; background: rgba(10, 10, 25, 0.85);
             border-bottom: 1px solid var(--field-gold); display: flex;
@@ -1079,6 +1084,56 @@
             #starfield { display: none; }
             .project-card { opacity: 1 !important; transform: none !important; }
         }
+
+        /* ---- LAUNCHER ACTION BAR ---- */
+        .launcher-actions {
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            margin: 0 auto 24px;
+            max-width: 1000px;
+            width: 100%;
+            padding: 0;
+        }
+        .launcher-actions .font-btn {
+            border: 1px solid var(--card-border);
+            border-radius: 4px;
+            color: var(--field-gold);
+            font-size: 0.7rem;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+        .launcher-actions .font-btn:hover {
+            background: var(--field-gold-dim);
+            border-color: var(--field-gold);
+        }
+        #view-launcher {
+            flex-direction: column;
+            justify-content: flex-start;
+        }
+        .launcher-toast {
+            position: fixed;
+            top: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 12px 20px;
+            background: var(--card-bg);
+            border: 1px solid var(--field-gold);
+            border-radius: 6px;
+            color: var(--snow-white);
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            z-index: 4000;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.3s ease;
+            max-width: 90vw;
+            text-align: center;
+        }
+        .launcher-toast.visible { opacity: 1; }
+        .launcher-toast.error { border-color: var(--tactical-red); }
     </style>
 </head>
 <body>
@@ -1372,29 +1427,34 @@
     <!-- ========== GAME LAUNCHER ========== -->
     <!-- SYNC: Game list is duplicated in #games section above. Update both when adding games. -->
     <div id="view-launcher" class="app-mode hidden">
+        <div class="launcher-actions" aria-label="Save data controls">
+            <button class="font-btn" id="btn-save" title="Export all arcade save data to a JSON file">SAVE TO FILE</button>
+            <button class="font-btn" id="btn-load" title="Import arcade save data from a JSON file">LOAD FROM FILE</button>
+            <input type="file" id="file-load" accept="application/json,.json" style="display:none">
+        </div>
         <div class="launcher-grid" id="launcher-grid-container">
-            <a href="https://paulgibeault.github.io/pi-game/" class="launcher-btn" style="animation-delay: 0.0s">
+            <a href="https://paulgibeault.github.io/pi-game/" class="launcher-btn" data-game-id="pi-game" style="animation-delay: 0.0s">
                 <div class="launcher-btn__image-wrap"><img class="launcher-btn__image" src="images/pi-game.png" alt="Pi Game"></div>
                 <div class="launcher-btn__body">
                     <h3 class="launcher-btn__name">Pi Game</h3>
                     <p class="launcher-btn__subtitle">Memorization</p>
                 </div>
             </a>
-            <a href="https://paulgibeault.github.io/si-syn/" class="launcher-btn" style="animation-delay: 0.1s">
+            <a href="https://paulgibeault.github.io/si-syn/" class="launcher-btn" data-game-id="si-syn" style="animation-delay: 0.1s">
                 <div class="launcher-btn__image-wrap"><img class="launcher-btn__image" src="images/si-syn.png" alt="Silicon Syndicate"></div>
                 <div class="launcher-btn__body">
                     <h3 class="launcher-btn__name">Si Syndicate</h3>
                     <p class="launcher-btn__subtitle">Assembly Logic</p>
                 </div>
             </a>
-            <a href="https://paulgibeault.github.io/hecknsic/" class="launcher-btn" style="animation-delay: 0.2s">
+            <a href="https://paulgibeault.github.io/hecknsic/" class="launcher-btn" data-game-id="hecknsic" style="animation-delay: 0.2s">
                 <div class="launcher-btn__image-wrap"><img class="launcher-btn__image" src="images/hecknsic.png" alt="HecknSic"></div>
                 <div class="launcher-btn__body">
                     <h3 class="launcher-btn__name">HecknSic</h3>
                     <p class="launcher-btn__subtitle">Hex Puzzle</p>
                 </div>
             </a>
-            <a href="https://paulgibeault.github.io/cozy-solitaire/" class="launcher-btn" style="animation-delay: 0.3s">
+            <a href="https://paulgibeault.github.io/cozy-solitaire/" class="launcher-btn" data-game-id="cozy-solitaire" style="animation-delay: 0.3s">
                 <div class="launcher-btn__image-wrap"><img class="launcher-btn__image" src="images/cozy-solitaire.png" alt="Cozy Solitaire"></div>
                 <div class="launcher-btn__body">
                     <h3 class="launcher-btn__name">Solitaire</h3>
@@ -1404,16 +1464,17 @@
 
         </div>
     </div>
+    <div class="launcher-toast" id="launcher-toast" role="status" aria-live="polite"></div>
 
     <!-- ========== GAME VIEW ========== -->
     <div id="view-game" class="app-mode hidden">
         <div class="game-topbar">
-            <h2 class="game-topbar__title">Paul's Arcade</h2>
+            <h2 class="game-topbar__title" id="game-topbar-title">Paul's Arcade</h2>
             <button class="quit-btn" id="quit-game-btn" aria-label="Quit Game" title="Return to Launcher">
                 <span class="quit-btn__icon">✕</span>
             </button>
         </div>
-        <iframe id="game-iframe" src="about:blank" sandbox="allow-scripts" allowfullscreen></iframe>
+        <div id="iframe-host"></div>
     </div>
 
 </div>
@@ -1573,6 +1634,8 @@
     // ==========================================
     // APP CONTROLLER — Mode switching & game view
     // ==========================================
+    // Reused everywhere — exposed on window for the platform controller below.
+    window.__arcade = window.__arcade || {};
     (function appController() {
         const d = document.documentElement;
 
@@ -1580,18 +1643,16 @@
         const viewPortfolio = document.getElementById('view-portfolio');
         const viewLauncher = document.getElementById('view-launcher');
         const viewGame = document.getElementById('view-game');
-        const gameIframe = document.getElementById('game-iframe');
         const quitGameBtn = document.getElementById('quit-game-btn');
         const globalControls = document.querySelector('.global-controls');
-        const launcherBtns = document.querySelectorAll('.launcher-btn');
-        
+
         let currentMode = localStorage.getItem('appMode') || 'portfolio';
         modeSelect.value = currentMode;
-        
+
         function setMode(newMode) {
             currentMode = newMode;
             localStorage.setItem('appMode', currentMode);
-            
+
             d.setAttribute('data-theme', currentMode);
             d.classList.remove('mode-portfolio', 'mode-launcher');
             d.classList.add('mode-' + currentMode);
@@ -1604,38 +1665,449 @@
                 viewPortfolio.classList.remove('hidden');
             }
 
-            // Tear down game view on mode switch
+            // Hide game view on mode switch — iframe pool stays mounted.
             if (!viewGame.classList.contains('hidden')) {
-                viewGame.classList.add('hidden');
-                gameIframe.src = 'about:blank';
-                globalControls.style.display = 'flex';
+                window.__arcade.hideGameView();
             }
         }
-        
+
         modeSelect.addEventListener('change', (e) => {
             setMode(e.target.value);
             window.scrollTo(0, 0);
         });
-        
+
         setMode(currentMode);
 
-        // --- Game Launcher ---
-        launcherBtns.forEach(btn => {
+        quitGameBtn.addEventListener('click', () => {
+            window.__arcade.hideGameView();
+            setMode('launcher');
+        });
+
+        window.__arcade.setMode = setMode;
+        window.__arcade.viewGame = viewGame;
+        window.__arcade.viewPortfolio = viewPortfolio;
+        window.__arcade.viewLauncher = viewLauncher;
+        window.__arcade.globalControls = globalControls;
+    })();
+
+    // ==========================================
+    // PLATFORM CONTROLLER — iframe pool, postMessage protocol, save/load
+    // ==========================================
+    (function platformController() {
+        const KEY_PREFIX = 'arcade.v1.';
+        // Anything outside this namespace is rejected on import, so an imported
+        // file can never poison non-arcade keys on the origin's localStorage.
+        const KEY_RE = /^arcade\.v1\.[a-z0-9_-]+(\.[a-zA-Z0-9_.-]+)+$/;
+        const SAVE_FORMAT = 'pauls-arcade-save';
+        const SAVE_SCHEMA = 1;
+        const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
+        const PROBE_KEY = KEY_PREFIX + '_meta.probe';
+
+        const launcherBtns = document.querySelectorAll('.launcher-btn');
+        const iframeHost = document.getElementById('iframe-host');
+        const topbarTitle = document.getElementById('game-topbar-title');
+        const btnSave = document.getElementById('btn-save');
+        const btnLoad = document.getElementById('btn-load');
+        const fileLoad = document.getElementById('file-load');
+        const toast = document.getElementById('launcher-toast');
+        const viewGame = window.__arcade.viewGame;
+        const viewPortfolio = window.__arcade.viewPortfolio;
+        const viewLauncher = window.__arcade.viewLauncher;
+        const globalControls = window.__arcade.globalControls;
+
+        // ---- iframe pool ----
+        const pool = new Map(); // gameId -> { iframe, name }
+        let activeGameId = null;
+
+        function ensureIframe(gameId, src, name) {
+            let entry = pool.get(gameId);
+            if (entry) return entry;
+            const iframe = document.createElement('iframe');
+            iframe.src = src;
+            iframe.dataset.gameId = gameId;
+            iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+            iframe.setAttribute('allowfullscreen', '');
+            iframe.setAttribute('title', name);
+            iframe.hidden = true;
+            iframeHost.appendChild(iframe);
+            entry = { iframe, name };
+            pool.set(gameId, entry);
+            return entry;
+        }
+
+        function showGame(gameId, src, name) {
+            const entry = ensureIframe(gameId, src, name);
+            for (const e of pool.values()) e.iframe.hidden = true;
+            entry.iframe.hidden = false;
+            activeGameId = gameId;
+            topbarTitle.textContent = name || "Paul's Arcade";
+
+            viewPortfolio.classList.add('hidden');
+            viewLauncher.classList.add('hidden');
+            globalControls.style.display = 'none';
+            viewGame.classList.remove('hidden');
+
+            // Defer focus so the iframe receives keyboard input.
+            setTimeout(() => { try { entry.iframe.focus(); } catch (e) {} }, 0);
+        }
+
+        function hideGameView() {
+            viewGame.classList.add('hidden');
+            globalControls.style.display = 'flex';
+            // Iframes stay mounted (hidden) — instant relaunch + state preserved.
+            for (const e of pool.values()) e.iframe.hidden = true;
+            activeGameId = null;
+        }
+
+        window.__arcade.hideGameView = hideGameView;
+
+        launcherBtns.forEach((btn) => {
             btn.addEventListener('click', (e) => {
                 e.preventDefault();
-                gameIframe.src = btn.getAttribute('href');
-                viewPortfolio.classList.add('hidden');
-                viewLauncher.classList.add('hidden');
-                globalControls.style.display = 'none';
-                viewGame.classList.remove('hidden');
+                const gameId = btn.dataset.gameId;
+                const href = btn.getAttribute('href');
+                const name = btn.querySelector('.launcher-btn__name').textContent.trim();
+                if (!gameId || !href) return;
+                showGame(gameId, href, name);
             });
         });
 
-        quitGameBtn.addEventListener('click', () => {
-            viewGame.classList.add('hidden');
-            gameIframe.src = 'about:blank';
-            globalControls.style.display = 'flex';
-            setMode('launcher');
+        // ---- postMessage protocol ----
+        function findGameIdForSource(src) {
+            for (const [gid, entry] of pool) {
+                if (entry.iframe.contentWindow === src) return gid;
+            }
+            return null;
+        }
+
+        function postToIframe(gameId, msg) {
+            const entry = pool.get(gameId);
+            if (!entry || !entry.iframe.contentWindow) return;
+            entry.iframe.contentWindow.postMessage(msg, window.location.origin);
+        }
+
+        function broadcast(msg) {
+            for (const [gid] of pool) postToIframe(gid, msg);
+        }
+
+        // localStorage proxy: hecknsic (and potentially other games) install a
+        // postMessage-backed shim that overrides window.localStorage when running
+        // in any iframe and blocks module init on a 'dump' reply. Without this
+        // handler the game hangs forever after rendering its static HUD.
+        // Per-game keys live under arcade.v1.<gameId>.ls.<key> so they ride
+        // along with the launcher's save/load bundling and can't collide.
+        function lsPrefix(gameId) { return KEY_PREFIX + gameId + '.ls.'; }
+        function handleLsProxyRequest(gameId, data, source, origin) {
+            const requestId = data.requestId;
+            const reply = { type: 'ls-proxy-response', requestId, ok: false };
+            try {
+                const prefix = lsPrefix(gameId);
+                switch (data.op) {
+                    case 'dump': {
+                        const dump = {};
+                        for (let i = 0; i < localStorage.length; i++) {
+                            const k = localStorage.key(i);
+                            if (k && k.indexOf(prefix) === 0) {
+                                dump[k.slice(prefix.length)] = localStorage.getItem(k);
+                            }
+                        }
+                        reply.ok = true;
+                        reply.data = dump;
+                        break;
+                    }
+                    case 'setItem':
+                        if (typeof data.key === 'string') {
+                            localStorage.setItem(prefix + data.key, String(data.value));
+                            reply.ok = true;
+                        }
+                        break;
+                    case 'removeItem':
+                        if (typeof data.key === 'string') {
+                            localStorage.removeItem(prefix + data.key);
+                            reply.ok = true;
+                        }
+                        break;
+                    case 'clear': {
+                        // Scoped clear — only touches this game's namespace.
+                        const toRemove = [];
+                        for (let i = 0; i < localStorage.length; i++) {
+                            const k = localStorage.key(i);
+                            if (k && k.indexOf(prefix) === 0) toRemove.push(k);
+                        }
+                        for (const k of toRemove) localStorage.removeItem(k);
+                        reply.ok = true;
+                        break;
+                    }
+                }
+            } catch (err) { /* leave ok:false */ }
+            try { source.postMessage(reply, origin); } catch (err) {}
+        }
+
+        window.addEventListener('message', (e) => {
+            // Source check is the load-bearing guard: only iframes we mounted
+            // via ensureIframe can match. Origin may be cross-origin in local
+            // dev (parent on localhost, game on github.io) so we don't gate on it.
+            const gameId = findGameIdForSource(e.source);
+            if (!gameId) return;
+            const data = e.data;
+            if (!data || typeof data !== 'object') return;
+            const t = data.type;
+            if (typeof t !== 'string') return;
+
+            if (t === 'ls-proxy-request') {
+                handleLsProxyRequest(gameId, data, e.source, e.origin);
+                return;
+            }
+
+            if (t.indexOf('arcade:') !== 0) return;
+            switch (t) {
+                case 'arcade:hello':
+                    // Announce ourselves. peerStatus is 'idle' — peer transport
+                    // is not yet wired; peer.send currently no-ops in the SDK
+                    // until status becomes 'connected'.
+                    postToIframe(gameId, {
+                        type: 'arcade:welcome',
+                        version: 1,
+                        peerStatus: 'idle'
+                    });
+                    break;
+                case 'arcade:peer.send':
+                    // No transport yet — drop. Hook here when QRCodeP2P lands.
+                    break;
+            }
+        });
+
+        // ---- toast helper ----
+        let toastTimer = null;
+        function showToast(msg, opts) {
+            opts = opts || {};
+            toast.textContent = msg;
+            toast.classList.toggle('error', !!opts.error);
+            toast.classList.add('visible');
+            if (toastTimer) clearTimeout(toastTimer);
+            toastTimer = setTimeout(() => toast.classList.remove('visible'), opts.duration || 3500);
+        }
+
+        // ---- canonical checksum ----
+        async function checksumData(data) {
+            const keys = Object.keys(data).sort();
+            const parts = new Array(keys.length);
+            for (let i = 0; i < keys.length; i++) {
+                parts[i] = JSON.stringify(keys[i]) + ':' + JSON.stringify(data[keys[i]]);
+            }
+            const canonical = '{' + parts.join(',') + '}';
+            const buf = new TextEncoder().encode(canonical);
+            const hash = await crypto.subtle.digest('SHA-256', buf);
+            const bytes = new Uint8Array(hash);
+            let hex = '';
+            for (let i = 0; i < bytes.length; i++) {
+                hex += bytes[i].toString(16).padStart(2, '0');
+            }
+            return 'sha256:' + hex;
+        }
+
+        function collectArcadeKeys() {
+            const out = {};
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                if (!k || !KEY_RE.test(k)) continue;
+                const v = localStorage.getItem(k);
+                if (typeof v === 'string') out[k] = v;
+            }
+            return out;
+        }
+
+        function isoStamp() {
+            return new Date().toISOString().replace(/[:.]/g, '-').replace('Z', '');
+        }
+
+        function downloadJSON(filename, obj) {
+            const json = JSON.stringify(obj, null, 2);
+            const blob = new Blob([json], { type: 'application/json' });
+            try {
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+                return true;
+            } catch (err) {
+                // Fallback: open in a new tab so the user can save manually.
+                try {
+                    const w = window.open();
+                    if (w) {
+                        w.document.body.style.cssText = 'font-family:monospace;white-space:pre;padding:20px;';
+                        w.document.body.textContent = json;
+                        return true;
+                    }
+                } catch (e) {}
+                return false;
+            }
+        }
+
+        async function buildBundle(data) {
+            return {
+                format: SAVE_FORMAT,
+                schemaVersion: SAVE_SCHEMA,
+                exportedAt: new Date().toISOString(),
+                appVersion: '1.0.0',
+                checksum: await checksumData(data),
+                data: data
+            };
+        }
+
+        // ---- save (export) ----
+        async function exportSave() {
+            const data = collectArcadeKeys();
+            const keyCount = Object.keys(data).length;
+            if (keyCount === 0) {
+                showToast('Nothing to save — no arcade.v1.* keys found.', { error: true });
+                return;
+            }
+            let bundle;
+            try {
+                bundle = await buildBundle(data);
+            } catch (err) {
+                showToast('Save failed: could not serialize data.', { error: true });
+                return;
+            }
+            const ok = downloadJSON('pauls-arcade-save-' + isoStamp() + '.json', bundle);
+            if (ok) showToast('Saved ' + keyCount + ' keys to your Downloads folder.');
+            else showToast('Save failed: browser blocked the download.', { error: true });
+        }
+
+        // ---- load (import) ----
+        function quotaProbe() {
+            try {
+                localStorage.setItem(PROBE_KEY, '1');
+                localStorage.removeItem(PROBE_KEY);
+                return true;
+            } catch (e) { return false; }
+        }
+
+        function snapshotKeys(keys) {
+            const snap = {};
+            for (const k of keys) snap[k] = localStorage.getItem(k);
+            return snap;
+        }
+
+        function restoreSnapshot(snap) {
+            for (const k of Object.keys(snap)) {
+                const v = snap[k];
+                try {
+                    if (v === null) localStorage.removeItem(k);
+                    else localStorage.setItem(k, v);
+                } catch (e) { /* best-effort restore */ }
+            }
+        }
+
+        function readFileText(file) {
+            return new Promise((resolve, reject) => {
+                const r = new FileReader();
+                r.onerror = () => reject(new Error('read failed'));
+                r.onabort = () => reject(new Error('read aborted'));
+                r.onload = () => resolve(r.result);
+                r.readAsText(file);
+            });
+        }
+
+        async function importSaveFile(file) {
+            // Gate 1: size
+            if (!file || file.size > MAX_IMPORT_BYTES) {
+                showToast('File rejected: size exceeds 5 MB.', { error: true });
+                return;
+            }
+            // Gate 2: read
+            let text;
+            try { text = await readFileText(file); }
+            catch (e) { showToast('Could not read file.', { error: true }); return; }
+            // Gate 3: parse
+            let parsed;
+            try { parsed = JSON.parse(text); }
+            catch (e) { showToast('Not valid JSON.', { error: true }); return; }
+            // Gate 4: shape
+            if (!parsed || typeof parsed !== 'object'
+                || parsed.format !== SAVE_FORMAT
+                || parsed.schemaVersion !== SAVE_SCHEMA
+                || !parsed.data || typeof parsed.data !== 'object'
+                || Array.isArray(parsed.data)) {
+                showToast('File is not a valid arcade save.', { error: true });
+                return;
+            }
+            // Gate 5: per-key allowlist + value type
+            const cleanData = {};
+            const droppedKeys = [];
+            for (const k of Object.keys(parsed.data)) {
+                if (!KEY_RE.test(k) || typeof parsed.data[k] !== 'string') {
+                    droppedKeys.push(k);
+                    continue;
+                }
+                cleanData[k] = parsed.data[k];
+            }
+            const cleanKeys = Object.keys(cleanData);
+            if (cleanKeys.length === 0) {
+                showToast('Save contained no valid arcade keys.', { error: true });
+                return;
+            }
+            // Gate 6: checksum (over the file's data — we verify what was signed,
+            // not what we filtered, to detect tampering with the original file)
+            let expected;
+            try { expected = await checksumData(parsed.data); }
+            catch (e) { showToast('Could not verify checksum.', { error: true }); return; }
+            if (typeof parsed.checksum !== 'string' || parsed.checksum !== expected) {
+                showToast('Checksum mismatch — file may be corrupt.', { error: true });
+                return;
+            }
+            // Gate 7: confirm with user
+            const summary = 'This will replace ' + cleanKeys.length + ' arcade keys.\n'
+                + (droppedKeys.length ? droppedKeys.length + ' invalid keys will be ignored.\n' : '')
+                + '\nYour current state will be auto-saved to your Downloads folder first.\nContinue?';
+            if (!window.confirm(summary)) return;
+            // Gate 8: auto-backup current state (if non-empty)
+            const currentData = collectArcadeKeys();
+            if (Object.keys(currentData).length > 0) {
+                try {
+                    const backup = await buildBundle(currentData);
+                    const ok = downloadJSON('pauls-arcade-autobackup-' + isoStamp() + '.json', backup);
+                    if (!ok && !window.confirm('Auto-backup download was blocked. Continue without backup?')) {
+                        return;
+                    }
+                } catch (e) {
+                    if (!window.confirm('Auto-backup failed. Continue without backup?')) return;
+                }
+            }
+            // Gate 9: quota probe
+            if (!quotaProbe()) {
+                showToast('localStorage is full — cannot import.', { error: true });
+                return;
+            }
+            // Gate 10: stage + commit. Snapshot keys we will overwrite.
+            const snap = snapshotKeys(cleanKeys);
+            try {
+                for (const k of cleanKeys) {
+                    localStorage.setItem(k, cleanData[k]);
+                }
+            } catch (err) {
+                restoreSnapshot(snap);
+                showToast('Write failed mid-import — prior state restored.', { error: true });
+                return;
+            }
+            // Notify mounted iframes; same-origin storage events also fire
+            // automatically, so listeners catch the change via either path.
+            broadcast({ type: 'arcade:state.replaced' });
+            showToast('Imported ' + cleanKeys.length + ' keys successfully.');
+        }
+
+        btnSave.addEventListener('click', () => { exportSave(); });
+        btnLoad.addEventListener('click', () => { fileLoad.click(); });
+        fileLoad.addEventListener('change', () => {
+            const f = fileLoad.files && fileLoad.files[0];
+            // Reset so picking the same file twice still fires 'change'.
+            fileLoad.value = '';
+            if (f) importSaveFile(f);
         });
     })();
 

@@ -1,0 +1,177 @@
+/* Paul's Arcade SDK — window.Arcade
+ *
+ * Loaded by games at https://paulgibeault.github.io/arcade-sdk.js
+ * Same-origin with the launcher and every game; storage works without a bridge.
+ * The bridge only exists for multiplayer transport and launcher-aware events.
+ *
+ *   Arcade.init({ gameId })            -> identity + handshake
+ *   Arcade.state.get/set(key[, value]) -> 'arcade.v1.<gameId>.<key>'
+ *   Arcade.global.get/set(key[, value])-> 'arcade.v1.global.<key>'
+ *   Arcade.onStateReplaced(fn)         -> launcher imported a save bundle
+ *   Arcade.peer.status() / .onStatus() / .send() / .onMessage()
+ *   Arcade.context                     -> { framed, version }
+ */
+(function () {
+    'use strict';
+
+    var VERSION = 1;
+    var HANDSHAKE_TIMEOUT_MS = 300;
+    var MSG_PREFIX = 'arcade:';
+    var KEY_PREFIX = 'arcade.v1.';
+    var GAME_ID_RE = /^[a-z0-9_-]+$/i;
+
+    var gameId = null;
+    var initialized = false;
+    var framed = false;
+    var peerStatus = 'unavailable';
+    var peerStatusListeners = [];
+    var peerMessageListeners = [];
+    var stateReplacedListeners = [];
+    var parentOrigin = null;
+    var handshakeTimer = null;
+
+    function inIframe() {
+        try { return window.self !== window.top; } catch (e) { return true; }
+    }
+
+    function gameKey(key) { return KEY_PREFIX + gameId + '.' + key; }
+    function globalKeyName(key) { return KEY_PREFIX + 'global.' + key; }
+
+    function readJSON(k) {
+        var raw;
+        try { raw = localStorage.getItem(k); } catch (e) { return null; }
+        if (raw === null) return null;
+        try { return JSON.parse(raw); } catch (e) { return null; }
+    }
+
+    function writeJSON(k, v) {
+        try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* quota etc. */ }
+    }
+
+    function setPeerStatus(s) {
+        if (s === peerStatus) return;
+        peerStatus = s;
+        for (var i = 0; i < peerStatusListeners.length; i++) {
+            try { peerStatusListeners[i](s); } catch (e) {}
+        }
+    }
+
+    function postToParent(msg) {
+        if (!framed) return;
+        try {
+            window.parent.postMessage(msg, parentOrigin || window.location.origin);
+        } catch (e) {}
+    }
+
+    function onMessage(e) {
+        if (e.source !== window.parent) return;
+        if (e.origin !== window.location.origin) return;
+        var data = e.data;
+        if (!data || typeof data !== 'object') return;
+        var t = data.type;
+        if (typeof t !== 'string' || t.indexOf(MSG_PREFIX) !== 0) return;
+
+        switch (t) {
+            case 'arcade:welcome':
+                if (handshakeTimer) {
+                    clearTimeout(handshakeTimer);
+                    handshakeTimer = null;
+                }
+                framed = true;
+                parentOrigin = e.origin;
+                setPeerStatus(typeof data.peerStatus === 'string' ? data.peerStatus : 'idle');
+                break;
+            case 'arcade:peer.message':
+                for (var i = 0; i < peerMessageListeners.length; i++) {
+                    try { peerMessageListeners[i](data.payload, data.fromPeer); } catch (err) {}
+                }
+                break;
+            case 'arcade:peer.status':
+                if (typeof data.status === 'string') setPeerStatus(data.status);
+                break;
+            case 'arcade:state.replaced':
+                for (var j = 0; j < stateReplacedListeners.length; j++) {
+                    try { stateReplacedListeners[j](); } catch (err) {}
+                }
+                break;
+        }
+    }
+
+    function init(opts) {
+        if (initialized) return;
+        initialized = true;
+
+        if (!opts || typeof opts.gameId !== 'string' || !GAME_ID_RE.test(opts.gameId)) {
+            throw new Error('Arcade.init: opts.gameId must match /^[a-z0-9_-]+$/');
+        }
+        gameId = opts.gameId;
+
+        if (!inIframe()) {
+            framed = false;
+            peerStatus = 'unavailable';
+            return;
+        }
+
+        window.addEventListener('message', onMessage);
+        try {
+            window.parent.postMessage(
+                { type: 'arcade:hello', gameId: gameId, version: VERSION },
+                window.location.origin
+            );
+        } catch (e) {}
+
+        handshakeTimer = setTimeout(function () {
+            handshakeTimer = null;
+            framed = false;
+            peerStatus = 'unavailable';
+        }, HANDSHAKE_TIMEOUT_MS);
+    }
+
+    function ensureGameId() {
+        if (gameId === null) {
+            throw new Error('Arcade: call Arcade.init({ gameId }) before using state.*');
+        }
+    }
+
+    var stateApi = {
+        get: function (key) { ensureGameId(); return readJSON(gameKey(key)); },
+        set: function (key, value) { ensureGameId(); writeJSON(gameKey(key), value); }
+    };
+
+    var globalApi = {
+        get: function (key) { return readJSON(globalKeyName(key)); },
+        set: function (key, value) { writeJSON(globalKeyName(key), value); }
+    };
+
+    var peerApi = {
+        status: function () { return peerStatus; },
+        onStatus: function (fn) {
+            if (typeof fn === 'function') peerStatusListeners.push(fn);
+        },
+        send: function (payload) {
+            if (!framed || peerStatus !== 'connected') return false;
+            postToParent({ type: 'arcade:peer.send', payload: payload });
+            return true;
+        },
+        onMessage: function (fn) {
+            if (typeof fn === 'function') peerMessageListeners.push(fn);
+        }
+    };
+
+    function onStateReplaced(fn) {
+        if (typeof fn === 'function') stateReplacedListeners.push(fn);
+    }
+
+    Object.defineProperty(window, 'Arcade', {
+        value: Object.freeze({
+            init: init,
+            state: Object.freeze(stateApi),
+            global: Object.freeze(globalApi),
+            peer: Object.freeze(peerApi),
+            onStateReplaced: onStateReplaced,
+            get context() { return { framed: framed, version: VERSION }; }
+        }),
+        writable: false,
+        configurable: false
+    });
+})();

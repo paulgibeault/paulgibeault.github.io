@@ -1,8 +1,9 @@
-const CACHE_NAME = 'paul-arcade-v3';
+const CACHE_NAME = 'paul-arcade-v4';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
   './manifest.json',
+  './arcade-sdk.js',
   './images/icon-192.png',
   './images/icon-512.png',
   './images/pi-game.png',
