@@ -100,10 +100,11 @@
 
         .launcher-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            /* rem-based so columns reflow at high font-scale instead of clipping. */
+            grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
             gap: 24px;
             width: 100%;
-            max-width: 1000px;
+            max-width: 62.5rem;
             margin: 0 auto;
         }
 
@@ -280,7 +281,9 @@
         }
 
         .container {
-            max-width: 1200px;
+            /* rem-based so the page can use more horizontal room when the
+               user scales fonts up — viewport still caps it. */
+            max-width: 75rem;
             margin: 0 auto;
             padding: 0 24px;
         }
@@ -405,13 +408,14 @@
         /* ---- PROJECT CARD GRID ---- */
         .card-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            /* rem-based so cards reflow into fewer columns at high font-scale. */
+            grid-template-columns: repeat(auto-fit, minmax(16.25rem, 1fr));
             gap: 24px;
         }
 
         .card-grid--2col {
-            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-            max-width: 800px;
+            grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+            max-width: 50rem;
             margin: 0 auto;
         }
 
@@ -606,7 +610,7 @@
 
         /* ---- FEATURED CARD (QRCodeP2P) ---- */
         .featured-card {
-            max-width: 800px;
+            max-width: 50rem;
             margin: 0 auto;
         }
 
