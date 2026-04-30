@@ -37,9 +37,15 @@ Arcade.peer.onStatus(fn)
 Arcade.peer.send(payload)
 Arcade.peer.onMessage(fn)
 
+// SETTINGS — launcher pushes its current values, SDK auto-applies CSS vars
+Arcade.settings.fontScale()           // current launcher font scale (1 = default)
+Arcade.onSettingsChange(fn)           // fires when launcher updates a setting
+
 // CONTEXT — so games can light up extras when framed
 Arcade.context                        // { framed: boolean, version: number }
 ```
+
+**Settings auto-apply:** on `Arcade.init()` the SDK injects a low-priority rule `:root { font-size: calc(100% * var(--font-scale, 1)); }` at the start of `<head>` and writes `--font-scale` onto `<html>` whenever the launcher pushes settings. Net effect: any rem/em-sized text in a game scales with the launcher's font setting **without code changes**. Games that explicitly set `:root { font-size: … }` themselves win the cascade and can opt back in via `var(--font-scale)` directly. Range: 0.5× – 3.0× (launcher clamp).
 
 **Standalone mode:** `framed=false`, `peer.status()` locked at `'unavailable'`. Storage just works because of same-origin localStorage.
 
@@ -64,7 +70,8 @@ All messages namespaced `arcade:` to avoid collision.
 
 ```
 child → parent:  { type: 'arcade:hello',   gameId, version: 1 }
-parent → child:  { type: 'arcade:welcome', version: 1, peerStatus: 'idle' }
+parent → child:  { type: 'arcade:welcome', version: 1, peerStatus: 'idle',
+                   settings: { fontScale } }
 ```
 
 If no `welcome` arrives within ~300ms, SDK locks into standalone mode.
@@ -72,13 +79,14 @@ If no `welcome` arrives within ~300ms, SDK locks into standalone mode.
 ### Multiplayer & lifecycle
 
 ```
-child  → parent: { type: 'arcade:peer.send',     payload }
-parent → child:  { type: 'arcade:peer.message',  payload, fromPeer }
-parent → child:  { type: 'arcade:peer.status',   status }
-parent → child:  { type: 'arcade:state.replaced' }    // after file import
+child  → parent: { type: 'arcade:peer.send',        payload }
+parent → child:  { type: 'arcade:peer.message',     payload, fromPeer }
+parent → child:  { type: 'arcade:peer.status',      status }
+parent → child:  { type: 'arcade:state.replaced' }              // after file import
+parent → child:  { type: 'arcade:settings.changed', settings }  // launcher setting updated
 ```
 
-Six message types total. The launcher routes peer messages by `gameId` so multiple games could in principle multiplex one connection, though the current design assumes one foreground game at a time.
+Seven message types total. The launcher routes peer messages by `gameId` so multiple games could in principle multiplex one connection, though the current design assumes one foreground game at a time.
 
 ---
 

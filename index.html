@@ -82,94 +82,6 @@
             line-height: 1.6;
         }
 
-        /* ---- GLOBAL CONTROLS ---- */
-        .global-controls {
-            position: fixed;
-            bottom: 24px;
-            right: 24px;
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            background: rgba(20, 20, 40, 0.85);
-            backdrop-filter: blur(8px);
-            -webkit-backdrop-filter: blur(8px);
-            border: 1px solid var(--card-border);
-            border-radius: 8px;
-            padding: 6px 12px;
-            z-index: 1000;
-            opacity: 0.6;
-            transition: opacity 0.3s ease, transform 0.3s ease, border-color 0.3s ease;
-        }
-
-        .global-controls:hover, .global-controls:focus-within {
-            opacity: 1;
-            transform: translateY(-2px);
-            border-color: var(--field-gold);
-        }
-
-        .global-controls__section {
-            display: flex;
-            gap: 2px;
-            align-items: center;
-        }
-
-        .global-controls__divider {
-            width: 1px;
-            height: 24px;
-            background: var(--card-border);
-            margin: 0 4px;
-        }
-
-        .mode-select-wrap {
-            position: relative;
-            display: flex;
-            align-items: center;
-        }
-
-        .mode-select {
-            appearance: none;
-            background: transparent;
-            color: var(--field-gold);
-            font-family: var(--font-mono);
-            font-size: 0.8rem;
-            border: none;
-            outline: none;
-            cursor: pointer;
-            text-transform: uppercase;
-            padding: 8px 24px 8px 8px;
-        }
-        
-        .mode-select option {
-            background: var(--deep-space);
-            color: var(--snow-white);
-        }
-
-        .mode-select-wrap::after {
-            content: '▼';
-            font-size: 0.6rem;
-            color: var(--field-gold);
-            position: absolute;
-            right: 8px;
-            pointer-events: none;
-        }
-
-        .font-btn {
-            background: transparent;
-            border: none;
-            color: var(--snow-white);
-            font-family: var(--font-mono);
-            font-size: 0.75rem;
-            padding: 8px 12px;
-            cursor: pointer;
-            border-radius: 4px;
-            transition: all 0.2s ease;
-        }
-
-        .font-btn:hover {
-            background: var(--field-gold-dim);
-            color: var(--field-gold);
-        }
-
         /* ---- APP MODES ---- */
         .app-mode {
             width: 100%;
@@ -1085,32 +997,164 @@
             .project-card { opacity: 1 !important; transform: none !important; }
         }
 
-        /* ---- LAUNCHER ACTION BAR ---- */
-        .launcher-actions {
-            display: flex;
-            justify-content: center;
-            gap: 8px;
-            margin: 0 auto 24px;
-            max-width: 1000px;
-            width: 100%;
-            padding: 0;
-        }
-        .launcher-actions .font-btn {
-            border: 1px solid var(--card-border);
-            border-radius: 4px;
-            color: var(--field-gold);
-            font-size: 0.7rem;
-            letter-spacing: 1px;
-            text-transform: uppercase;
-        }
-        .launcher-actions .font-btn:hover {
-            background: var(--field-gold-dim);
-            border-color: var(--field-gold);
-        }
         #view-launcher {
             flex-direction: column;
             justify-content: flex-start;
         }
+
+        /* ---- APP MENU (bottom-right floating menu) ---- */
+        /* Sole chrome for both portfolio and launcher modes. Hidden in-game. */
+        body.app-in-game .launcher-menu { display: none !important; }
+
+        .launcher-menu {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            z-index: 1000;
+        }
+
+        .launcher-menu__toggle {
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            background: rgba(20, 20, 40, 0.85);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            border: 1px solid var(--card-border);
+            color: var(--field-gold);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0.6;
+            transition: opacity 0.2s ease, transform 0.2s ease, border-color 0.2s ease;
+            padding: 0;
+        }
+        .launcher-menu__toggle:hover,
+        .launcher-menu__toggle:focus-visible,
+        .launcher-menu[data-open="true"] .launcher-menu__toggle {
+            opacity: 1;
+            border-color: var(--field-gold);
+            transform: translateY(-2px);
+            outline: none;
+        }
+        .launcher-menu__toggle svg { display: block; }
+
+        .launcher-menu__panel {
+            position: absolute;
+            bottom: calc(100% + 10px);
+            right: 0;
+            min-width: 240px;
+            background: rgba(20, 20, 40, 0.92);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid var(--card-border);
+            border-radius: 8px;
+            padding: 4px;
+            display: flex;
+            flex-direction: column;
+            opacity: 0;
+            transform: translateY(8px);
+            pointer-events: none;
+            transition: opacity 0.18s ease, transform 0.18s ease;
+        }
+        .launcher-menu[data-open="true"] .launcher-menu__panel {
+            opacity: 1;
+            transform: translateY(0);
+            pointer-events: auto;
+        }
+
+        .launcher-menu__section {
+            padding: 8px 4px;
+            border-bottom: 1px solid rgba(212, 175, 55, 0.15);
+        }
+        .launcher-menu__section:last-child { border-bottom: none; }
+
+        .launcher-menu__heading {
+            font-family: var(--font-mono);
+            font-size: 0.6rem;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: var(--text-secondary);
+            padding: 2px 10px 6px;
+        }
+
+        .launcher-menu__row {
+            display: flex;
+            gap: 4px;
+            padding: 0 4px;
+        }
+        .launcher-menu__btn {
+            flex: 1;
+            background: transparent;
+            border: 1px solid var(--card-border);
+            color: var(--snow-white);
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            padding: 6px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+        }
+        .launcher-menu__btn:hover,
+        .launcher-menu__btn:focus-visible {
+            background: var(--field-gold-dim);
+            color: var(--field-gold);
+            border-color: var(--field-gold);
+            outline: none;
+        }
+        .launcher-menu__btn[data-active="true"] {
+            background: var(--field-gold-dim);
+            color: var(--field-gold);
+            border-color: var(--field-gold);
+        }
+
+        .launcher-menu__item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            width: 100%;
+            background: transparent;
+            border: none;
+            color: var(--snow-white);
+            font-family: var(--font-mono);
+            font-size: 0.78rem;
+            padding: 8px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            text-align: left;
+            transition: background 0.15s ease, color 0.15s ease;
+        }
+        .launcher-menu__item:hover,
+        .launcher-menu__item:focus-visible {
+            background: var(--field-gold-dim);
+            color: var(--field-gold);
+            outline: none;
+        }
+        .launcher-menu__item-icon {
+            width: 16px;
+            text-align: center;
+            color: var(--field-gold);
+            opacity: 0.85;
+            flex-shrink: 0;
+        }
+        .launcher-menu__item-label { flex: 1; }
+        .launcher-menu__item-tag {
+            font-size: 0.6rem;
+            letter-spacing: 1px;
+            color: var(--text-secondary);
+            border: 1px solid var(--card-border);
+            padding: 2px 6px;
+            border-radius: 3px;
+            text-transform: uppercase;
+        }
+        .launcher-menu__item--disabled,
+        .launcher-menu__item--disabled:hover {
+            color: var(--text-secondary);
+            cursor: not-allowed;
+            background: transparent;
+        }
+        .launcher-menu__item--disabled .launcher-menu__item-icon { opacity: 0.4; }
         .launcher-toast {
             position: fixed;
             top: 24px;
@@ -1140,27 +1184,58 @@
 
 <div id="starfield" aria-hidden="true"></div>
 
-<!-- ========== GLOBAL CONTROLS ========== -->
-<div class="global-controls" aria-label="Global Settings">
-    <div class="global-controls__section">
-        <label for="mode-select" class="visually-hidden" style="display:none;">App Mode</label>
-        <div class="mode-select-wrap">
-            <select id="mode-select" class="mode-select" title="Switch App Mode">
-                <option value="portfolio">Portfolio</option>
-                <option value="launcher">Launcher</option>
-            </select>
+<!-- ========== APP MENU (visible on both portfolio and launcher modes) ========== -->
+<div class="launcher-menu" id="launcher-menu">
+    <div class="launcher-menu__panel" id="launcher-menu-panel" role="menu" aria-labelledby="launcher-menu-toggle">
+        <div class="launcher-menu__section">
+            <div class="launcher-menu__heading">Display Mode</div>
+            <div class="launcher-menu__row">
+                <button type="button" class="launcher-menu__btn" data-mode="portfolio" id="menu-mode-portfolio" title="Show portfolio view">Portfolio</button>
+                <button type="button" class="launcher-menu__btn" data-mode="launcher" id="menu-mode-launcher" title="Show game launcher">Launcher</button>
+            </div>
+        </div>
+        <div class="launcher-menu__section">
+            <div class="launcher-menu__heading">Font Size</div>
+            <div class="launcher-menu__row">
+                <button type="button" class="launcher-menu__btn" id="menu-font-decrease" title="Decrease font size" aria-label="Decrease font size">A−</button>
+                <button type="button" class="launcher-menu__btn" id="menu-font-reset" title="Reset font size" aria-label="Reset font size">A</button>
+                <button type="button" class="launcher-menu__btn" id="menu-font-increase" title="Increase font size" aria-label="Increase font size">A+</button>
+            </div>
+        </div>
+        <div class="launcher-menu__section">
+            <div class="launcher-menu__heading">Game Data</div>
+            <button type="button" class="launcher-menu__item" id="btn-save" title="Export all arcade save data to a JSON file">
+                <span class="launcher-menu__item-icon" aria-hidden="true">↧</span>
+                <span class="launcher-menu__item-label">Export to File</span>
+            </button>
+            <button type="button" class="launcher-menu__item" id="btn-load" title="Import arcade save data from a JSON file">
+                <span class="launcher-menu__item-icon" aria-hidden="true">↥</span>
+                <span class="launcher-menu__item-label">Import from File</span>
+            </button>
+            <input type="file" id="file-load" accept="application/json,.json" style="display:none">
+        </div>
+        <div class="launcher-menu__section">
+            <div class="launcher-menu__heading">Network</div>
+            <button type="button" class="launcher-menu__item launcher-menu__item--disabled" disabled aria-disabled="true" title="Multiplayer is not yet available">
+                <span class="launcher-menu__item-icon" aria-hidden="true">⚇</span>
+                <span class="launcher-menu__item-label">Multiplayer</span>
+                <span class="launcher-menu__item-tag">Soon</span>
+            </button>
+        </div>
+        <div class="launcher-menu__section" id="menu-install-section" hidden>
+            <button type="button" class="launcher-menu__item" id="install-btn" title="Install as PWA">
+                <span class="launcher-menu__item-icon" aria-hidden="true">⤓</span>
+                <span class="launcher-menu__item-label">Install App</span>
+            </button>
         </div>
     </div>
-    <div class="global-controls__divider"></div>
-    <div class="global-controls__section" aria-label="Adjust font size">
-        <button class="font-btn" id="font-decrease" aria-label="Decrease font size" title="Decrease Font">A-</button>
-        <button class="font-btn" id="font-reset" aria-label="Reset font size" title="Reset Font">A</button>
-        <button class="font-btn" id="font-increase" aria-label="Increase font size" title="Increase Font">A+</button>
-    </div>
-    <div class="global-controls__divider" id="install-divider" style="display:none;"></div>
-    <div class="global-controls__section">
-        <button class="font-btn" id="install-btn" aria-label="Install App" title="Install App" style="display:none;">INSTALL</button>
-    </div>
+    <button type="button" class="launcher-menu__toggle" id="launcher-menu-toggle" aria-haspopup="true" aria-expanded="false" aria-controls="launcher-menu-panel" aria-label="Open menu" title="Menu">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <line x1="4" y1="7" x2="20" y2="7"/>
+            <line x1="4" y1="12" x2="20" y2="12"/>
+            <line x1="4" y1="17" x2="20" y2="17"/>
+        </svg>
+    </button>
 </div>
 
 <div class="page-wrapper">
@@ -1427,11 +1502,6 @@
     <!-- ========== GAME LAUNCHER ========== -->
     <!-- SYNC: Game list is duplicated in #games section above. Update both when adding games. -->
     <div id="view-launcher" class="app-mode hidden">
-        <div class="launcher-actions" aria-label="Save data controls">
-            <button class="font-btn" id="btn-save" title="Export all arcade save data to a JSON file">SAVE TO FILE</button>
-            <button class="font-btn" id="btn-load" title="Import arcade save data from a JSON file">LOAD FROM FILE</button>
-            <input type="file" id="file-load" accept="application/json,.json" style="display:none">
-        </div>
         <div class="launcher-grid" id="launcher-grid-container">
             <a href="https://paulgibeault.github.io/pi-game/" class="launcher-btn" data-game-id="pi-game" style="animation-delay: 0.0s">
                 <div class="launcher-btn__image-wrap"><img class="launcher-btn__image" src="images/pi-game.png" alt="Pi Game"></div>
@@ -1620,15 +1690,81 @@
         const d = document.documentElement;
         let scale = parseFloat(localStorage.getItem('fontScale')) || 1;
 
+        const FONT_MIN = 0.5;
+        const FONT_MAX = 3.0;
+        const FONT_STEP = 0.25;
+
         function setScale(s) {
-            scale = Math.max(0.7, Math.min(s, 1.6));
+            scale = Math.max(FONT_MIN, Math.min(s, FONT_MAX));
             d.style.setProperty('--font-scale', scale);
             localStorage.setItem('fontScale', scale);
+            // Notify mounted game iframes that have subscribed via the SDK.
+            if (window.__arcade && window.__arcade.broadcastSettings) {
+                window.__arcade.broadcastSettings();
+            }
         }
 
-        document.getElementById('font-decrease').addEventListener('click', () => setScale(scale - 0.15));
-        document.getElementById('font-increase').addEventListener('click', () => setScale(scale + 0.15));
-        document.getElementById('font-reset').addEventListener('click', () => setScale(1));
+        function bind(decId, incId, resId) {
+            const dec = document.getElementById(decId);
+            const inc = document.getElementById(incId);
+            const res = document.getElementById(resId);
+            if (dec) dec.addEventListener('click', () => setScale(scale - FONT_STEP));
+            if (inc) inc.addEventListener('click', () => setScale(scale + FONT_STEP));
+            if (res) res.addEventListener('click', () => setScale(1));
+        }
+        bind('menu-font-decrease', 'menu-font-increase', 'menu-font-reset');
+
+        window.__arcade = window.__arcade || {};
+        window.__arcade.getFontScale = function () { return scale; };
+    })();
+
+    // ==========================================
+    // APP MENU — Bottom-right popup menu (visible in both modes)
+    // ==========================================
+    (function appMenu() {
+        const menu = document.getElementById('launcher-menu');
+        const toggle = document.getElementById('launcher-menu-toggle');
+        const panel = document.getElementById('launcher-menu-panel');
+        if (!menu || !toggle || !panel) return;
+
+        function open() {
+            menu.dataset.open = 'true';
+            toggle.setAttribute('aria-expanded', 'true');
+        }
+        function close() {
+            delete menu.dataset.open;
+            toggle.setAttribute('aria-expanded', 'false');
+        }
+        function isOpen() { return menu.dataset.open === 'true'; }
+
+        toggle.addEventListener('click', (e) => {
+            e.stopPropagation();
+            isOpen() ? close() : open();
+        });
+
+        document.addEventListener('click', (e) => {
+            if (!isOpen()) return;
+            if (!menu.contains(e.target)) close();
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && isOpen()) {
+                close();
+                toggle.focus();
+            }
+        });
+
+        // Close after taking an action inside the panel.
+        panel.addEventListener('click', (e) => {
+            const item = e.target.closest('.launcher-menu__item');
+            if (item && !item.disabled) close();
+            // Mode buttons close the menu too — they're .launcher-menu__btn rows.
+            const modeBtn = e.target.closest('[data-mode]');
+            if (modeBtn) close();
+        });
+
+        window.__arcade = window.__arcade || {};
+        window.__arcade.launcherMenu = menu;
     })();
 
     // ==========================================
@@ -1639,15 +1775,20 @@
     (function appController() {
         const d = document.documentElement;
 
-        const modeSelect = document.getElementById('mode-select');
         const viewPortfolio = document.getElementById('view-portfolio');
         const viewLauncher = document.getElementById('view-launcher');
         const viewGame = document.getElementById('view-game');
         const quitGameBtn = document.getElementById('quit-game-btn');
-        const globalControls = document.querySelector('.global-controls');
+        const modeBtns = document.querySelectorAll('[data-mode]');
 
         let currentMode = localStorage.getItem('appMode') || 'portfolio';
-        modeSelect.value = currentMode;
+
+        function syncModeBtns() {
+            modeBtns.forEach((b) => {
+                if (b.dataset.mode === currentMode) b.setAttribute('data-active', 'true');
+                else b.removeAttribute('data-active');
+            });
+        }
 
         function setMode(newMode) {
             currentMode = newMode;
@@ -1669,11 +1810,15 @@
             if (!viewGame.classList.contains('hidden')) {
                 window.__arcade.hideGameView();
             }
+
+            syncModeBtns();
         }
 
-        modeSelect.addEventListener('change', (e) => {
-            setMode(e.target.value);
-            window.scrollTo(0, 0);
+        modeBtns.forEach((btn) => {
+            btn.addEventListener('click', () => {
+                setMode(btn.dataset.mode);
+                window.scrollTo(0, 0);
+            });
         });
 
         setMode(currentMode);
@@ -1687,7 +1832,6 @@
         window.__arcade.viewGame = viewGame;
         window.__arcade.viewPortfolio = viewPortfolio;
         window.__arcade.viewLauncher = viewLauncher;
-        window.__arcade.globalControls = globalControls;
     })();
 
     // ==========================================
@@ -1713,7 +1857,6 @@
         const viewGame = window.__arcade.viewGame;
         const viewPortfolio = window.__arcade.viewPortfolio;
         const viewLauncher = window.__arcade.viewLauncher;
-        const globalControls = window.__arcade.globalControls;
 
         // ---- iframe pool ----
         const pool = new Map(); // gameId -> { iframe, name }
@@ -1744,7 +1887,7 @@
 
             viewPortfolio.classList.add('hidden');
             viewLauncher.classList.add('hidden');
-            globalControls.style.display = 'none';
+            document.body.classList.add('app-in-game');
             viewGame.classList.remove('hidden');
 
             // Defer focus so the iframe receives keyboard input.
@@ -1753,7 +1896,7 @@
 
         function hideGameView() {
             viewGame.classList.add('hidden');
-            globalControls.style.display = 'flex';
+            document.body.classList.remove('app-in-game');
             // Iframes stay mounted (hidden) — instant relaunch + state preserved.
             for (const e of pool.values()) e.iframe.hidden = true;
             activeGameId = null;
@@ -1864,11 +2007,13 @@
                 case 'arcade:hello':
                     // Announce ourselves. peerStatus is 'idle' — peer transport
                     // is not yet wired; peer.send currently no-ops in the SDK
-                    // until status becomes 'connected'.
+                    // until status becomes 'connected'. Settings ride along so
+                    // the game can apply them before first paint.
                     postToIframe(gameId, {
                         type: 'arcade:welcome',
                         version: 1,
-                        peerStatus: 'idle'
+                        peerStatus: 'idle',
+                        settings: currentSettings()
                     });
                     break;
                 case 'arcade:peer.send':
@@ -1876,6 +2021,15 @@
                     break;
             }
         });
+
+        function currentSettings() {
+            const fs = (window.__arcade && window.__arcade.getFontScale)
+                ? window.__arcade.getFontScale() : 1;
+            return { fontScale: fs };
+        }
+        window.__arcade.broadcastSettings = function () {
+            broadcast({ type: 'arcade:settings.changed', settings: currentSettings() });
+        };
 
         // ---- toast helper ----
         let toastTimer = null;
@@ -2244,17 +2398,15 @@
         }
 
         const installBtn = document.getElementById('install-btn');
-        const installDivider = document.getElementById('install-divider');
+        const installSection = document.getElementById('menu-install-section');
         let deferredPrompt;
 
         function showInstallUI() {
-            if (installBtn) installBtn.style.display = 'inline-block';
-            if (installDivider) installDivider.style.display = 'block';
+            if (installSection) installSection.removeAttribute('hidden');
         }
 
         function hideInstallUI() {
-            if (installBtn) installBtn.style.display = 'none';
-            if (installDivider) installDivider.style.display = 'none';
+            if (installSection) installSection.setAttribute('hidden', '');
         }
 
         window.addEventListener('beforeinstallprompt', (e) => {
