@@ -3,11 +3,23 @@
 <head>
     <meta charset="UTF-8">
     <script>
-        // Apply settings immediately to avoid a flash of unstyled content
+        // Apply settings immediately to avoid a flash of unstyled content.
+        // Reads font scale from arcade.v1.global.fontScale (the canonical key
+        // shared with games via the SDK); falls back to the legacy 'fontScale'
+        // key for users who set their preference before the migration.
         (function() {
-            const scale = localStorage.getItem('fontScale') || '1';
+            let scaleStr = '1';
+            const newRaw = localStorage.getItem('arcade.v1.global.fontScale');
+            if (newRaw !== null) {
+                try {
+                    const n = JSON.parse(newRaw);
+                    if (typeof n === 'number' && isFinite(n)) scaleStr = String(n);
+                } catch (e) {}
+            } else {
+                scaleStr = localStorage.getItem('fontScale') || '1';
+            }
             const mode = localStorage.getItem('appMode') || 'portfolio';
-            document.documentElement.style.setProperty('--font-scale', scale);
+            document.documentElement.style.setProperty('--font-scale', scaleStr);
             document.documentElement.setAttribute('data-theme', mode);
             document.documentElement.classList.add('mode-' + mode);
         })();
@@ -1692,7 +1704,29 @@
     // ==========================================
     (function fontControl() {
         const d = document.documentElement;
-        let scale = parseFloat(localStorage.getItem('fontScale')) || 1;
+        const KEY = 'arcade.v1.global.fontScale';
+        const LEGACY_KEY = 'fontScale';
+
+        // One-shot migration from legacy key.
+        if (localStorage.getItem(KEY) === null) {
+            const legacy = localStorage.getItem(LEGACY_KEY);
+            if (legacy !== null) {
+                const n = parseFloat(legacy);
+                if (isFinite(n)) localStorage.setItem(KEY, JSON.stringify(n));
+            }
+        }
+        if (localStorage.getItem(LEGACY_KEY) !== null) {
+            localStorage.removeItem(LEGACY_KEY);
+        }
+
+        let scale = 1;
+        const raw = localStorage.getItem(KEY);
+        if (raw !== null) {
+            try {
+                const n = JSON.parse(raw);
+                if (typeof n === 'number' && isFinite(n)) scale = n;
+            } catch (e) {}
+        }
 
         const FONT_MIN = 0.5;
         const FONT_MAX = 3.0;
@@ -1701,7 +1735,7 @@
         function setScale(s) {
             scale = Math.max(FONT_MIN, Math.min(s, FONT_MAX));
             d.style.setProperty('--font-scale', scale);
-            localStorage.setItem('fontScale', scale);
+            localStorage.setItem(KEY, JSON.stringify(scale));
             // Notify mounted game iframes that have subscribed via the SDK.
             if (window.__arcade && window.__arcade.broadcastSettings) {
                 window.__arcade.broadcastSettings();
@@ -1884,8 +1918,10 @@
 
         function showGame(gameId, src, name) {
             const entry = ensureIframe(gameId, src, name);
-            for (const e of pool.values()) e.iframe.hidden = true;
-            entry.iframe.hidden = false;
+            const previousGameId = activeGameId;
+            for (const [gid, e] of pool) {
+                e.iframe.hidden = (gid !== gameId);
+            }
             activeGameId = gameId;
             topbarTitle.textContent = name || "Paul's Arcade";
 
@@ -1893,6 +1929,12 @@
             viewLauncher.classList.add('hidden');
             document.body.classList.add('app-in-game');
             viewGame.classList.remove('hidden');
+
+            // Lifecycle: suspend prior game (if any) and resume the new one.
+            if (previousGameId && previousGameId !== gameId) {
+                postToIframe(previousGameId, { type: 'arcade:lifecycle.suspend' });
+            }
+            postToIframe(gameId, { type: 'arcade:lifecycle.resume' });
 
             // Defer focus so the iframe receives keyboard input.
             setTimeout(() => { try { entry.iframe.focus(); } catch (e) {} }, 0);
@@ -1902,8 +1944,12 @@
             viewGame.classList.add('hidden');
             document.body.classList.remove('app-in-game');
             // Iframes stay mounted (hidden) — instant relaunch + state preserved.
+            const previousGameId = activeGameId;
             for (const e of pool.values()) e.iframe.hidden = true;
             activeGameId = null;
+            if (previousGameId) {
+                postToIframe(previousGameId, { type: 'arcade:lifecycle.suspend' });
+            }
         }
 
         window.__arcade.hideGameView = hideGameView;
@@ -2015,21 +2061,75 @@
                     // the game can apply them before first paint.
                     postToIframe(gameId, {
                         type: 'arcade:welcome',
-                        version: 1,
+                        version: 2,
                         peerStatus: 'idle',
                         settings: currentSettings()
                     });
+                    // If this game is the active one, also send a resume hint
+                    // (the game's SDK may have missed the showGame() resume if
+                    // it handshook after the iframe was already visible).
+                    if (gameId === activeGameId) {
+                        postToIframe(gameId, { type: 'arcade:lifecycle.resume' });
+                    }
                     break;
                 case 'arcade:peer.send':
                     // No transport yet — drop. Hook here when QRCodeP2P lands.
                     break;
+                case 'arcade:ui.toast':
+                    // Game asked the launcher to display a toast.
+                    if (typeof data.message === 'string' && data.message) {
+                        const KIND_OK = { info: 1, success: 1, warning: 1, error: 1 };
+                        const kind = KIND_OK[data.kind] ? data.kind : 'info';
+                        const dur = (typeof data.duration === 'number' && data.duration > 0)
+                            ? data.duration : 2500;
+                        showToast(data.message, {
+                            error: kind === 'error',
+                            duration: dur
+                        });
+                    }
+                    break;
             }
         });
 
+        // Read a JSON-encoded global setting; coerce / default sensibly.
+        function readGlobal(key, fallback) {
+            try {
+                const raw = localStorage.getItem('arcade.v1.global.' + key);
+                if (raw === null) return fallback;
+                const v = JSON.parse(raw);
+                return v === undefined ? fallback : v;
+            } catch (e) { return fallback; }
+        }
+        function defaultTheme() {
+            try {
+                if (window.matchMedia &&
+                    window.matchMedia('(prefers-color-scheme: light)').matches) {
+                    return 'light';
+                }
+            } catch (e) {}
+            return 'dark';
+        }
+        function defaultReducedMotion() {
+            try {
+                return !!(window.matchMedia &&
+                    window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+            } catch (e) { return false; }
+        }
         function currentSettings() {
             const fs = (window.__arcade && window.__arcade.getFontScale)
                 ? window.__arcade.getFontScale() : 1;
-            return { fontScale: fs };
+            const th = readGlobal('theme', null);
+            const rm = readGlobal('reducedMotion', null);
+            const av = readGlobal('audioVolume', null);
+            const hd = readGlobal('handedness', null);
+            return {
+                fontScale: fs,
+                theme: (th === 'light' || th === 'dark') ? th : defaultTheme(),
+                reducedMotion: typeof rm === 'boolean' ? rm : defaultReducedMotion(),
+                audioVolume: (typeof av === 'number' && isFinite(av))
+                    ? Math.max(0, Math.min(1, av)) : 1,
+                handedness: (hd === 'left' || hd === 'right') ? hd : 'right'
+            };
         }
         window.__arcade.broadcastSettings = function () {
             broadcast({ type: 'arcade:settings.changed', settings: currentSettings() });
@@ -2266,130 +2366,6 @@
             // Reset so picking the same file twice still fires 'change'.
             fileLoad.value = '';
             if (f) importSaveFile(f);
-        });
-    })();
-
-    // ==========================================
-    // LOCALSTORAGE PROXY — postMessage bridge for sandboxed game iframes
-    // ==========================================
-    // Game iframes are sandboxed without `allow-same-origin`, so they run
-    // in an opaque origin and cannot touch their own localStorage. This
-    // proxy lets them persist state through the launcher.
-    //
-    // Protocol — request (iframe -> launcher):
-    //   { type: 'ls-proxy-request', requestId: string,
-    //     op: 'getItem'|'setItem'|'removeItem'|'clear'|'key'|'length',
-    //     key?: string, value?: string, index?: number }
-    //
-    // Response (launcher -> iframe):
-    //   { type: 'ls-proxy-response', requestId: string, ok: boolean,
-    //     value?: string|null, error?: string }
-    //
-    // Storage is namespaced by the first path segment of the iframe src
-    // (e.g. "pi-game", "cozy-solitaire") so games cannot read each
-    // other's data or the launcher's own keys. Stored key shape:
-    //   __game_proxy__/<namespace>/<key>
-    (function gameStorageProxy() {
-        const gameIframe = document.getElementById('game-iframe');
-        if (!gameIframe) return;
-
-        const KEY_PREFIX = '__game_proxy__/';
-
-        function namespaceFor(src) {
-            try {
-                const u = new URL(src, window.location.href);
-                if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
-                const seg = u.pathname.replace(/^\/+|\/+$/g, '').split('/')[0];
-                return seg || null;
-            } catch {
-                return null;
-            }
-        }
-
-        function fullKey(ns, key) { return KEY_PREFIX + ns + '/' + key; }
-
-        function nsKeys(ns) {
-            const prefix = KEY_PREFIX + ns + '/';
-            const out = [];
-            for (let i = 0; i < localStorage.length; i++) {
-                const k = localStorage.key(i);
-                if (k && k.startsWith(prefix)) out.push(k);
-            }
-            return out;
-        }
-
-        function handle(op, data, ns) {
-            switch (op) {
-                case 'getItem':
-                    if (typeof data.key !== 'string') throw new Error('key required');
-                    return { value: localStorage.getItem(fullKey(ns, data.key)) };
-                case 'setItem':
-                    if (typeof data.key !== 'string' || typeof data.value !== 'string') {
-                        throw new Error('key and value required');
-                    }
-                    localStorage.setItem(fullKey(ns, data.key), data.value);
-                    return {};
-                case 'removeItem':
-                    if (typeof data.key !== 'string') throw new Error('key required');
-                    localStorage.removeItem(fullKey(ns, data.key));
-                    return {};
-                case 'clear':
-                    nsKeys(ns).forEach(k => localStorage.removeItem(k));
-                    return {};
-                case 'key': {
-                    if (typeof data.index !== 'number') throw new Error('index required');
-                    const stripped = nsKeys(ns).map(k => k.slice((KEY_PREFIX + ns + '/').length));
-                    return { value: stripped[data.index] !== undefined ? stripped[data.index] : null };
-                }
-                case 'length':
-                    return { value: nsKeys(ns).length };
-                case 'dump': {
-                    const prefix = KEY_PREFIX + ns + '/';
-                    const out = {};
-                    for (let i = 0; i < localStorage.length; i++) {
-                        const k = localStorage.key(i);
-                        if (k && k.startsWith(prefix)) out[k.slice(prefix.length)] = localStorage.getItem(k);
-                    }
-                    return { data: out };
-                }
-                default:
-                    throw new Error('unsupported op: ' + op);
-            }
-        }
-
-        window.addEventListener('message', (event) => {
-            if (event.source !== gameIframe.contentWindow) return;
-            if (event.origin !== 'null') return;
-            const data = event.data;
-            if (!data || data.type !== 'ls-proxy-request') return;
-            if (typeof data.requestId !== 'string') return;
-
-            const ns = namespaceFor(gameIframe.getAttribute('src') || '');
-            if (!ns) {
-                event.source.postMessage({
-                    type: 'ls-proxy-response',
-                    requestId: data.requestId,
-                    ok: false,
-                    error: 'no active game'
-                }, '*');
-                return;
-            }
-
-            try {
-                const result = handle(data.op, data, ns);
-                event.source.postMessage(Object.assign({
-                    type: 'ls-proxy-response',
-                    requestId: data.requestId,
-                    ok: true
-                }, result), '*');
-            } catch (err) {
-                event.source.postMessage({
-                    type: 'ls-proxy-response',
-                    requestId: data.requestId,
-                    ok: false,
-                    error: String(err && err.message || err)
-                }, '*');
-            }
         });
     })();
 
