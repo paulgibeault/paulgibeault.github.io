@@ -18,18 +18,17 @@
             } else {
                 scaleStr = localStorage.getItem('fontScale') || '1';
             }
-            const mode = localStorage.getItem('appMode') || 'portfolio';
             document.documentElement.style.setProperty('--font-scale', scaleStr);
-            document.documentElement.setAttribute('data-theme', mode);
-            document.documentElement.classList.add('mode-' + mode);
+            document.documentElement.setAttribute('data-theme', 'launcher');
+            document.documentElement.classList.add('mode-launcher');
         })();
     </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Paul Gibeault — Software Engineer, Snowboarder, Patriot</title>
-    <meta name="description" content="Portfolio of Paul Gibeault — browser games, open source tools, and creative projects. Play Pi Game, Silicon Syndicate, HecknSic, Cozy Solitaire, and more.">
+    <title>Paul's Arcade</title>
+    <meta name="description" content="Paul's Arcade — browser games by Paul Gibeault. Pi Game, Silicon Syndicate, HecknSic, Cozy Solitaire. No installs, no signups, plays in your browser.">
     <meta name="author" content="Paul Gibeault">
-    <meta property="og:title" content="Paul Gibeault — Portfolio">
-    <meta property="og:description" content="Browser games, open source tools, and creative projects by Paul Gibeault.">
+    <meta property="og:title" content="Paul's Arcade">
+    <meta property="og:description" content="Browser games by Paul Gibeault. No installs, no signups, plays in your browser.">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://paulgibeault.github.io/">
     <link rel="manifest" href="manifest.json">
@@ -41,73 +40,60 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@500;700;900&family=Press+Start+2P&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
     <style>
         /* ========================================
-           DESIGN SYSTEM — Retro Arcade Portfolio
+           LAUNCHER PAGE — page-specific styles
            ======================================== */
 
-        :root, html[data-theme="portfolio"] {
-            --deep-space: #1a1a2e;
-            --deep-space-light: #24243e;
-            --field-gold: #D4AF37;
-            --field-gold-dim: rgba(212, 175, 55, 0.3);
-            --tactical-red: #FF0000;
-            --tactical-red-dim: rgba(255, 0, 0, 0.15);
-            --energy-blue: #007BFF;
-            --energy-blue-dim: rgba(0, 123, 255, 0.15);
-            --snow-white: #f0f0f0;
-            --text-secondary: #a0a0b8;
-            --online-green: #28a745;
-            --card-bg: rgba(30, 30, 60, 0.85);
-            --card-border: rgba(212, 175, 55, 0.4);
-            --font-display: 'Orbitron', sans-serif;
-            --font-pixel: 'Press Start 2P', cursive;
-            --font-body: 'Inter', sans-serif;
-            --font-mono: 'JetBrains Mono', monospace;
+        /* ---- LAUNCHER HEADER ---- */
+        .launcher-header {
+            text-align: center;
+            padding: 60px 24px 20px;
         }
 
-        html[data-theme="launcher"] {
-            /* Slightly darker/richer for the launcher mode */
-            --deep-space: #0a0a14;
-            --deep-space-light: #16162a;
-            --card-bg: rgba(20, 20, 35, 0.90);
-            --field-gold: #E5C158;
-            --field-gold-dim: rgba(229, 193, 88, 0.35);
-        }
-
-        /* ---- RESET ---- */
-        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-        html {
-            scroll-behavior: smooth;
-            -webkit-font-smoothing: antialiased;
-            /* Multiply base root font-size by our scaled variable */
-            font-size: calc(100% * var(--font-scale, 1));
-        }
-
-        body {
-            font-family: var(--font-body);
-            background: var(--deep-space);
+        .launcher-header__title {
+            font-family: var(--font-display);
+            font-weight: 900;
+            font-size: clamp(2rem, 6vw, 3.5rem);
+            letter-spacing: 4px;
             color: var(--snow-white);
-            min-height: 100vh;
-            overflow-x: hidden;
-            line-height: 1.6;
+            text-transform: uppercase;
+            margin-bottom: 8px;
         }
 
-        /* ---- APP MODES ---- */
-        .app-mode {
-            width: 100%;
+        .launcher-header__title span {
+            color: var(--field-gold);
         }
-        .app-mode.hidden {
-            display: none !important;
+
+        .launcher-header__subtitle {
+            font-family: var(--font-mono);
+            font-size: clamp(0.7rem, 2vw, 0.85rem);
+            color: var(--text-secondary);
+            letter-spacing: 2px;
+        }
+
+        .launcher-header__subtitle a {
+            color: var(--field-gold);
+            text-decoration: none;
+            border-bottom: 1px solid var(--field-gold-dim);
+            transition: border-color 0.2s ease, color 0.2s ease;
+        }
+
+        .launcher-header__subtitle a:hover,
+        .launcher-header__subtitle a:focus-visible {
+            color: var(--snow-white);
+            border-bottom-color: var(--field-gold);
+            outline: none;
         }
 
         /* ---- LAUNCHER GRID ---- */
         #view-launcher {
-            padding: 80px 40px;
-            min-height: 100vh;
+            padding: 0 40px 80px;
+            min-height: calc(100vh - 200px);
             display: flex;
-            align-items: center;
+            flex-direction: column;
+            justify-content: flex-start;
         }
 
         .launcher-grid {
@@ -134,7 +120,7 @@
             display: flex;
             flex-direction: column;
             cursor: pointer;
-            opacity: 0; 
+            opacity: 0;
             animation: launcher-fade-in 0.6s ease forwards;
         }
 
@@ -191,31 +177,34 @@
             color: var(--field-gold);
             letter-spacing: 1px;
         }
-        
+
         @keyframes launcher-fade-in {
             from { opacity: 0; transform: translateY(20px); }
             to { opacity: 1; transform: translateY(0); }
         }
 
         @media (max-width: 768px) {
+            .launcher-header { padding: 40px 16px 16px; }
             .launcher-grid {
                 grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
                 gap: 16px;
             }
             #view-launcher {
-                padding: 40px 16px;
+                padding: 0 16px 40px;
             }
             .launcher-btn__name { font-size: 0.95rem; }
             .launcher-btn__subtitle { font-size: 0.6rem; }
         }
 
         @media (max-width: 480px) {
+            .launcher-header { padding: 28px 16px 12px; }
+            .launcher-header__title { letter-spacing: 2px; }
             .launcher-grid {
                 grid-template-columns: 1fr;
                 gap: 12px;
             }
             #view-launcher {
-                padding: 24px 16px;
+                padding: 0 16px 24px;
             }
             .launcher-btn {
                 flex-direction: row;
@@ -236,735 +225,7 @@
             .launcher-btn__subtitle { font-size: 0.7rem; }
         }
 
-        /* ---- STARFIELD ---- */
-        #starfield {
-            position: fixed;
-            top: 0; left: 0;
-            width: 100%; height: 100%;
-            z-index: 0;
-            pointer-events: none;
-        }
-
-        .star {
-            position: absolute;
-            background: #fff;
-            border-radius: 50%;
-            animation:
-                twinkle var(--duration) ease-in-out infinite alternate,
-                drift var(--drift-duration) ease-in-out infinite alternate;
-            opacity: 0;
-        }
-
-        .star--warm { background: #ffd89b; }
-        .star--cool { background: #a0c4ff; }
-
-        @keyframes twinkle {
-            0% { opacity: 0.05; transform: scale(0.6); }
-            50% { opacity: var(--max-opacity); transform: scale(1.1); }
-            100% { opacity: calc(var(--max-opacity) * 0.4); transform: scale(0.9); }
-        }
-
-        @keyframes drift {
-            0% { translate: 0 0; }
-            100% { translate: var(--drift-x) var(--drift-y); }
-        }
-
-        /* ---- SCANLINE OVERLAY ---- */
-        body::after {
-            content: '';
-            position: fixed;
-            top: 0; left: 0;
-            width: 100%; height: 100%;
-            background: repeating-linear-gradient(
-                0deg,
-                transparent,
-                transparent 2px,
-                rgba(0, 0, 0, 0.03) 2px,
-                rgba(0, 0, 0, 0.03) 4px
-            );
-            z-index: 1;
-            pointer-events: none;
-        }
-
-        /* ---- MAIN CONTAINER ---- */
-        .page-wrapper {
-            position: relative;
-            z-index: 2;
-        }
-
-        .container {
-            /* rem-based so the page can use more horizontal room when the
-               user scales fonts up — viewport still caps it. */
-            max-width: 75rem;
-            margin: 0 auto;
-            padding: 0 24px;
-        }
-
-        /* ---- HERO SECTION ---- */
-        .hero {
-            text-align: center;
-            padding: 80px 24px 60px;
-            position: relative;
-        }
-
-        .hero__compass {
-            position: absolute;
-            top: 30px;
-            right: 40px;
-            width: 60px;
-            height: 60px;
-            opacity: 0.25;
-            animation: compass-spin 60s linear infinite;
-        }
-
-        @keyframes compass-spin {
-            from { transform: rotate(0deg); }
-            to { transform: rotate(360deg); }
-        }
-
-        .hero__name {
-            font-family: var(--font-display);
-            font-weight: 900;
-            font-size: clamp(2rem, 6vw, 3.5rem);
-            letter-spacing: 4px;
-            color: var(--snow-white);
-            text-transform: uppercase;
-            margin-bottom: 8px;
-        }
-
-        .hero__name span {
-            color: var(--field-gold);
-        }
-
-        .hero__tagline {
-            font-family: var(--font-mono);
-            font-size: clamp(0.7rem, 2vw, 0.9rem);
-            color: var(--text-secondary);
-            letter-spacing: 2px;
-            margin-bottom: 6px;
-        }
-
-        .hero__org {
-            font-family: var(--font-body);
-            font-size: 0.85rem;
-            color: var(--text-secondary);
-            margin-bottom: 24px;
-        }
-
-        .hero__links {
-            display: flex;
-            justify-content: center;
-            gap: 16px;
-        }
-
-        .hero__link {
-            font-family: var(--font-mono);
-            font-size: 0.75rem;
-            color: var(--energy-blue);
-            text-decoration: none;
-            padding: 8px 20px;
-            border: 1px solid var(--energy-blue);
-            border-radius: 4px;
-            transition: all 0.3s ease;
-            letter-spacing: 1px;
-            text-transform: uppercase;
-        }
-
-        .hero__link:hover {
-            background: var(--energy-blue);
-            color: var(--deep-space);
-            box-shadow: 0 0 20px rgba(0, 123, 255, 0.4);
-        }
-
-        .hero__divider {
-            width: 120px;
-            height: 2px;
-            background: linear-gradient(90deg, transparent, var(--field-gold), transparent);
-            margin: 40px auto 0;
-        }
-
-        /* ---- SECTION HEADERS ---- */
-        .section {
-            padding: 60px 0;
-        }
-
-        .section__header {
-            font-family: var(--font-pixel);
-            font-size: clamp(0.65rem, 2vw, 0.85rem);
-            color: var(--field-gold);
-            letter-spacing: 3px;
-            text-transform: uppercase;
-            margin-bottom: 40px;
-            text-align: center;
-            position: relative;
-        }
-
-        .section__header::before,
-        .section__header::after {
-            content: '';
-            position: absolute;
-            top: 50%;
-            width: 60px;
-            height: 1px;
-            background: var(--field-gold-dim);
-        }
-
-        .section__header::before { right: calc(50% + 160px); }
-        .section__header::after { left: calc(50% + 160px); }
-
-        .section__separator {
-            color: var(--text-secondary);
-            margin: 0 6px;
-        }
-
-        /* ---- PROJECT CARD GRID ---- */
-        .card-grid {
-            display: grid;
-            /* rem-based so cards reflow into fewer columns at high font-scale. */
-            grid-template-columns: repeat(auto-fit, minmax(16.25rem, 1fr));
-            gap: 24px;
-        }
-
-        .card-grid--2col {
-            grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
-            max-width: 50rem;
-            margin: 0 auto;
-        }
-
-        /* ---- PROJECT CARD ---- */
-        .project-card {
-            background: var(--card-bg);
-            border: 1px solid var(--card-border);
-            border-radius: 12px;
-            overflow: hidden;
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            transition: transform 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94),
-                        opacity 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94),
-                        box-shadow 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94),
-                        border-color 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
-            opacity: 0;
-            transform: translateY(30px);
-            cursor: pointer;
-            will-change: transform, opacity;
-        }
-
-        .project-card.visible {
-            opacity: 1;
-            transform: translateY(0);
-        }
-
-        .project-card:hover {
-            transform: translateY(-6px);
-            border-color: var(--field-gold);
-            box-shadow:
-                0 12px 40px rgba(0, 0, 0, 0.4),
-                0 0 30px var(--field-gold-dim);
-        }
-
-        .project-card__image {
-            width: 100%;
-            aspect-ratio: 16 / 10;
-            object-fit: cover;
-            display: block;
-            border-bottom: 1px solid var(--card-border);
-            transition: transform 0.4s ease;
-        }
-
-        .project-card:hover .project-card__image {
-            transform: scale(1.03);
-        }
-
-        .project-card__image-wrap {
-            overflow: hidden;
-        }
-
-        .project-card__body {
-            padding: 24px;
-        }
-
-        .project-card__name {
-            font-family: var(--font-display);
-            font-weight: 700;
-            font-size: 1.2rem;
-            color: var(--snow-white);
-            margin-bottom: 6px;
-            letter-spacing: 1px;
-        }
-
-        .project-card__subtitle {
-            font-family: var(--font-mono);
-            font-size: 0.75rem;
-            color: var(--field-gold);
-            margin-bottom: 14px;
-            letter-spacing: 1px;
-        }
-
-        .project-card__desc {
-            font-size: 1.1rem;
-            color: #d1d1e0;
-            line-height: 1.8;
-            margin-bottom: 20px;
-        }
-
-        .project-card__desc strong {
-            color: var(--snow-white);
-            font-weight: 600;
-        }
-
-        .project-card__desc code {
-            font-family: var(--font-mono);
-            font-size: 0.9em;
-            color: var(--energy-blue);
-            background: rgba(0, 123, 255, 0.1);
-            padding: 1px 5px;
-            border-radius: 3px;
-        }
-
-        .project-card__kicker {
-            font-family: var(--font-mono);
-            font-size: 0.8rem;
-            color: var(--field-gold);
-            font-style: italic;
-            margin-bottom: 16px;
-            opacity: 0.85;
-        }
-
-        /* Tech Tags */
-        .tech-tags {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 6px;
-            margin-bottom: 16px;
-        }
-
-        .tech-tag {
-            font-family: var(--font-mono);
-            font-size: 0.7rem;
-            color: var(--field-gold);
-            border: 1px solid var(--field-gold-dim);
-            padding: 4px 10px;
-            border-radius: 3px;
-            letter-spacing: 0.5px;
-            text-transform: uppercase;
-        }
-
-        /* Action Buttons */
-        .card-actions {
-            display: flex;
-            gap: 10px;
-            flex-wrap: wrap;
-        }
-
-        .btn {
-            font-family: var(--font-mono);
-            font-size: 0.8rem;
-            font-weight: 500;
-            letter-spacing: 1px;
-            text-transform: uppercase;
-            text-decoration: none;
-            padding: 10px 20px;
-            border-radius: 4px;
-            border: 1px solid transparent;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-        }
-
-        .btn--play {
-            background: var(--tactical-red);
-            color: #fff;
-            border-color: var(--tactical-red);
-        }
-
-        .btn--play:hover {
-            background: transparent;
-            color: var(--tactical-red);
-            box-shadow: 0 0 20px var(--tactical-red-dim);
-        }
-
-        .btn--code {
-            background: transparent;
-            color: var(--energy-blue);
-            border-color: var(--energy-blue);
-        }
-
-        .btn--code:hover {
-            background: var(--energy-blue);
-            color: #fff;
-            box-shadow: 0 0 20px var(--energy-blue-dim);
-        }
-
-        .btn--demo {
-            background: transparent;
-            color: var(--online-green);
-            border-color: var(--online-green);
-        }
-
-        .btn--demo:hover {
-            background: var(--online-green);
-            color: #fff;
-            box-shadow: 0 0 20px rgba(40, 167, 69, 0.3);
-        }
-
-        .btn--docs {
-            background: transparent;
-            color: var(--field-gold);
-            border-color: var(--field-gold-dim);
-        }
-
-        .btn--docs:hover {
-            background: var(--field-gold);
-            color: var(--deep-space);
-        }
-
-        /* ---- FEATURED CARD (QRCodeP2P) ---- */
-        .featured-card {
-            max-width: 50rem;
-            margin: 0 auto;
-        }
-
-        .featured-card .project-card__body {
-            padding: 24px;
-        }
-
-        .featured-card .project-card__image {
-            aspect-ratio: 21 / 9;
-        }
-
-        /* ---- POC BADGE ---- */
-        .badge-poc {
-            font-family: var(--font-mono);
-            font-size: 0.6rem;
-            color: var(--deep-space);
-            background: var(--field-gold);
-            padding: 2px 8px;
-            border-radius: 3px;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            margin-left: 8px;
-            vertical-align: middle;
-        }
-
-        /* ---- FOOTER / MOUNTAIN SILHOUETTE ---- */
-        .footer {
-            position: relative;
-            text-align: center;
-            padding: 0 0 30px;
-            margin-top: 40px;
-        }
-
-        .footer__mountains {
-            width: 100%;
-            display: block;
-            margin-bottom: 20px;
-        }
-
-        .footer__text {
-            font-family: var(--font-mono);
-            font-size: 0.75rem;
-            color: var(--text-secondary);
-            letter-spacing: 1px;
-        }
-
-        .footer__text a {
-            color: var(--energy-blue);
-            text-decoration: none;
-            transition: color 0.3s ease;
-        }
-
-        .footer__text a:hover {
-            color: var(--field-gold);
-        }
-
-        /* ---- ZOOM MODAL ---- */
-        .zoom-overlay {
-            position: fixed;
-            top: 0; left: 0;
-            width: 100%; height: 100%;
-            background: rgba(10, 10, 25, 0.94);
-            z-index: 1000;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 32px;
-            opacity: 0;
-            visibility: hidden;
-            transition: opacity 0.35s ease, visibility 0.35s ease;
-            backdrop-filter: blur(10px);
-            -webkit-backdrop-filter: blur(10px);
-            cursor: pointer;
-        }
-
-        .zoom-overlay.active {
-            opacity: 1;
-            visibility: visible;
-        }
-
-        .zoom-card {
-            background: var(--card-bg);
-            border: 2px solid var(--field-gold);
-            border-radius: 16px;
-            overflow: hidden;
-            max-width: 900px;
-            width: 100%;
-            max-height: 92vh;
-            overflow-y: auto;
-            transform: scale(0.85) translateY(30px);
-            transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
-            box-shadow:
-                0 24px 80px rgba(0, 0, 0, 0.7),
-                0 0 50px var(--field-gold-dim);
-            cursor: default;
-        }
-
-        .zoom-overlay.active .zoom-card {
-            transform: scale(1) translateY(0);
-        }
-
-        /* Side-by-side layout on desktop */
-        .zoom-card__layout {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-        }
-
-        .zoom-card__image-col {
-            overflow: hidden;
-        }
-
-        .zoom-card__image {
-            width: 100%;
-            height: 100%;
-            min-height: 300px;
-            object-fit: cover;
-            display: block;
-        }
-
-        .zoom-card__body {
-            padding: 40px;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            overflow-y: auto;
-            max-height: 80vh;
-        }
-
-        .zoom-card .project-card__name {
-            font-family: var(--font-display);
-            font-weight: 700;
-            font-size: 2.5rem;
-            color: var(--snow-white);
-            margin-bottom: 16px;
-            letter-spacing: 2px;
-            line-height: 1.2;
-        }
-
-        .zoom-card .project-card__subtitle {
-            font-family: var(--font-mono);
-            font-size: 1.1rem;
-            color: var(--field-gold);
-            margin-bottom: 24px;
-            letter-spacing: 1px;
-        }
-
-        .zoom-card .project-card__desc {
-            font-size: 1.45rem;
-            color: #d8d8ee;
-            line-height: 1.9;
-            margin-bottom: 24px;
-        }
-
-        .zoom-card .project-card__desc strong {
-            color: #fff;
-            font-weight: 600;
-        }
-
-        .zoom-card .project-card__desc code {
-            font-size: 0.9em;
-        }
-
-        .zoom-card .project-card__kicker {
-            font-family: var(--font-mono);
-            font-size: 1rem;
-            color: var(--field-gold);
-            font-style: italic;
-            margin-bottom: 24px;
-            opacity: 0.9;
-        }
-
-        .zoom-card .tech-tags {
-            margin-bottom: 24px;
-            gap: 8px;
-        }
-
-        .zoom-card .tech-tag {
-            font-size: 0.8rem;
-            padding: 6px 14px;
-        }
-
-        .zoom-card .btn {
-            font-size: 0.9rem;
-            padding: 14px 28px;
-        }
-
-        .zoom-card .card-actions {
-            flex-direction: row;
-            gap: 12px;
-        }
-
-        .zoom-close {
-            position: absolute;
-            top: 20px;
-            right: 24px;
-            font-family: var(--font-mono);
-            font-size: 0.8rem;
-            color: var(--text-secondary);
-            background: rgba(30, 30, 60, 0.85);
-            border: 1px solid var(--card-border);
-            border-radius: 6px;
-            padding: 10px 18px;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            letter-spacing: 1px;
-            text-transform: uppercase;
-            z-index: 1001;
-        }
-
-        .zoom-close:hover {
-            color: var(--snow-white);
-            border-color: var(--field-gold);
-            background: rgba(212, 175, 55, 0.15);
-        }
-
-        /* ---- RESPONSIVE ---- */
-        @media (max-width: 768px) {
-            .hero { padding: 50px 16px 40px; }
-            .hero__compass { display: none; }
-            .section__header::before,
-            .section__header::after { display: none; }
-
-            /* Horizontal snap-scroll carousel for game cards */
-            .card-grid {
-                display: flex;
-                overflow-x: auto;
-                scroll-snap-type: x mandatory;
-                -webkit-overflow-scrolling: touch;
-                gap: 16px;
-                padding-bottom: 12px;
-                scrollbar-width: thin;
-                scrollbar-color: var(--field-gold-dim) transparent;
-            }
-
-            .card-grid::-webkit-scrollbar {
-                height: 4px;
-            }
-
-            .card-grid::-webkit-scrollbar-track {
-                background: transparent;
-            }
-
-            .card-grid::-webkit-scrollbar-thumb {
-                background: var(--field-gold-dim);
-                border-radius: 4px;
-            }
-
-            .card-grid > .project-card {
-                flex: 0 0 80vw;
-                max-width: 340px;
-                scroll-snap-align: center;
-            }
-
-            /* Scroll hint fade on the right edge */
-            .card-grid-wrap {
-                position: relative;
-            }
-
-            .card-grid-wrap::after {
-                content: '';
-                position: absolute;
-                top: 0; right: 0;
-                width: 40px;
-                height: calc(100% - 12px);
-                background: linear-gradient(to left, var(--deep-space), transparent);
-                pointer-events: none;
-                z-index: 3;
-            }
-
-            .card-grid--2col {
-                display: flex;
-                overflow-x: auto;
-                scroll-snap-type: x mandatory;
-                -webkit-overflow-scrolling: touch;
-                gap: 16px;
-                padding-bottom: 12px;
-                max-width: 100%;
-            }
-
-            .card-grid--2col > .project-card {
-                flex: 0 0 80vw;
-                max-width: 340px;
-                scroll-snap-align: center;
-            }
-
-            .section { padding: 40px 0; }
-            .container { padding: 0 16px; }
-            .featured-card .project-card__image { aspect-ratio: 16 / 10; }
-
-            .project-card__body { padding: 20px; }
-            .project-card__name { font-size: 1.15rem; }
-            .project-card__desc { font-size: 0.9rem; line-height: 1.7; }
-            .btn { padding: 12px 20px; font-size: 0.75rem; }
-
-            /* Mobile Zoom overrides */
-            .zoom-card__layout {
-                grid-template-columns: 1fr;
-            }
-            .zoom-overlay { padding: 16px; }
-            .zoom-card__image {
-               min-height: auto;
-               aspect-ratio: 16 / 9;
-            }
-            .zoom-card__body { padding: 28px; max-height: none; overflow-y: visible; }
-            .zoom-card .project-card__name { font-size: 1.6rem; }
-            .zoom-card .project-card__subtitle { font-size: 0.85rem; }
-            .zoom-card .project-card__desc { font-size: 1.05rem; line-height: 1.8; }
-            .zoom-card .project-card__kicker { font-size: 0.8rem; }
-            .zoom-card .btn { font-size: 0.8rem; padding: 12px 22px; }
-            .zoom-close { top: 12px; right: 16px; }
-        }
-
-        @media (max-width: 480px) {
-            .hero__name { letter-spacing: 2px; }
-            .hero__tagline { font-size: 0.65rem; }
-            .hero__org { font-size: 0.8rem; }
-
-            .card-grid > .project-card {
-                flex: 0 0 85vw;
-            }
-
-            .card-grid--2col > .project-card {
-                flex: 0 0 85vw;
-            }
-
-            .card-actions { flex-direction: column; }
-            .btn { width: 100%; justify-content: center; padding: 14px 20px; }
-            .project-card__desc { font-size: 0.88rem; }
-
-            .zoom-card__body { padding: 20px; }
-            .zoom-card .project-card__name { font-size: 1.4rem; }
-            .zoom-card .project-card__desc { font-size: 0.95rem; }
-            .zoom-card .btn { width: 100%; justify-content: center; }
-            .zoom-card .card-actions { flex-direction: column; }
-
-            .font-controls {
-                bottom: 12px;
-                right: 12px;
-                opacity: 0.7; /* Make slightly more visible on mobile */
-            }
-        }
-        /* ---- GAME VIEW ---- */
+        /* ---- GAME VIEW (fullscreen iframe overlay) ---- */
         #view-game {
             width: 100%; height: 100vh;
             position: fixed; top: 0; left: 0; right: 0; bottom: 0;
@@ -1001,214 +262,20 @@
             background: var(--field-gold); color: #000;
         }
         .quit-btn__icon { font-size: 1rem; line-height: 1; margin-top: 1px; }
-
-        @media (prefers-reduced-motion: reduce) {
-            *, *::before, *::after {
-                animation-duration: 0.001s !important;
-                animation-iteration-count: 1 !important;
-                transition-duration: 0.001s !important;
-                scroll-behavior: auto !important;
-            }
-            #starfield { display: none; }
-            .project-card { opacity: 1 !important; transform: none !important; }
-        }
-
-        #view-launcher {
-            flex-direction: column;
-            justify-content: flex-start;
-        }
-
-        /* ---- APP MENU (bottom-right floating menu) ---- */
-        /* Sole chrome for both portfolio and launcher modes. Hidden in-game. */
-        body.app-in-game .launcher-menu { display: none !important; }
-
-        .launcher-menu {
-            position: fixed;
-            bottom: 24px;
-            right: 24px;
-            z-index: 1000;
-        }
-
-        .launcher-menu__toggle {
-            width: 44px;
-            height: 44px;
-            border-radius: 50%;
-            background: rgba(20, 20, 40, 0.85);
-            backdrop-filter: blur(8px);
-            -webkit-backdrop-filter: blur(8px);
-            border: 1px solid var(--card-border);
-            color: var(--field-gold);
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            opacity: 0.6;
-            transition: opacity 0.2s ease, transform 0.2s ease, border-color 0.2s ease;
-            padding: 0;
-        }
-        .launcher-menu__toggle:hover,
-        .launcher-menu__toggle:focus-visible,
-        .launcher-menu[data-open="true"] .launcher-menu__toggle {
-            opacity: 1;
-            border-color: var(--field-gold);
-            transform: translateY(-2px);
-            outline: none;
-        }
-        .launcher-menu__toggle svg { display: block; }
-
-        .launcher-menu__panel {
-            position: absolute;
-            bottom: calc(100% + 10px);
-            right: 0;
-            min-width: 240px;
-            background: rgba(20, 20, 40, 0.92);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            border: 1px solid var(--card-border);
-            border-radius: 8px;
-            padding: 4px;
-            display: flex;
-            flex-direction: column;
-            opacity: 0;
-            transform: translateY(8px);
-            pointer-events: none;
-            transition: opacity 0.18s ease, transform 0.18s ease;
-        }
-        .launcher-menu[data-open="true"] .launcher-menu__panel {
-            opacity: 1;
-            transform: translateY(0);
-            pointer-events: auto;
-        }
-
-        .launcher-menu__section {
-            padding: 8px 4px;
-            border-bottom: 1px solid rgba(212, 175, 55, 0.15);
-        }
-        .launcher-menu__section:last-child { border-bottom: none; }
-
-        .launcher-menu__heading {
-            font-family: var(--font-mono);
-            font-size: 0.6rem;
-            text-transform: uppercase;
-            letter-spacing: 1.5px;
-            color: var(--text-secondary);
-            padding: 2px 10px 6px;
-        }
-
-        .launcher-menu__row {
-            display: flex;
-            gap: 4px;
-            padding: 0 4px;
-        }
-        .launcher-menu__btn {
-            flex: 1;
-            background: transparent;
-            border: 1px solid var(--card-border);
-            color: var(--snow-white);
-            font-family: var(--font-mono);
-            font-size: 0.75rem;
-            padding: 6px 8px;
-            border-radius: 4px;
-            cursor: pointer;
-            transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
-        }
-        .launcher-menu__btn:hover,
-        .launcher-menu__btn:focus-visible {
-            background: var(--field-gold-dim);
-            color: var(--field-gold);
-            border-color: var(--field-gold);
-            outline: none;
-        }
-        .launcher-menu__btn[data-active="true"] {
-            background: var(--field-gold-dim);
-            color: var(--field-gold);
-            border-color: var(--field-gold);
-        }
-
-        .launcher-menu__item {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            width: 100%;
-            background: transparent;
-            border: none;
-            color: var(--snow-white);
-            font-family: var(--font-mono);
-            font-size: 0.78rem;
-            padding: 8px 10px;
-            border-radius: 4px;
-            cursor: pointer;
-            text-align: left;
-            transition: background 0.15s ease, color 0.15s ease;
-        }
-        .launcher-menu__item:hover,
-        .launcher-menu__item:focus-visible {
-            background: var(--field-gold-dim);
-            color: var(--field-gold);
-            outline: none;
-        }
-        .launcher-menu__item-icon {
-            width: 16px;
-            text-align: center;
-            color: var(--field-gold);
-            opacity: 0.85;
-            flex-shrink: 0;
-        }
-        .launcher-menu__item-label { flex: 1; }
-        .launcher-menu__item-tag {
-            font-size: 0.6rem;
-            letter-spacing: 1px;
-            color: var(--text-secondary);
-            border: 1px solid var(--card-border);
-            padding: 2px 6px;
-            border-radius: 3px;
-            text-transform: uppercase;
-        }
-        .launcher-menu__item--disabled,
-        .launcher-menu__item--disabled:hover {
-            color: var(--text-secondary);
-            cursor: not-allowed;
-            background: transparent;
-        }
-        .launcher-menu__item--disabled .launcher-menu__item-icon { opacity: 0.4; }
-        .launcher-toast {
-            position: fixed;
-            top: 24px;
-            left: 50%;
-            transform: translateX(-50%);
-            padding: 12px 20px;
-            background: var(--card-bg);
-            border: 1px solid var(--field-gold);
-            border-radius: 6px;
-            color: var(--snow-white);
-            font-family: var(--font-mono);
-            font-size: 0.85rem;
-            backdrop-filter: blur(8px);
-            -webkit-backdrop-filter: blur(8px);
-            z-index: 4000;
-            opacity: 0;
-            pointer-events: none;
-            transition: opacity 0.3s ease;
-            max-width: 90vw;
-            text-align: center;
-        }
-        .launcher-toast.visible { opacity: 1; }
-        .launcher-toast.error { border-color: var(--tactical-red); }
     </style>
 </head>
 <body>
 
 <div id="starfield" aria-hidden="true"></div>
 
-<!-- ========== APP MENU (visible on both portfolio and launcher modes) ========== -->
+<!-- ========== APP MENU ========== -->
 <div class="launcher-menu" id="launcher-menu">
     <div class="launcher-menu__panel" id="launcher-menu-panel" role="menu" aria-labelledby="launcher-menu-toggle">
         <div class="launcher-menu__section">
-            <div class="launcher-menu__heading">Display Mode</div>
-            <div class="launcher-menu__row">
-                <button type="button" class="launcher-menu__btn" data-mode="portfolio" id="menu-mode-portfolio" title="Show portfolio view">Portfolio</button>
-                <button type="button" class="launcher-menu__btn" data-mode="launcher" id="menu-mode-launcher" title="Show game launcher">Launcher</button>
-            </div>
+            <a href="profile.html" class="launcher-menu__item" id="menu-profile-link" title="View Paul Gibeault's profile">
+                <span class="launcher-menu__item-icon" aria-hidden="true">👤</span>
+                <span class="launcher-menu__item-label">View Profile</span>
+            </a>
         </div>
         <div class="launcher-menu__section">
             <div class="launcher-menu__heading">Font Size</div>
@@ -1256,268 +323,15 @@
 
 <div class="page-wrapper">
 
-    <div id="view-portfolio" class="app-mode">
-
-    <!-- ========== HERO ========== -->
-    <header class="hero" id="hero">
-        <svg class="hero__compass" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-            <circle cx="50" cy="50" r="45" stroke="#D4AF37" stroke-width="1" opacity="0.4"/>
-            <circle cx="50" cy="50" r="35" stroke="#D4AF37" stroke-width="0.5" opacity="0.3"/>
-            <polygon points="50,8 54,46 50,42 46,46" fill="#D4AF37" opacity="0.6"/>
-            <polygon points="50,92 54,54 50,58 46,54" fill="#D4AF37" opacity="0.3"/>
-            <polygon points="8,50 46,46 42,50 46,54" fill="#D4AF37" opacity="0.3"/>
-            <polygon points="92,50 54,46 58,50 54,54" fill="#D4AF37" opacity="0.3"/>
-            <line x1="50" y1="5" x2="50" y2="15" stroke="#D4AF37" stroke-width="1" opacity="0.5"/>
-            <line x1="50" y1="85" x2="50" y2="95" stroke="#D4AF37" stroke-width="1" opacity="0.5"/>
-            <line x1="5" y1="50" x2="15" y2="50" stroke="#D4AF37" stroke-width="1" opacity="0.5"/>
-            <line x1="85" y1="50" x2="95" y2="50" stroke="#D4AF37" stroke-width="1" opacity="0.5"/>
-        </svg>
-
-        <h1 class="hero__name">Paul <span>Gibeault</span></h1>
-        <p class="hero__tagline"><a href="https://linkedin.com/in/paulgibeault" target="_blank" rel="noopener" style="color: inherit; text-decoration: underline;">Software Engineer</a> · <a href="https://www.bogusbasin.org/" target="_blank" rel="noopener" style="color: inherit; text-decoration: underline;">Snowboarder</a> · <a href="https://www.archives.gov/founding-docs/constitution-transcript" target="_blank" rel="noopener" style="color: inherit; text-decoration: underline;">Patriot</a></p>
-
-        <div class="hero__divider" aria-hidden="true"></div>
+    <!-- ========== LAUNCHER HEADER ========== -->
+    <header class="launcher-header">
+        <h1 class="launcher-header__title">Paul's <span>Arcade</span></h1>
+        <p class="launcher-header__subtitle">Browser games by <a href="profile.html" id="link-profile">Paul Gibeault</a></p>
     </header>
 
-    <main>
-
-        <!-- ========== MY GAMES ========== -->
-        <!-- SYNC: Game list is duplicated in #view-launcher below. Update both when adding games. -->
-        <section class="section container" id="games">
-            <h2 class="section__header">
-                My Games <span class="section__separator">//</span> Arcade
-            </h2>
-
-            <div class="card-grid">
-
-                <!-- Pi Game -->
-                <article class="project-card" id="card-pi-game">
-                    <div class="project-card__image-wrap">
-                        <img class="project-card__image" src="images/pi-game.png" alt="Pi Game — cascading digits of pi in a retro arcade style" loading="lazy">
-                    </div>
-                    <div class="project-card__body">
-                        <h3 class="project-card__name">Pi Game</h3>
-                        <p class="project-card__subtitle">Memorization Gauntlet</p>
-                        <p class="project-card__desc">
-                            <strong>One wrong digit and it's over.</strong> Tap digits of Pi on a number pad — every correct digit extends your streak. A single mistake ends it. Synthesized audio rises in pitch as you climb, particles explode across the screen, and the pressure never stops. 4 visual themes. Works offline.
-                        </p>
-                        <p class="project-card__kicker">Simple to learn. Impossible to master.</p>
-                        <div class="tech-tags">
-                            <span class="tech-tag">HTML</span>
-                            <span class="tech-tag">CSS</span>
-                            <span class="tech-tag">JS</span>
-                            <span class="tech-tag">PWA</span>
-                            <span class="tech-tag">Service Worker</span>
-                        </div>
-                        <div class="card-actions">
-                            <a href="https://paulgibeault.github.io/pi-game/" class="btn btn--play" target="_blank" rel="noopener" id="btn-play-pi">▶ Play</a>
-                            <a href="https://github.com/paulgibeault/pi-game" class="btn btn--code" target="_blank" rel="noopener" id="btn-code-pi">&lt;/&gt; Code</a>
-                        </div>
-                    </div>
-                </article>
-
-                <!-- Silicon Syndicate -->
-                <article class="project-card" id="card-si-syn">
-                    <div class="project-card__image-wrap">
-                        <img class="project-card__image" src="images/si-syn.png" alt="Silicon Syndicate — glowing circuit board traces with microcontroller chips" loading="lazy">
-                    </div>
-                    <div class="project-card__body">
-                        <h3 class="project-card__name">Silicon Syndicate</h3>
-                        <p class="project-card__subtitle">Assembly Logic Puzzle</p>
-                        <p class="project-card__desc">
-                            <strong>Program microcontrollers. Route signals. Hack the system.</strong> Write tiny assembly programs using <code>mov</code>, <code>add</code>, <code>tgt</code>, <code>slp</code>, and <code>jmp</code>. Wire sensors, MCUs, and outputs on an interactive circuit board. Match the target waveform to advance.
-                        </p>
-                        <p class="project-card__kicker">No install. No backend. Runs entirely in your browser.</p>
-                        <div class="tech-tags">
-                            <span class="tech-tag">JS</span>
-                            <span class="tech-tag">Vite</span>
-                            <span class="tech-tag">Vitest</span>
-                            <span class="tech-tag">ES Modules</span>
-                        </div>
-                        <div class="card-actions">
-                            <a href="https://paulgibeault.github.io/si-syn/" class="btn btn--play" target="_blank" rel="noopener" id="btn-play-sisyn">▶ Play</a>
-                            <a href="https://github.com/paulgibeault/si-syn" class="btn btn--code" target="_blank" rel="noopener" id="btn-code-sisyn">&lt;/&gt; Code</a>
-                        </div>
-                    </div>
-                </article>
-
-                <!-- HecknSic -->
-                <article class="project-card" id="card-hecknsic">
-                    <div class="project-card__image-wrap">
-                        <img class="project-card__image" src="images/hecknsic.png" alt="HecknSic — colorful hexagonal puzzle grid with neon glow" loading="lazy">
-                    </div>
-                    <div class="project-card__body">
-                        <h3 class="project-card__name">HecknSic</h3>
-                        <p class="project-card__subtitle">Hexagonal Puzzle</p>
-                        <p class="project-card__desc">
-                            <strong>A heckin sick hexagonal puzzle.</strong> Rotate clusters of colorful hexagons to form matches of three or more. Chain combos for exponential score multipliers. Trigger Stars, Flowers, and Bombs for explosive results.
-                        </p>
-                        <p class="project-card__kicker">Much wow. Such hexagons.</p>
-                        <div class="tech-tags">
-                            <span class="tech-tag">JS</span>
-                            <span class="tech-tag">CSS</span>
-                            <span class="tech-tag">HTML</span>
-                            <span class="tech-tag">PWA</span>
-                        </div>
-                        <div class="card-actions">
-                            <a href="https://paulgibeault.github.io/hecknsic/" class="btn btn--play" target="_blank" rel="noopener" id="btn-play-hecknsic">▶ Play</a>
-                            <a href="https://github.com/paulgibeault/hecknsic" class="btn btn--code" target="_blank" rel="noopener" id="btn-code-hecknsic">&lt;/&gt; Code</a>
-                        </div>
-                    </div>
-                </article>
-
-                <!-- Cozy Solitaire -->
-                <article class="project-card" id="card-cozy-solitaire">
-                    <div class="project-card__image-wrap">
-                        <img class="project-card__image" src="images/cozy-solitaire.png" alt="Cozy Solitaire — warm cabin scene with playing cards by the fireplace" loading="lazy">
-                    </div>
-                    <div class="project-card__body">
-                        <h3 class="project-card__name">Cozy Solitaire</h3>
-                        <p class="project-card__subtitle">Grandma-Approved Card Games</p>
-                        <p class="project-card__desc">
-                            <strong>A warm, cozy Solitaire experience.</strong> Three classic variants — Klondike, FreeCell, and Spider — rendered on HTML5 Canvas with warm browns, soft greens, and cabin vibes. Unlimited undo, auto-complete, drag-and-drop, and statistics tracking.
-                        </p>
-                        <p class="project-card__kicker">Made with ☕ and cozy vibes.</p>
-                        <div class="tech-tags">
-                            <span class="tech-tag">HTML5 Canvas</span>
-                            <span class="tech-tag">JS</span>
-                            <span class="tech-tag">ES Modules</span>
-                            <span class="tech-tag">PWA</span>
-                        </div>
-                        <div class="card-actions">
-                            <a href="https://paulgibeault.github.io/cozy-solitaire/" class="btn btn--play" target="_blank" rel="noopener" id="btn-play-cozy">▶ Play</a>
-                            <a href="https://github.com/paulgibeault/cozy-solitaire" class="btn btn--code" target="_blank" rel="noopener" id="btn-code-cozy">&lt;/&gt; Code</a>
-                        </div>
-                    </div>
-                </article>
-
-            </div>
-        </section>
-
-        <!-- ========== GAME LIBRARY ========== -->
-        <section class="section container" id="library">
-            <h2 class="section__header">
-                Game Library <span class="section__separator">//</span> Infrastructure
-            </h2>
-
-            <div class="featured-card">
-                <article class="project-card" id="card-qrcodep2p">
-                    <div class="project-card__image-wrap">
-                        <img class="project-card__image" src="images/qrcodep2p.png" alt="QRCodeP2P — two devices connected by a glowing QR code bridge" loading="lazy">
-                    </div>
-                    <div class="project-card__body">
-                        <h3 class="project-card__name">QRCodeP2P <span class="badge-poc">POC</span></h3>
-                        <p class="project-card__subtitle">Serverless Multiplayer</p>
-                        <p class="project-card__desc">
-                            <strong>No server? No problem.</strong> A proof-of-concept exploring WebRTC peer-to-peer connections using only QR codes — zero backend, zero signup. The host shares a URL or QR code, the joiner scans it, and the connection is live. The vision: drop two script tags into any single-page HTML game for instant multiplayer.
-                        </p>
-                        <p class="project-card__kicker">Still in POC phase — everything happens securely and locally after the initial exchange.</p>
-                        <div class="tech-tags">
-                            <span class="tech-tag">WebRTC</span>
-                            <span class="tech-tag">QR Codes</span>
-                            <span class="tech-tag">ES Modules</span>
-                            <span class="tech-tag">CDN-ready</span>
-                        </div>
-                        <div class="card-actions">
-                            <a href="https://paulgibeault.github.io/QRCodeP2P/" class="btn btn--demo" target="_blank" rel="noopener" id="btn-demo-qr">🧪 Demo</a>
-                            <a href="https://github.com/paulgibeault/QRCodeP2P" class="btn btn--code" target="_blank" rel="noopener" id="btn-code-qr">&lt;/&gt; Code</a>
-                            <a href="https://github.com/paulgibeault/QRCodeP2P#readme" class="btn btn--docs" target="_blank" rel="noopener" id="btn-docs-qr">📖 Docs</a>
-                        </div>
-                    </div>
-                </article>
-            </div>
-        </section>
-
-        <!-- ========== PRODUCTIVITY ========== -->
-        <section class="section container" id="tools">
-            <h2 class="section__header">
-                Productivity <span class="section__separator">//</span> Tools
-            </h2>
-
-            <div class="card-grid card-grid--2col">
-
-                <!-- Zibaldone -->
-                <article class="project-card" id="card-zibaldone">
-                    <div class="project-card__image-wrap">
-                        <img class="project-card__image" src="images/zibaldone.png" alt="Zibaldone — floating notebook pages and code snippets in a creative swirl" loading="lazy">
-                    </div>
-                    <div class="project-card__body">
-                        <h3 class="project-card__name">Zibaldone</h3>
-                        <p class="project-card__subtitle">Digital Commonplace Book</p>
-                        <p class="project-card__desc">
-                            <strong>Your digital heap of things.</strong> A local-first content archive for ideas, observations, quotes, sketches, and code. Ingest images, videos, markdown. Rich rendering with syntax highlighting and Mermaid diagrams. Your data stays on your machine.
-                        </p>
-                        <p class="project-card__kicker">A zibaldone — Italian for "heap of things."</p>
-                        <div class="tech-tags">
-                            <span class="tech-tag">React 19</span>
-                            <span class="tech-tag">TypeScript</span>
-                            <span class="tech-tag">FastAPI</span>
-                            <span class="tech-tag">MinIO</span>
-                            <span class="tech-tag">Docker</span>
-                        </div>
-                        <div class="card-actions">
-                            <a href="https://github.com/paulgibeault/Zibaldone" class="btn btn--code" target="_blank" rel="noopener" id="btn-code-zib">&lt;/&gt; Code</a>
-                        </div>
-                    </div>
-                </article>
-
-                <!-- USAi -->
-                <article class="project-card" id="card-usai">
-                    <div class="project-card__image-wrap">
-                        <img class="project-card__image" src="images/usai.png" alt="USAi — American flag with data streams and government building silhouette" loading="lazy">
-                    </div>
-                    <div class="project-card__body">
-                        <h3 class="project-card__name">USAi</h3>
-                        <p class="project-card__subtitle">Government Data MCP Server</p>
-                        <p class="project-card__desc">
-                            <strong>Government data, at your agent's fingertips.</strong> An MCP server giving AI agents structured access to the Federal Register, Congress.gov bills, votes, and member data. Search executive orders, look up your representatives, check roll call votes.
-                        </p>
-                        <p class="project-card__kicker">MIT licensed. No API key required for Federal Register.</p>
-                        <div class="tech-tags">
-                            <span class="tech-tag">TypeScript</span>
-                            <span class="tech-tag">MCP Protocol</span>
-                            <span class="tech-tag">Node.js</span>
-                        </div>
-                        <div class="card-actions">
-                            <a href="https://github.com/paulgibeault/USAi" class="btn btn--code" target="_blank" rel="noopener" id="btn-code-usai">&lt;/&gt; Code</a>
-                        </div>
-                    </div>
-                </article>
-
-            </div>
-        </section>
-
-    </main>
-
-    <!-- ========== FOOTER ========== -->
-    <footer class="footer" id="footer">
-        <!-- Idaho Sawtooth Range Silhouette -->
-        <svg class="footer__mountains" viewBox="0 0 1440 200" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-            <!-- Distant range — lighter -->
-            <path d="M0,180 L40,160 L80,170 L130,130 L180,145 L230,110 L270,125 L310,95 L340,105 L380,80 L420,100 L460,70 L500,90 L530,60 L570,85 L610,50 L650,75 L680,55 L720,40 L760,65 L800,45 L840,70 L880,50 L920,80 L960,55 L1000,75 L1040,45 L1080,65 L1120,40 L1160,60 L1200,50 L1240,70 L1280,55 L1320,80 L1360,65 L1400,85 L1440,70 L1440,200 L0,200 Z"
-                  fill="#1e1e38" opacity="0.6"/>
-            <!-- Mid range — main peaks (Sawtooth silhouette) -->
-            <path d="M0,190 L60,175 L100,180 L160,150 L200,160 L240,130 L280,145 L320,110 L350,125 L390,90 L420,105 L450,75 L480,95 L510,65 L540,85 L570,55 L600,78 L630,48 L660,70 L690,42 L720,62 L750,38 L780,58 L810,45 L840,65 L870,48 L900,72 L930,55 L960,78 L990,60 L1020,82 L1050,58 L1080,75 L1110,52 L1140,68 L1170,48 L1200,72 L1230,55 L1260,80 L1290,62 L1320,88 L1350,72 L1380,92 L1410,78 L1440,85 L1440,200 L0,200 Z"
-                  fill="#1a1a30"/>
-            <!-- Treeline / foothills -->
-            <path d="M0,195 L30,190 L60,192 L90,188 L120,191 L150,186 L180,189 L210,184 L240,187 L270,182 L300,186 L330,180 L360,184 L390,178 L420,182 L450,176 L480,180 L510,174 L540,178 L570,172 L600,176 L630,170 L660,174 L690,168 L720,173 L750,167 L780,171 L810,166 L840,170 L870,165 L900,169 L930,164 L960,168 L990,163 L1020,167 L1050,162 L1080,166 L1110,161 L1140,165 L1170,160 L1200,164 L1230,159 L1260,163 L1290,158 L1320,162 L1350,157 L1380,161 L1410,158 L1440,160 L1440,200 L0,200 Z"
-                  fill="#16162a"/>
-        </svg>
-
-        <nav class="hero__links" aria-label="Social links" style="margin-bottom: 20px;">
-            <a href="https://github.com/paulgibeault" class="hero__link" target="_blank" rel="noopener" id="link-github">GitHub</a>
-            <a href="https://linkedin.com/in/paulgibeault" class="hero__link" target="_blank" rel="noopener" id="link-linkedin">LinkedIn</a>
-        </nav>
-        <p class="footer__text">
-            © 2026 Paul Gibeault<br><br>
-            <span style="opacity: 0.7;">Note: All of this was AI Generated.</span>
-        </p>
-    </footer>
-    </div> <!-- end view-portfolio -->
-
     <!-- ========== GAME LAUNCHER ========== -->
-    <!-- SYNC: Game list is duplicated in #games section above. Update both when adding games. -->
-    <div id="view-launcher" class="app-mode hidden">
+    <!-- Game list is mirrored in profile.html (#games section). Update both when adding games. -->
+    <div id="view-launcher">
         <div class="launcher-grid" id="launcher-grid-container">
             <a href="https://paulgibeault.github.io/pi-game/" class="launcher-btn" data-game-id="pi-game" style="animation-delay: 0.0s">
                 <div class="launcher-btn__image-wrap"><img class="launcher-btn__image" src="images/pi-game.png" alt="Pi Game"></div>
@@ -1547,13 +361,13 @@
                     <p class="launcher-btn__subtitle">Card Games</p>
                 </div>
             </a>
-
         </div>
     </div>
+
     <div class="launcher-toast" id="launcher-toast" role="status" aria-live="polite"></div>
 
     <!-- ========== GAME VIEW ========== -->
-    <div id="view-game" class="app-mode hidden">
+    <div id="view-game" class="hidden">
         <div class="game-topbar">
             <h2 class="game-topbar__title" id="game-topbar-title">Paul's Arcade</h2>
             <button class="quit-btn" id="quit-game-btn" aria-label="Quit Game" title="Return to Launcher">
@@ -1565,21 +379,6 @@
 
 </div>
 
-<!-- ========== ZOOM MODAL ========== -->
-<div class="zoom-overlay" id="zoom-overlay" aria-hidden="true">
-    <button class="zoom-close" id="zoom-close">✕ Close</button>
-    <div class="zoom-card" id="zoom-card">
-        <div class="zoom-card__layout">
-            <div class="zoom-card__image-col">
-                <img class="zoom-card__image" id="zoom-img" src="" alt="">
-            </div>
-            <div class="zoom-card__body" id="zoom-body"></div>
-        </div>
-    </div>
-</div>
-
-
-
 <script>
     // ==========================================
     // STARFIELD — Dense animated twinkling stars
@@ -1588,7 +387,6 @@
         if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
         const container = document.getElementById('starfield');
         const count = 150;
-        const colorClasses = ['', 'star--warm', 'star--cool'];
 
         for (let i = 0; i < count; i++) {
             const star = document.createElement('div');
@@ -1611,92 +409,6 @@
             star.style.animationDelay = (Math.random() * 6) + 's';
             container.appendChild(star);
         }
-    })();
-
-
-
-    // ==========================================
-    // SCROLL REVEAL — Cards animate in on scroll
-    // ==========================================
-    (function scrollReveal() {
-        const cards = document.querySelectorAll('.project-card');
-
-        const observer = new IntersectionObserver((entries) => {
-            entries.forEach((entry, index) => {
-                if (entry.isIntersecting) {
-                    setTimeout(() => {
-                        entry.target.classList.add('visible');
-                    }, index * 120);
-                    observer.unobserve(entry.target);
-                }
-            });
-        }, {
-            threshold: 0.1,
-            rootMargin: '0px 0px -60px 0px'
-        });
-
-        cards.forEach(card => observer.observe(card));
-    })();
-
-    // ==========================================
-    // ZOOM MODAL — Click card to expand
-    // ==========================================
-    (function zoomModal() {
-        const overlay = document.getElementById('zoom-overlay');
-        const zoomImg = document.getElementById('zoom-img');
-        const zoomBody = document.getElementById('zoom-body');
-        const zoomClose = document.getElementById('zoom-close');
-        const cards = document.querySelectorAll('.project-card');
-
-        function openZoom(card) {
-            const img = card.querySelector('.project-card__image');
-            const body = card.querySelector('.project-card__body');
-
-            zoomImg.src = img.src;
-            zoomImg.alt = img.alt;
-            // Deep-clone DOM nodes instead of innerHTML to prevent XSS
-            zoomBody.replaceChildren();
-            for (const child of body.childNodes) {
-                zoomBody.appendChild(child.cloneNode(true));
-            }
-
-            // Prevent button clicks inside zoom from bubbling to overlay
-            zoomBody.querySelectorAll('.btn').forEach(btn => {
-                btn.addEventListener('click', e => e.stopPropagation());
-            });
-
-            overlay.classList.add('active');
-            overlay.setAttribute('aria-hidden', 'false');
-            document.body.style.overflow = 'hidden';
-        }
-
-        function closeZoom() {
-            overlay.classList.remove('active');
-            overlay.setAttribute('aria-hidden', 'true');
-            document.body.style.overflow = '';
-        }
-
-        cards.forEach(card => {
-            card.addEventListener('click', (e) => {
-                // Don't zoom if they clicked a button/link directly
-                if (e.target.closest('.btn')) return;
-                openZoom(card);
-            });
-        });
-
-        overlay.addEventListener('click', (e) => {
-            // Close if clicking outside the card content
-            if (e.target === overlay) closeZoom();
-        });
-
-        zoomClose.addEventListener('click', (e) => {
-            e.stopPropagation();
-            closeZoom();
-        });
-
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') closeZoom();
-        });
     })();
 
     // ==========================================
@@ -1757,7 +469,7 @@
     })();
 
     // ==========================================
-    // APP MENU — Bottom-right popup menu (visible in both modes)
+    // APP MENU — Bottom-right popup menu
     // ==========================================
     (function appMenu() {
         const menu = document.getElementById('launcher-menu');
@@ -1796,9 +508,6 @@
         panel.addEventListener('click', (e) => {
             const item = e.target.closest('.launcher-menu__item');
             if (item && !item.disabled) close();
-            // Mode buttons close the menu too — they're .launcher-menu__btn rows.
-            const modeBtn = e.target.closest('[data-mode]');
-            if (modeBtn) close();
         });
 
         window.__arcade = window.__arcade || {};
@@ -1806,69 +515,19 @@
     })();
 
     // ==========================================
-    // APP CONTROLLER — Mode switching & game view
+    // GAME VIEW CONTROLLER — Show/hide fullscreen game iframe
     // ==========================================
-    // Reused everywhere — exposed on window for the platform controller below.
     window.__arcade = window.__arcade || {};
-    (function appController() {
-        const d = document.documentElement;
-
-        const viewPortfolio = document.getElementById('view-portfolio');
+    (function gameViewController() {
         const viewLauncher = document.getElementById('view-launcher');
         const viewGame = document.getElementById('view-game');
         const quitGameBtn = document.getElementById('quit-game-btn');
-        const modeBtns = document.querySelectorAll('[data-mode]');
-
-        let currentMode = localStorage.getItem('appMode') || 'portfolio';
-
-        function syncModeBtns() {
-            modeBtns.forEach((b) => {
-                if (b.dataset.mode === currentMode) b.setAttribute('data-active', 'true');
-                else b.removeAttribute('data-active');
-            });
-        }
-
-        function setMode(newMode) {
-            currentMode = newMode;
-            localStorage.setItem('appMode', currentMode);
-
-            d.setAttribute('data-theme', currentMode);
-            d.classList.remove('mode-portfolio', 'mode-launcher');
-            d.classList.add('mode-' + currentMode);
-
-            if (currentMode === 'launcher') {
-                viewPortfolio.classList.add('hidden');
-                viewLauncher.classList.remove('hidden');
-            } else {
-                viewLauncher.classList.add('hidden');
-                viewPortfolio.classList.remove('hidden');
-            }
-
-            // Hide game view on mode switch — iframe pool stays mounted.
-            if (!viewGame.classList.contains('hidden')) {
-                window.__arcade.hideGameView();
-            }
-
-            syncModeBtns();
-        }
-
-        modeBtns.forEach((btn) => {
-            btn.addEventListener('click', () => {
-                setMode(btn.dataset.mode);
-                window.scrollTo(0, 0);
-            });
-        });
-
-        setMode(currentMode);
 
         quitGameBtn.addEventListener('click', () => {
             window.__arcade.hideGameView();
-            setMode('launcher');
         });
 
-        window.__arcade.setMode = setMode;
         window.__arcade.viewGame = viewGame;
-        window.__arcade.viewPortfolio = viewPortfolio;
         window.__arcade.viewLauncher = viewLauncher;
     })();
 
@@ -1893,7 +552,6 @@
         const fileLoad = document.getElementById('file-load');
         const toast = document.getElementById('launcher-toast');
         const viewGame = window.__arcade.viewGame;
-        const viewPortfolio = window.__arcade.viewPortfolio;
         const viewLauncher = window.__arcade.viewLauncher;
 
         // ---- iframe pool ----
@@ -1925,8 +583,6 @@
             activeGameId = gameId;
             topbarTitle.textContent = name || "Paul's Arcade";
 
-            viewPortfolio.classList.add('hidden');
-            viewLauncher.classList.add('hidden');
             document.body.classList.add('app-in-game');
             viewGame.classList.remove('hidden');
 

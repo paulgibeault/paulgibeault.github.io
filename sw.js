@@ -1,7 +1,9 @@
-const CACHE_NAME = 'paul-arcade-v6';
+const CACHE_NAME = 'paul-arcade-v7';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
+  './profile.html',
+  './styles.css',
   './manifest.json',
   './arcade-sdk.js',
   './images/icon-192.png',

@@ -10,7 +10,9 @@
       "Read(//Users/paulgibeault/work/zibaldone/frontend/src/**)",
       "Read(//Users/paulgibeault/work/zibaldone/frontend/**)",
       "Read(//Users/paulgibeault/work/zibaldone/**)",
-      "Read(//Users/paulgibeault/work/QRCodeP2P/**)"
+      "Read(//Users/paulgibeault/work/QRCodeP2P/**)",
+      "Bash(curl -sS http://localhost:8766/index.html)",
+      "Bash(curl -sS http://localhost:8766/profile.html)"
     ]
   }
 }
