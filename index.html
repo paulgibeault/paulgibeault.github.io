@@ -66,27 +66,6 @@
             color: var(--field-gold);
         }
 
-        .launcher-header__subtitle {
-            font-family: var(--font-mono);
-            font-size: clamp(0.7rem, 2vw, 0.85rem);
-            color: var(--text-secondary);
-            letter-spacing: 2px;
-        }
-
-        .launcher-header__subtitle a {
-            color: var(--field-gold);
-            text-decoration: none;
-            border-bottom: 1px solid var(--field-gold-dim);
-            transition: border-color 0.2s ease, color 0.2s ease;
-        }
-
-        .launcher-header__subtitle a:hover,
-        .launcher-header__subtitle a:focus-visible {
-            color: var(--snow-white);
-            border-bottom-color: var(--field-gold);
-            outline: none;
-        }
-
         /* ---- LAUNCHER GRID ---- */
         #view-launcher {
             padding: 0 40px 80px;
@@ -274,7 +253,7 @@
         <div class="launcher-menu__section">
             <a href="profile.html" class="launcher-menu__item" id="menu-profile-link" title="View Paul Gibeault's profile">
                 <span class="launcher-menu__item-icon" aria-hidden="true">👤</span>
-                <span class="launcher-menu__item-label">View Profile</span>
+                <span class="launcher-menu__item-label">Paul Gibeault</span>
             </a>
         </div>
         <div class="launcher-menu__section">
@@ -326,7 +305,6 @@
     <!-- ========== LAUNCHER HEADER ========== -->
     <header class="launcher-header">
         <h1 class="launcher-header__title">Paul's <span>Arcade</span></h1>
-        <p class="launcher-header__subtitle">Browser games by <a href="profile.html" id="link-profile">Paul Gibeault</a></p>
     </header>
 
     <!-- ========== GAME LAUNCHER ========== -->
