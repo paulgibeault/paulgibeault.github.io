@@ -1,0 +1,308 @@
+/* ========================================
+   SHARED DESIGN SYSTEM — Paul's Arcade
+   Used by index.html (launcher) and profile.html.
+   Page-specific styles live inline in each HTML file.
+   ======================================== */
+
+:root, html[data-theme="portfolio"] {
+    --deep-space: #1a1a2e;
+    --deep-space-light: #24243e;
+    --field-gold: #D4AF37;
+    --field-gold-dim: rgba(212, 175, 55, 0.3);
+    --tactical-red: #FF0000;
+    --tactical-red-dim: rgba(255, 0, 0, 0.15);
+    --energy-blue: #007BFF;
+    --energy-blue-dim: rgba(0, 123, 255, 0.15);
+    --snow-white: #f0f0f0;
+    --text-secondary: #a0a0b8;
+    --online-green: #28a745;
+    --card-bg: rgba(30, 30, 60, 0.85);
+    --card-border: rgba(212, 175, 55, 0.4);
+    --font-display: 'Orbitron', sans-serif;
+    --font-pixel: 'Press Start 2P', cursive;
+    --font-body: 'Inter', sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+}
+
+html[data-theme="launcher"] {
+    /* Slightly darker/richer for the launcher mode */
+    --deep-space: #0a0a14;
+    --deep-space-light: #16162a;
+    --card-bg: rgba(20, 20, 35, 0.90);
+    --field-gold: #E5C158;
+    --field-gold-dim: rgba(229, 193, 88, 0.35);
+}
+
+/* ---- RESET ---- */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html {
+    scroll-behavior: smooth;
+    -webkit-font-smoothing: antialiased;
+    /* Multiply base root font-size by our scaled variable */
+    font-size: calc(100% * var(--font-scale, 1));
+}
+
+body {
+    font-family: var(--font-body);
+    background: var(--deep-space);
+    color: var(--snow-white);
+    min-height: 100vh;
+    overflow-x: hidden;
+    line-height: 1.6;
+}
+
+/* ---- STARFIELD ---- */
+#starfield {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    z-index: 0;
+    pointer-events: none;
+}
+
+.star {
+    position: absolute;
+    background: #fff;
+    border-radius: 50%;
+    animation:
+        twinkle var(--duration) ease-in-out infinite alternate,
+        drift var(--drift-duration) ease-in-out infinite alternate;
+    opacity: 0;
+}
+
+.star--warm { background: #ffd89b; }
+.star--cool { background: #a0c4ff; }
+
+@keyframes twinkle {
+    0% { opacity: 0.05; transform: scale(0.6); }
+    50% { opacity: var(--max-opacity); transform: scale(1.1); }
+    100% { opacity: calc(var(--max-opacity) * 0.4); transform: scale(0.9); }
+}
+
+@keyframes drift {
+    0% { translate: 0 0; }
+    100% { translate: var(--drift-x) var(--drift-y); }
+}
+
+/* ---- SCANLINE OVERLAY ---- */
+body::after {
+    content: '';
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0, 0, 0, 0.03) 2px,
+        rgba(0, 0, 0, 0.03) 4px
+    );
+    z-index: 1;
+    pointer-events: none;
+}
+
+/* ---- MAIN CONTAINER ---- */
+.page-wrapper {
+    position: relative;
+    z-index: 2;
+}
+
+.container {
+    /* rem-based so the page can use more horizontal room when the
+       user scales fonts up — viewport still caps it. */
+    max-width: 75rem;
+    margin: 0 auto;
+    padding: 0 24px;
+}
+
+/* ---- APP MENU (bottom-right floating menu) ---- */
+/* Hidden when a game iframe is fullscreen on the launcher page. */
+body.app-in-game .launcher-menu { display: none !important; }
+
+.launcher-menu {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    z-index: 1000;
+}
+
+.launcher-menu__toggle {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: rgba(20, 20, 40, 0.85);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border: 1px solid var(--card-border);
+    color: var(--field-gold);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0.6;
+    transition: opacity 0.2s ease, transform 0.2s ease, border-color 0.2s ease;
+    padding: 0;
+}
+.launcher-menu__toggle:hover,
+.launcher-menu__toggle:focus-visible,
+.launcher-menu[data-open="true"] .launcher-menu__toggle {
+    opacity: 1;
+    border-color: var(--field-gold);
+    transform: translateY(-2px);
+    outline: none;
+}
+.launcher-menu__toggle svg { display: block; }
+
+.launcher-menu__panel {
+    position: absolute;
+    bottom: calc(100% + 10px);
+    right: 0;
+    min-width: 240px;
+    background: rgba(20, 20, 40, 0.92);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    opacity: 0;
+    transform: translateY(8px);
+    pointer-events: none;
+    transition: opacity 0.18s ease, transform 0.18s ease;
+}
+.launcher-menu[data-open="true"] .launcher-menu__panel {
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+}
+
+.launcher-menu__section {
+    padding: 8px 4px;
+    border-bottom: 1px solid rgba(212, 175, 55, 0.15);
+}
+.launcher-menu__section:last-child { border-bottom: none; }
+
+.launcher-menu__heading {
+    font-family: var(--font-mono);
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--text-secondary);
+    padding: 2px 10px 6px;
+}
+
+.launcher-menu__row {
+    display: flex;
+    gap: 4px;
+    padding: 0 4px;
+}
+.launcher-menu__btn {
+    flex: 1;
+    background: transparent;
+    border: 1px solid var(--card-border);
+    color: var(--snow-white);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    padding: 6px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.launcher-menu__btn:hover,
+.launcher-menu__btn:focus-visible {
+    background: var(--field-gold-dim);
+    color: var(--field-gold);
+    border-color: var(--field-gold);
+    outline: none;
+}
+.launcher-menu__btn[data-active="true"] {
+    background: var(--field-gold-dim);
+    color: var(--field-gold);
+    border-color: var(--field-gold);
+}
+
+.launcher-menu__item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    background: transparent;
+    border: none;
+    color: var(--snow-white);
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    padding: 8px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    text-align: left;
+    text-decoration: none;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+.launcher-menu__item:hover,
+.launcher-menu__item:focus-visible {
+    background: var(--field-gold-dim);
+    color: var(--field-gold);
+    outline: none;
+}
+.launcher-menu__item-icon {
+    width: 16px;
+    text-align: center;
+    color: var(--field-gold);
+    opacity: 0.85;
+    flex-shrink: 0;
+}
+.launcher-menu__item-label { flex: 1; }
+.launcher-menu__item-tag {
+    font-size: 0.6rem;
+    letter-spacing: 1px;
+    color: var(--text-secondary);
+    border: 1px solid var(--card-border);
+    padding: 2px 6px;
+    border-radius: 3px;
+    text-transform: uppercase;
+}
+.launcher-menu__item--disabled,
+.launcher-menu__item--disabled:hover {
+    color: var(--text-secondary);
+    cursor: not-allowed;
+    background: transparent;
+}
+.launcher-menu__item--disabled .launcher-menu__item-icon { opacity: 0.4; }
+
+/* ---- TOAST ---- */
+.launcher-toast {
+    position: fixed;
+    top: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 12px 20px;
+    background: var(--card-bg);
+    border: 1px solid var(--field-gold);
+    border-radius: 6px;
+    color: var(--snow-white);
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    z-index: 4000;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s ease;
+    max-width: 90vw;
+    text-align: center;
+}
+.launcher-toast.visible { opacity: 1; }
+.launcher-toast.error { border-color: var(--tactical-red); }
+
+/* ---- REDUCED MOTION ---- */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.001s !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001s !important;
+        scroll-behavior: auto !important;
+    }
+    #starfield { display: none; }
+}

@@ -1,0 +1,1291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <script>
+        // Apply settings immediately to avoid a flash of unstyled content.
+        // Reads font scale from arcade.v1.global.fontScale (the canonical key
+        // shared with games via the SDK); falls back to the legacy 'fontScale'
+        // key for users who set their preference before the migration.
+        (function() {
+            let scaleStr = '1';
+            const newRaw = localStorage.getItem('arcade.v1.global.fontScale');
+            if (newRaw !== null) {
+                try {
+                    const n = JSON.parse(newRaw);
+                    if (typeof n === 'number' && isFinite(n)) scaleStr = String(n);
+                } catch (e) {}
+            } else {
+                scaleStr = localStorage.getItem('fontScale') || '1';
+            }
+            document.documentElement.style.setProperty('--font-scale', scaleStr);
+            document.documentElement.setAttribute('data-theme', 'portfolio');
+            document.documentElement.classList.add('mode-portfolio');
+        })();
+    </script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Paul Gibeault — Profile</title>
+    <meta name="description" content="Profile of Paul Gibeault — software engineer, snowboarder, patriot. Browser games, open source tools, and creative projects.">
+    <meta name="author" content="Paul Gibeault">
+    <meta property="og:title" content="Paul Gibeault — Profile">
+    <meta property="og:description" content="Software engineer, snowboarder, patriot. Browser games, open source tools, and creative projects.">
+    <meta property="og:type" content="profile">
+    <meta property="og:url" content="https://paulgibeault.github.io/profile.html">
+    <link rel="manifest" href="manifest.json">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Paul's Arcade">
+    <link rel="apple-touch-icon" href="images/icon-192.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@500;700;900&family=Press+Start+2P&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+    <style>
+        /* ========================================
+           PROFILE PAGE — page-specific styles
+           ======================================== */
+
+        /* ---- TOP NAV (back to arcade) ---- */
+        .top-nav {
+            position: relative;
+            z-index: 3;
+            padding: 16px 24px 0;
+            display: flex;
+            justify-content: flex-start;
+        }
+
+        .top-nav__link {
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            color: var(--field-gold);
+            text-decoration: none;
+            padding: 6px 14px;
+            border: 1px solid var(--field-gold-dim);
+            border-radius: 4px;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+        }
+
+        .top-nav__link:hover,
+        .top-nav__link:focus-visible {
+            background: var(--field-gold-dim);
+            border-color: var(--field-gold);
+            color: var(--snow-white);
+            outline: none;
+        }
+
+        /* ---- HERO SECTION ---- */
+        .hero {
+            text-align: center;
+            padding: 60px 24px 60px;
+            position: relative;
+        }
+
+        .hero__compass {
+            position: absolute;
+            top: 30px;
+            right: 40px;
+            width: 60px;
+            height: 60px;
+            opacity: 0.25;
+            animation: compass-spin 60s linear infinite;
+        }
+
+        @keyframes compass-spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+
+        .hero__name {
+            font-family: var(--font-display);
+            font-weight: 900;
+            font-size: clamp(2rem, 6vw, 3.5rem);
+            letter-spacing: 4px;
+            color: var(--snow-white);
+            text-transform: uppercase;
+            margin-bottom: 8px;
+        }
+
+        .hero__name span {
+            color: var(--field-gold);
+        }
+
+        .hero__tagline {
+            font-family: var(--font-mono);
+            font-size: clamp(0.7rem, 2vw, 0.9rem);
+            color: var(--text-secondary);
+            letter-spacing: 2px;
+            margin-bottom: 6px;
+        }
+
+        .hero__org {
+            font-family: var(--font-body);
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            margin-bottom: 24px;
+        }
+
+        .hero__links {
+            display: flex;
+            justify-content: center;
+            gap: 16px;
+        }
+
+        .hero__link {
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            color: var(--energy-blue);
+            text-decoration: none;
+            padding: 8px 20px;
+            border: 1px solid var(--energy-blue);
+            border-radius: 4px;
+            transition: all 0.3s ease;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        .hero__link:hover {
+            background: var(--energy-blue);
+            color: var(--deep-space);
+            box-shadow: 0 0 20px rgba(0, 123, 255, 0.4);
+        }
+
+        .hero__divider {
+            width: 120px;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, var(--field-gold), transparent);
+            margin: 40px auto 0;
+        }
+
+        /* ---- SECTION HEADERS ---- */
+        .section {
+            padding: 60px 0;
+        }
+
+        .section__header {
+            font-family: var(--font-pixel);
+            font-size: clamp(0.65rem, 2vw, 0.85rem);
+            color: var(--field-gold);
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            margin-bottom: 40px;
+            text-align: center;
+            position: relative;
+        }
+
+        .section__header::before,
+        .section__header::after {
+            content: '';
+            position: absolute;
+            top: 50%;
+            width: 60px;
+            height: 1px;
+            background: var(--field-gold-dim);
+        }
+
+        .section__header::before { right: calc(50% + 160px); }
+        .section__header::after { left: calc(50% + 160px); }
+
+        .section__separator {
+            color: var(--text-secondary);
+            margin: 0 6px;
+        }
+
+        /* ---- PROJECT CARD GRID ---- */
+        .card-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(16.25rem, 1fr));
+            gap: 24px;
+        }
+
+        .card-grid--2col {
+            grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+            max-width: 50rem;
+            margin: 0 auto;
+        }
+
+        /* ---- PROJECT CARD ---- */
+        .project-card {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            overflow: hidden;
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            transition: transform 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+                        opacity 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+                        box-shadow 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+                        border-color 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+            opacity: 0;
+            transform: translateY(30px);
+            cursor: pointer;
+            will-change: transform, opacity;
+        }
+
+        .project-card.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .project-card:hover {
+            transform: translateY(-6px);
+            border-color: var(--field-gold);
+            box-shadow:
+                0 12px 40px rgba(0, 0, 0, 0.4),
+                0 0 30px var(--field-gold-dim);
+        }
+
+        .project-card__image {
+            width: 100%;
+            aspect-ratio: 16 / 10;
+            object-fit: cover;
+            display: block;
+            border-bottom: 1px solid var(--card-border);
+            transition: transform 0.4s ease;
+        }
+
+        .project-card:hover .project-card__image {
+            transform: scale(1.03);
+        }
+
+        .project-card__image-wrap {
+            overflow: hidden;
+        }
+
+        .project-card__body {
+            padding: 24px;
+        }
+
+        .project-card__name {
+            font-family: var(--font-display);
+            font-weight: 700;
+            font-size: 1.2rem;
+            color: var(--snow-white);
+            margin-bottom: 6px;
+            letter-spacing: 1px;
+        }
+
+        .project-card__subtitle {
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            color: var(--field-gold);
+            margin-bottom: 14px;
+            letter-spacing: 1px;
+        }
+
+        .project-card__desc {
+            font-size: 1.1rem;
+            color: #d1d1e0;
+            line-height: 1.8;
+            margin-bottom: 20px;
+        }
+
+        .project-card__desc strong {
+            color: var(--snow-white);
+            font-weight: 600;
+        }
+
+        .project-card__desc code {
+            font-family: var(--font-mono);
+            font-size: 0.9em;
+            color: var(--energy-blue);
+            background: rgba(0, 123, 255, 0.1);
+            padding: 1px 5px;
+            border-radius: 3px;
+        }
+
+        .project-card__kicker {
+            font-family: var(--font-mono);
+            font-size: 0.8rem;
+            color: var(--field-gold);
+            font-style: italic;
+            margin-bottom: 16px;
+            opacity: 0.85;
+        }
+
+        /* Tech Tags */
+        .tech-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-bottom: 16px;
+        }
+
+        .tech-tag {
+            font-family: var(--font-mono);
+            font-size: 0.7rem;
+            color: var(--field-gold);
+            border: 1px solid var(--field-gold-dim);
+            padding: 4px 10px;
+            border-radius: 3px;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+
+        /* Action Buttons */
+        .card-actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            font-family: var(--font-mono);
+            font-size: 0.8rem;
+            font-weight: 500;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            text-decoration: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            border: 1px solid transparent;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .btn--play {
+            background: var(--tactical-red);
+            color: #fff;
+            border-color: var(--tactical-red);
+        }
+
+        .btn--play:hover {
+            background: transparent;
+            color: var(--tactical-red);
+            box-shadow: 0 0 20px var(--tactical-red-dim);
+        }
+
+        .btn--code {
+            background: transparent;
+            color: var(--energy-blue);
+            border-color: var(--energy-blue);
+        }
+
+        .btn--code:hover {
+            background: var(--energy-blue);
+            color: #fff;
+            box-shadow: 0 0 20px var(--energy-blue-dim);
+        }
+
+        .btn--demo {
+            background: transparent;
+            color: var(--online-green);
+            border-color: var(--online-green);
+        }
+
+        .btn--demo:hover {
+            background: var(--online-green);
+            color: #fff;
+            box-shadow: 0 0 20px rgba(40, 167, 69, 0.3);
+        }
+
+        .btn--docs {
+            background: transparent;
+            color: var(--field-gold);
+            border-color: var(--field-gold-dim);
+        }
+
+        .btn--docs:hover {
+            background: var(--field-gold);
+            color: var(--deep-space);
+        }
+
+        /* ---- FEATURED CARD ---- */
+        .featured-card {
+            max-width: 50rem;
+            margin: 0 auto;
+        }
+
+        .featured-card .project-card__body {
+            padding: 24px;
+        }
+
+        .featured-card .project-card__image {
+            aspect-ratio: 21 / 9;
+        }
+
+        /* ---- POC BADGE ---- */
+        .badge-poc {
+            font-family: var(--font-mono);
+            font-size: 0.6rem;
+            color: var(--deep-space);
+            background: var(--field-gold);
+            padding: 2px 8px;
+            border-radius: 3px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-left: 8px;
+            vertical-align: middle;
+        }
+
+        /* ---- FOOTER / MOUNTAIN SILHOUETTE ---- */
+        .footer {
+            position: relative;
+            text-align: center;
+            padding: 0 0 30px;
+            margin-top: 40px;
+        }
+
+        .footer__mountains {
+            width: 100%;
+            display: block;
+            margin-bottom: 20px;
+        }
+
+        .footer__text {
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            letter-spacing: 1px;
+        }
+
+        .footer__text a {
+            color: var(--energy-blue);
+            text-decoration: none;
+            transition: color 0.3s ease;
+        }
+
+        .footer__text a:hover {
+            color: var(--field-gold);
+        }
+
+        /* ---- ZOOM MODAL ---- */
+        .zoom-overlay {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(10, 10, 25, 0.94);
+            z-index: 1000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 32px;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.35s ease, visibility 0.35s ease;
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            cursor: pointer;
+        }
+
+        .zoom-overlay.active {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .zoom-card {
+            background: var(--card-bg);
+            border: 2px solid var(--field-gold);
+            border-radius: 16px;
+            overflow: hidden;
+            max-width: 900px;
+            width: 100%;
+            max-height: 92vh;
+            overflow-y: auto;
+            transform: scale(0.85) translateY(30px);
+            transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+            box-shadow:
+                0 24px 80px rgba(0, 0, 0, 0.7),
+                0 0 50px var(--field-gold-dim);
+            cursor: default;
+        }
+
+        .zoom-overlay.active .zoom-card {
+            transform: scale(1) translateY(0);
+        }
+
+        .zoom-card__layout {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+        }
+
+        .zoom-card__image-col {
+            overflow: hidden;
+        }
+
+        .zoom-card__image {
+            width: 100%;
+            height: 100%;
+            min-height: 300px;
+            object-fit: cover;
+            display: block;
+        }
+
+        .zoom-card__body {
+            padding: 40px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            overflow-y: auto;
+            max-height: 80vh;
+        }
+
+        .zoom-card .project-card__name {
+            font-family: var(--font-display);
+            font-weight: 700;
+            font-size: 2.5rem;
+            color: var(--snow-white);
+            margin-bottom: 16px;
+            letter-spacing: 2px;
+            line-height: 1.2;
+        }
+
+        .zoom-card .project-card__subtitle {
+            font-family: var(--font-mono);
+            font-size: 1.1rem;
+            color: var(--field-gold);
+            margin-bottom: 24px;
+            letter-spacing: 1px;
+        }
+
+        .zoom-card .project-card__desc {
+            font-size: 1.45rem;
+            color: #d8d8ee;
+            line-height: 1.9;
+            margin-bottom: 24px;
+        }
+
+        .zoom-card .project-card__desc strong {
+            color: #fff;
+            font-weight: 600;
+        }
+
+        .zoom-card .project-card__desc code {
+            font-size: 0.9em;
+        }
+
+        .zoom-card .project-card__kicker {
+            font-family: var(--font-mono);
+            font-size: 1rem;
+            color: var(--field-gold);
+            font-style: italic;
+            margin-bottom: 24px;
+            opacity: 0.9;
+        }
+
+        .zoom-card .tech-tags {
+            margin-bottom: 24px;
+            gap: 8px;
+        }
+
+        .zoom-card .tech-tag {
+            font-size: 0.8rem;
+            padding: 6px 14px;
+        }
+
+        .zoom-card .btn {
+            font-size: 0.9rem;
+            padding: 14px 28px;
+        }
+
+        .zoom-card .card-actions {
+            flex-direction: row;
+            gap: 12px;
+        }
+
+        .zoom-close {
+            position: absolute;
+            top: 20px;
+            right: 24px;
+            font-family: var(--font-mono);
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            background: rgba(30, 30, 60, 0.85);
+            border: 1px solid var(--card-border);
+            border-radius: 6px;
+            padding: 10px 18px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            z-index: 1001;
+        }
+
+        .zoom-close:hover {
+            color: var(--snow-white);
+            border-color: var(--field-gold);
+            background: rgba(212, 175, 55, 0.15);
+        }
+
+        /* ---- RESPONSIVE ---- */
+        @media (max-width: 768px) {
+            .hero { padding: 40px 16px 40px; }
+            .hero__compass { display: none; }
+            .section__header::before,
+            .section__header::after { display: none; }
+
+            /* Horizontal snap-scroll carousel for game cards */
+            .card-grid {
+                display: flex;
+                overflow-x: auto;
+                scroll-snap-type: x mandatory;
+                -webkit-overflow-scrolling: touch;
+                gap: 16px;
+                padding-bottom: 12px;
+                scrollbar-width: thin;
+                scrollbar-color: var(--field-gold-dim) transparent;
+            }
+
+            .card-grid::-webkit-scrollbar {
+                height: 4px;
+            }
+
+            .card-grid::-webkit-scrollbar-track {
+                background: transparent;
+            }
+
+            .card-grid::-webkit-scrollbar-thumb {
+                background: var(--field-gold-dim);
+                border-radius: 4px;
+            }
+
+            .card-grid > .project-card {
+                flex: 0 0 80vw;
+                max-width: 340px;
+                scroll-snap-align: center;
+            }
+
+            .card-grid--2col {
+                display: flex;
+                overflow-x: auto;
+                scroll-snap-type: x mandatory;
+                -webkit-overflow-scrolling: touch;
+                gap: 16px;
+                padding-bottom: 12px;
+                max-width: 100%;
+            }
+
+            .card-grid--2col > .project-card {
+                flex: 0 0 80vw;
+                max-width: 340px;
+                scroll-snap-align: center;
+            }
+
+            .section { padding: 40px 0; }
+            .container { padding: 0 16px; }
+            .featured-card .project-card__image { aspect-ratio: 16 / 10; }
+
+            .project-card__body { padding: 20px; }
+            .project-card__name { font-size: 1.15rem; }
+            .project-card__desc { font-size: 0.9rem; line-height: 1.7; }
+            .btn { padding: 12px 20px; font-size: 0.75rem; }
+
+            /* Mobile Zoom overrides */
+            .zoom-card__layout {
+                grid-template-columns: 1fr;
+            }
+            .zoom-overlay { padding: 16px; }
+            .zoom-card__image {
+               min-height: auto;
+               aspect-ratio: 16 / 9;
+            }
+            .zoom-card__body { padding: 28px; max-height: none; overflow-y: visible; }
+            .zoom-card .project-card__name { font-size: 1.6rem; }
+            .zoom-card .project-card__subtitle { font-size: 0.85rem; }
+            .zoom-card .project-card__desc { font-size: 1.05rem; line-height: 1.8; }
+            .zoom-card .project-card__kicker { font-size: 0.8rem; }
+            .zoom-card .btn { font-size: 0.8rem; padding: 12px 22px; }
+            .zoom-close { top: 12px; right: 16px; }
+        }
+
+        @media (max-width: 480px) {
+            .hero__name { letter-spacing: 2px; }
+            .hero__tagline { font-size: 0.65rem; }
+            .hero__org { font-size: 0.8rem; }
+
+            .card-grid > .project-card {
+                flex: 0 0 85vw;
+            }
+
+            .card-grid--2col > .project-card {
+                flex: 0 0 85vw;
+            }
+
+            .card-actions { flex-direction: column; }
+            .btn { width: 100%; justify-content: center; padding: 14px 20px; }
+            .project-card__desc { font-size: 0.88rem; }
+
+            .zoom-card__body { padding: 20px; }
+            .zoom-card .project-card__name { font-size: 1.4rem; }
+            .zoom-card .project-card__desc { font-size: 0.95rem; }
+            .zoom-card .btn { width: 100%; justify-content: center; }
+            .zoom-card .card-actions { flex-direction: column; }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .project-card { opacity: 1 !important; transform: none !important; }
+        }
+    </style>
+</head>
+<body>
+
+<div id="starfield" aria-hidden="true"></div>
+
+<!-- ========== APP MENU ========== -->
+<div class="launcher-menu" id="launcher-menu">
+    <div class="launcher-menu__panel" id="launcher-menu-panel" role="menu" aria-labelledby="launcher-menu-toggle">
+        <div class="launcher-menu__section">
+            <a href="./" class="launcher-menu__item" id="menu-arcade-link" title="Go to Paul's Arcade">
+                <span class="launcher-menu__item-icon" aria-hidden="true">▶</span>
+                <span class="launcher-menu__item-label">Paul's Arcade</span>
+            </a>
+        </div>
+        <div class="launcher-menu__section">
+            <div class="launcher-menu__heading">Font Size</div>
+            <div class="launcher-menu__row">
+                <button type="button" class="launcher-menu__btn" id="menu-font-decrease" title="Decrease font size" aria-label="Decrease font size">A−</button>
+                <button type="button" class="launcher-menu__btn" id="menu-font-reset" title="Reset font size" aria-label="Reset font size">A</button>
+                <button type="button" class="launcher-menu__btn" id="menu-font-increase" title="Increase font size" aria-label="Increase font size">A+</button>
+            </div>
+        </div>
+        <div class="launcher-menu__section" id="menu-install-section" hidden>
+            <button type="button" class="launcher-menu__item" id="install-btn" title="Install as PWA">
+                <span class="launcher-menu__item-icon" aria-hidden="true">⤓</span>
+                <span class="launcher-menu__item-label">Install App</span>
+            </button>
+        </div>
+    </div>
+    <button type="button" class="launcher-menu__toggle" id="launcher-menu-toggle" aria-haspopup="true" aria-expanded="false" aria-controls="launcher-menu-panel" aria-label="Open menu" title="Menu">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <line x1="4" y1="7" x2="20" y2="7"/>
+            <line x1="4" y1="12" x2="20" y2="12"/>
+            <line x1="4" y1="17" x2="20" y2="17"/>
+        </svg>
+    </button>
+</div>
+
+<div class="page-wrapper">
+
+    <nav class="top-nav" aria-label="Site navigation">
+        <a href="./" class="top-nav__link" id="link-arcade">← Paul's Arcade</a>
+    </nav>
+
+    <!-- ========== HERO ========== -->
+    <header class="hero" id="hero">
+        <svg class="hero__compass" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <circle cx="50" cy="50" r="45" stroke="#D4AF37" stroke-width="1" opacity="0.4"/>
+            <circle cx="50" cy="50" r="35" stroke="#D4AF37" stroke-width="0.5" opacity="0.3"/>
+            <polygon points="50,8 54,46 50,42 46,46" fill="#D4AF37" opacity="0.6"/>
+            <polygon points="50,92 54,54 50,58 46,54" fill="#D4AF37" opacity="0.3"/>
+            <polygon points="8,50 46,46 42,50 46,54" fill="#D4AF37" opacity="0.3"/>
+            <polygon points="92,50 54,46 58,50 54,54" fill="#D4AF37" opacity="0.3"/>
+            <line x1="50" y1="5" x2="50" y2="15" stroke="#D4AF37" stroke-width="1" opacity="0.5"/>
+            <line x1="50" y1="85" x2="50" y2="95" stroke="#D4AF37" stroke-width="1" opacity="0.5"/>
+            <line x1="5" y1="50" x2="15" y2="50" stroke="#D4AF37" stroke-width="1" opacity="0.5"/>
+            <line x1="85" y1="50" x2="95" y2="50" stroke="#D4AF37" stroke-width="1" opacity="0.5"/>
+        </svg>
+
+        <h1 class="hero__name">Paul <span>Gibeault</span></h1>
+        <p class="hero__tagline"><a href="https://linkedin.com/in/paulgibeault" target="_blank" rel="noopener" style="color: inherit; text-decoration: underline;">Software Engineer</a> · <a href="https://www.bogusbasin.org/" target="_blank" rel="noopener" style="color: inherit; text-decoration: underline;">Snowboarder</a> · <a href="https://www.archives.gov/founding-docs/constitution-transcript" target="_blank" rel="noopener" style="color: inherit; text-decoration: underline;">Patriot</a></p>
+
+        <div class="hero__divider" aria-hidden="true"></div>
+    </header>
+
+    <main>
+
+        <!-- ========== MY GAMES ========== -->
+        <!-- Game list is mirrored in index.html (#view-launcher). Update both when adding games. -->
+        <section class="section container" id="games">
+            <h2 class="section__header">
+                My Games <span class="section__separator">//</span> Arcade
+            </h2>
+
+            <div class="card-grid">
+
+                <!-- Pi Game -->
+                <article class="project-card" id="card-pi-game">
+                    <div class="project-card__image-wrap">
+                        <img class="project-card__image" src="images/pi-game.png" alt="Pi Game — cascading digits of pi in a retro arcade style" loading="lazy">
+                    </div>
+                    <div class="project-card__body">
+                        <h3 class="project-card__name">Pi Game</h3>
+                        <p class="project-card__subtitle">Memorization Gauntlet</p>
+                        <p class="project-card__desc">
+                            <strong>One wrong digit and it's over.</strong> Tap digits of Pi on a number pad — every correct digit extends your streak. A single mistake ends it. Synthesized audio rises in pitch as you climb, particles explode across the screen, and the pressure never stops. 4 visual themes. Works offline.
+                        </p>
+                        <p class="project-card__kicker">Simple to learn. Impossible to master.</p>
+                        <div class="tech-tags">
+                            <span class="tech-tag">HTML</span>
+                            <span class="tech-tag">CSS</span>
+                            <span class="tech-tag">JS</span>
+                            <span class="tech-tag">PWA</span>
+                            <span class="tech-tag">Service Worker</span>
+                        </div>
+                        <div class="card-actions">
+                            <a href="https://paulgibeault.github.io/pi-game/" class="btn btn--play" target="_blank" rel="noopener" id="btn-play-pi">▶ Play</a>
+                            <a href="https://github.com/paulgibeault/pi-game" class="btn btn--code" target="_blank" rel="noopener" id="btn-code-pi">&lt;/&gt; Code</a>
+                        </div>
+                    </div>
+                </article>
+
+                <!-- Silicon Syndicate -->
+                <article class="project-card" id="card-si-syn">
+                    <div class="project-card__image-wrap">
+                        <img class="project-card__image" src="images/si-syn.png" alt="Silicon Syndicate — glowing circuit board traces with microcontroller chips" loading="lazy">
+                    </div>
+                    <div class="project-card__body">
+                        <h3 class="project-card__name">Silicon Syndicate</h3>
+                        <p class="project-card__subtitle">Assembly Logic Puzzle</p>
+                        <p class="project-card__desc">
+                            <strong>Program microcontrollers. Route signals. Hack the system.</strong> Write tiny assembly programs using <code>mov</code>, <code>add</code>, <code>tgt</code>, <code>slp</code>, and <code>jmp</code>. Wire sensors, MCUs, and outputs on an interactive circuit board. Match the target waveform to advance.
+                        </p>
+                        <p class="project-card__kicker">No install. No backend. Runs entirely in your browser.</p>
+                        <div class="tech-tags">
+                            <span class="tech-tag">JS</span>
+                            <span class="tech-tag">Vite</span>
+                            <span class="tech-tag">Vitest</span>
+                            <span class="tech-tag">ES Modules</span>
+                        </div>
+                        <div class="card-actions">
+                            <a href="https://paulgibeault.github.io/si-syn/" class="btn btn--play" target="_blank" rel="noopener" id="btn-play-sisyn">▶ Play</a>
+                            <a href="https://github.com/paulgibeault/si-syn" class="btn btn--code" target="_blank" rel="noopener" id="btn-code-sisyn">&lt;/&gt; Code</a>
+                        </div>
+                    </div>
+                </article>
+
+                <!-- HecknSic -->
+                <article class="project-card" id="card-hecknsic">
+                    <div class="project-card__image-wrap">
+                        <img class="project-card__image" src="images/hecknsic.png" alt="HecknSic — colorful hexagonal puzzle grid with neon glow" loading="lazy">
+                    </div>
+                    <div class="project-card__body">
+                        <h3 class="project-card__name">HecknSic</h3>
+                        <p class="project-card__subtitle">Hexagonal Puzzle</p>
+                        <p class="project-card__desc">
+                            <strong>A heckin sick hexagonal puzzle.</strong> Rotate clusters of colorful hexagons to form matches of three or more. Chain combos for exponential score multipliers. Trigger Stars, Flowers, and Bombs for explosive results.
+                        </p>
+                        <p class="project-card__kicker">Much wow. Such hexagons.</p>
+                        <div class="tech-tags">
+                            <span class="tech-tag">JS</span>
+                            <span class="tech-tag">CSS</span>
+                            <span class="tech-tag">HTML</span>
+                            <span class="tech-tag">PWA</span>
+                        </div>
+                        <div class="card-actions">
+                            <a href="https://paulgibeault.github.io/hecknsic/" class="btn btn--play" target="_blank" rel="noopener" id="btn-play-hecknsic">▶ Play</a>
+                            <a href="https://github.com/paulgibeault/hecknsic" class="btn btn--code" target="_blank" rel="noopener" id="btn-code-hecknsic">&lt;/&gt; Code</a>
+                        </div>
+                    </div>
+                </article>
+
+                <!-- Cozy Solitaire -->
+                <article class="project-card" id="card-cozy-solitaire">
+                    <div class="project-card__image-wrap">
+                        <img class="project-card__image" src="images/cozy-solitaire.png" alt="Cozy Solitaire — warm cabin scene with playing cards by the fireplace" loading="lazy">
+                    </div>
+                    <div class="project-card__body">
+                        <h3 class="project-card__name">Cozy Solitaire</h3>
+                        <p class="project-card__subtitle">Grandma-Approved Card Games</p>
+                        <p class="project-card__desc">
+                            <strong>A warm, cozy Solitaire experience.</strong> Three classic variants — Klondike, FreeCell, and Spider — rendered on HTML5 Canvas with warm browns, soft greens, and cabin vibes. Unlimited undo, auto-complete, drag-and-drop, and statistics tracking.
+                        </p>
+                        <p class="project-card__kicker">Made with ☕ and cozy vibes.</p>
+                        <div class="tech-tags">
+                            <span class="tech-tag">HTML5 Canvas</span>
+                            <span class="tech-tag">JS</span>
+                            <span class="tech-tag">ES Modules</span>
+                            <span class="tech-tag">PWA</span>
+                        </div>
+                        <div class="card-actions">
+                            <a href="https://paulgibeault.github.io/cozy-solitaire/" class="btn btn--play" target="_blank" rel="noopener" id="btn-play-cozy">▶ Play</a>
+                            <a href="https://github.com/paulgibeault/cozy-solitaire" class="btn btn--code" target="_blank" rel="noopener" id="btn-code-cozy">&lt;/&gt; Code</a>
+                        </div>
+                    </div>
+                </article>
+
+            </div>
+        </section>
+
+        <!-- ========== GAME LIBRARY ========== -->
+        <section class="section container" id="library">
+            <h2 class="section__header">
+                Game Library <span class="section__separator">//</span> Infrastructure
+            </h2>
+
+            <div class="featured-card">
+                <article class="project-card" id="card-qrcodep2p">
+                    <div class="project-card__image-wrap">
+                        <img class="project-card__image" src="images/qrcodep2p.png" alt="QRCodeP2P — two devices connected by a glowing QR code bridge" loading="lazy">
+                    </div>
+                    <div class="project-card__body">
+                        <h3 class="project-card__name">QRCodeP2P <span class="badge-poc">POC</span></h3>
+                        <p class="project-card__subtitle">Serverless Multiplayer</p>
+                        <p class="project-card__desc">
+                            <strong>No server? No problem.</strong> A proof-of-concept exploring WebRTC peer-to-peer connections using only QR codes — zero backend, zero signup. The host shares a URL or QR code, the joiner scans it, and the connection is live. The vision: drop two script tags into any single-page HTML game for instant multiplayer.
+                        </p>
+                        <p class="project-card__kicker">Still in POC phase — everything happens securely and locally after the initial exchange.</p>
+                        <div class="tech-tags">
+                            <span class="tech-tag">WebRTC</span>
+                            <span class="tech-tag">QR Codes</span>
+                            <span class="tech-tag">ES Modules</span>
+                            <span class="tech-tag">CDN-ready</span>
+                        </div>
+                        <div class="card-actions">
+                            <a href="https://paulgibeault.github.io/QRCodeP2P/" class="btn btn--demo" target="_blank" rel="noopener" id="btn-demo-qr">🧪 Demo</a>
+                            <a href="https://github.com/paulgibeault/QRCodeP2P" class="btn btn--code" target="_blank" rel="noopener" id="btn-code-qr">&lt;/&gt; Code</a>
+                            <a href="https://github.com/paulgibeault/QRCodeP2P#readme" class="btn btn--docs" target="_blank" rel="noopener" id="btn-docs-qr">📖 Docs</a>
+                        </div>
+                    </div>
+                </article>
+            </div>
+        </section>
+
+        <!-- ========== PRODUCTIVITY ========== -->
+        <section class="section container" id="tools">
+            <h2 class="section__header">
+                Productivity <span class="section__separator">//</span> Tools
+            </h2>
+
+            <div class="card-grid card-grid--2col">
+
+                <!-- Zibaldone -->
+                <article class="project-card" id="card-zibaldone">
+                    <div class="project-card__image-wrap">
+                        <img class="project-card__image" src="images/zibaldone.png" alt="Zibaldone — floating notebook pages and code snippets in a creative swirl" loading="lazy">
+                    </div>
+                    <div class="project-card__body">
+                        <h3 class="project-card__name">Zibaldone</h3>
+                        <p class="project-card__subtitle">Digital Commonplace Book</p>
+                        <p class="project-card__desc">
+                            <strong>Your digital heap of things.</strong> A local-first content archive for ideas, observations, quotes, sketches, and code. Ingest images, videos, markdown. Rich rendering with syntax highlighting and Mermaid diagrams. Your data stays on your machine.
+                        </p>
+                        <p class="project-card__kicker">A zibaldone — Italian for "heap of things."</p>
+                        <div class="tech-tags">
+                            <span class="tech-tag">React 19</span>
+                            <span class="tech-tag">TypeScript</span>
+                            <span class="tech-tag">FastAPI</span>
+                            <span class="tech-tag">MinIO</span>
+                            <span class="tech-tag">Docker</span>
+                        </div>
+                        <div class="card-actions">
+                            <a href="https://github.com/paulgibeault/Zibaldone" class="btn btn--code" target="_blank" rel="noopener" id="btn-code-zib">&lt;/&gt; Code</a>
+                        </div>
+                    </div>
+                </article>
+
+                <!-- USAi -->
+                <article class="project-card" id="card-usai">
+                    <div class="project-card__image-wrap">
+                        <img class="project-card__image" src="images/usai.png" alt="USAi — American flag with data streams and government building silhouette" loading="lazy">
+                    </div>
+                    <div class="project-card__body">
+                        <h3 class="project-card__name">USAi</h3>
+                        <p class="project-card__subtitle">Government Data MCP Server</p>
+                        <p class="project-card__desc">
+                            <strong>Government data, at your agent's fingertips.</strong> An MCP server giving AI agents structured access to the Federal Register, Congress.gov bills, votes, and member data. Search executive orders, look up your representatives, check roll call votes.
+                        </p>
+                        <p class="project-card__kicker">MIT licensed. No API key required for Federal Register.</p>
+                        <div class="tech-tags">
+                            <span class="tech-tag">TypeScript</span>
+                            <span class="tech-tag">MCP Protocol</span>
+                            <span class="tech-tag">Node.js</span>
+                        </div>
+                        <div class="card-actions">
+                            <a href="https://github.com/paulgibeault/USAi" class="btn btn--code" target="_blank" rel="noopener" id="btn-code-usai">&lt;/&gt; Code</a>
+                        </div>
+                    </div>
+                </article>
+
+            </div>
+        </section>
+
+    </main>
+
+    <!-- ========== FOOTER ========== -->
+    <footer class="footer" id="footer">
+        <!-- Idaho Sawtooth Range Silhouette -->
+        <svg class="footer__mountains" viewBox="0 0 1440 200" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <!-- Distant range — lighter -->
+            <path d="M0,180 L40,160 L80,170 L130,130 L180,145 L230,110 L270,125 L310,95 L340,105 L380,80 L420,100 L460,70 L500,90 L530,60 L570,85 L610,50 L650,75 L680,55 L720,40 L760,65 L800,45 L840,70 L880,50 L920,80 L960,55 L1000,75 L1040,45 L1080,65 L1120,40 L1160,60 L1200,50 L1240,70 L1280,55 L1320,80 L1360,65 L1400,85 L1440,70 L1440,200 L0,200 Z"
+                  fill="#1e1e38" opacity="0.6"/>
+            <!-- Mid range — main peaks (Sawtooth silhouette) -->
+            <path d="M0,190 L60,175 L100,180 L160,150 L200,160 L240,130 L280,145 L320,110 L350,125 L390,90 L420,105 L450,75 L480,95 L510,65 L540,85 L570,55 L600,78 L630,48 L660,70 L690,42 L720,62 L750,38 L780,58 L810,45 L840,65 L870,48 L900,72 L930,55 L960,78 L990,60 L1020,82 L1050,58 L1080,75 L1110,52 L1140,68 L1170,48 L1200,72 L1230,55 L1260,80 L1290,62 L1320,88 L1350,72 L1380,92 L1410,78 L1440,85 L1440,200 L0,200 Z"
+                  fill="#1a1a30"/>
+            <!-- Treeline / foothills -->
+            <path d="M0,195 L30,190 L60,192 L90,188 L120,191 L150,186 L180,189 L210,184 L240,187 L270,182 L300,186 L330,180 L360,184 L390,178 L420,182 L450,176 L480,180 L510,174 L540,178 L570,172 L600,176 L630,170 L660,174 L690,168 L720,173 L750,167 L780,171 L810,166 L840,170 L870,165 L900,169 L930,164 L960,168 L990,163 L1020,167 L1050,162 L1080,166 L1110,161 L1140,165 L1170,160 L1200,164 L1230,159 L1260,163 L1290,158 L1320,162 L1350,157 L1380,161 L1410,158 L1440,160 L1440,200 L0,200 Z"
+                  fill="#16162a"/>
+        </svg>
+
+        <nav class="hero__links" aria-label="Social links" style="margin-bottom: 20px;">
+            <a href="https://github.com/paulgibeault" class="hero__link" target="_blank" rel="noopener" id="link-github">GitHub</a>
+            <a href="https://linkedin.com/in/paulgibeault" class="hero__link" target="_blank" rel="noopener" id="link-linkedin">LinkedIn</a>
+        </nav>
+        <p class="footer__text">
+            © 2026 Paul Gibeault<br><br>
+            <span style="opacity: 0.7;">Note: All of this was AI Generated.</span>
+        </p>
+    </footer>
+
+</div>
+
+<!-- ========== ZOOM MODAL ========== -->
+<div class="zoom-overlay" id="zoom-overlay" aria-hidden="true">
+    <button class="zoom-close" id="zoom-close">✕ Close</button>
+    <div class="zoom-card" id="zoom-card">
+        <div class="zoom-card__layout">
+            <div class="zoom-card__image-col">
+                <img class="zoom-card__image" id="zoom-img" src="" alt="">
+            </div>
+            <div class="zoom-card__body" id="zoom-body"></div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // ==========================================
+    // STARFIELD — Dense animated twinkling stars
+    // ==========================================
+    (function createStarfield() {
+        if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+        const container = document.getElementById('starfield');
+        const count = 150;
+
+        for (let i = 0; i < count; i++) {
+            const star = document.createElement('div');
+            star.classList.add('star');
+            // 15% warm, 10% cool, 75% white
+            const r = Math.random();
+            if (r > 0.85) star.classList.add('star--warm');
+            else if (r > 0.75) star.classList.add('star--cool');
+
+            const size = Math.random() * 2.8 + 0.3;
+            star.style.width = size + 'px';
+            star.style.height = size + 'px';
+            star.style.left = Math.random() * 100 + '%';
+            star.style.top = Math.random() * 100 + '%';
+            star.style.setProperty('--duration', (Math.random() * 5 + 2) + 's');
+            star.style.setProperty('--max-opacity', (Math.random() * 0.7 + 0.15).toFixed(2));
+            star.style.setProperty('--drift-duration', (Math.random() * 30 + 20) + 's');
+            star.style.setProperty('--drift-x', (Math.random() * 20 - 10) + 'px');
+            star.style.setProperty('--drift-y', (Math.random() * 20 - 10) + 'px');
+            star.style.animationDelay = (Math.random() * 6) + 's';
+            container.appendChild(star);
+        }
+    })();
+
+    // ==========================================
+    // SCROLL REVEAL — Cards animate in on scroll
+    // ==========================================
+    (function scrollReveal() {
+        const cards = document.querySelectorAll('.project-card');
+
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach((entry, index) => {
+                if (entry.isIntersecting) {
+                    setTimeout(() => {
+                        entry.target.classList.add('visible');
+                    }, index * 120);
+                    observer.unobserve(entry.target);
+                }
+            });
+        }, {
+            threshold: 0.1,
+            rootMargin: '0px 0px -60px 0px'
+        });
+
+        cards.forEach(card => observer.observe(card));
+    })();
+
+    // ==========================================
+    // ZOOM MODAL — Click card to expand
+    // ==========================================
+    (function zoomModal() {
+        const overlay = document.getElementById('zoom-overlay');
+        const zoomImg = document.getElementById('zoom-img');
+        const zoomBody = document.getElementById('zoom-body');
+        const zoomClose = document.getElementById('zoom-close');
+        const cards = document.querySelectorAll('.project-card');
+
+        function openZoom(card) {
+            const img = card.querySelector('.project-card__image');
+            const body = card.querySelector('.project-card__body');
+
+            zoomImg.src = img.src;
+            zoomImg.alt = img.alt;
+            // Deep-clone DOM nodes instead of innerHTML to prevent XSS
+            zoomBody.replaceChildren();
+            for (const child of body.childNodes) {
+                zoomBody.appendChild(child.cloneNode(true));
+            }
+
+            // Prevent button clicks inside zoom from bubbling to overlay
+            zoomBody.querySelectorAll('.btn').forEach(btn => {
+                btn.addEventListener('click', e => e.stopPropagation());
+            });
+
+            overlay.classList.add('active');
+            overlay.setAttribute('aria-hidden', 'false');
+            document.body.style.overflow = 'hidden';
+        }
+
+        function closeZoom() {
+            overlay.classList.remove('active');
+            overlay.setAttribute('aria-hidden', 'true');
+            document.body.style.overflow = '';
+        }
+
+        cards.forEach(card => {
+            card.addEventListener('click', (e) => {
+                // Don't zoom if they clicked a button/link directly
+                if (e.target.closest('.btn')) return;
+                openZoom(card);
+            });
+        });
+
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) closeZoom();
+        });
+
+        zoomClose.addEventListener('click', (e) => {
+            e.stopPropagation();
+            closeZoom();
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeZoom();
+        });
+    })();
+
+    // ==========================================
+    // FONT CONTROL — Adjust root font scale
+    // ==========================================
+    (function fontControl() {
+        const d = document.documentElement;
+        const KEY = 'arcade.v1.global.fontScale';
+        const LEGACY_KEY = 'fontScale';
+
+        // One-shot migration from legacy key.
+        if (localStorage.getItem(KEY) === null) {
+            const legacy = localStorage.getItem(LEGACY_KEY);
+            if (legacy !== null) {
+                const n = parseFloat(legacy);
+                if (isFinite(n)) localStorage.setItem(KEY, JSON.stringify(n));
+            }
+        }
+        if (localStorage.getItem(LEGACY_KEY) !== null) {
+            localStorage.removeItem(LEGACY_KEY);
+        }
+
+        let scale = 1;
+        const raw = localStorage.getItem(KEY);
+        if (raw !== null) {
+            try {
+                const n = JSON.parse(raw);
+                if (typeof n === 'number' && isFinite(n)) scale = n;
+            } catch (e) {}
+        }
+
+        const FONT_MIN = 0.5;
+        const FONT_MAX = 3.0;
+        const FONT_STEP = 0.25;
+
+        function setScale(s) {
+            scale = Math.max(FONT_MIN, Math.min(s, FONT_MAX));
+            d.style.setProperty('--font-scale', scale);
+            localStorage.setItem(KEY, JSON.stringify(scale));
+        }
+
+        function bind(decId, incId, resId) {
+            const dec = document.getElementById(decId);
+            const inc = document.getElementById(incId);
+            const res = document.getElementById(resId);
+            if (dec) dec.addEventListener('click', () => setScale(scale - FONT_STEP));
+            if (inc) inc.addEventListener('click', () => setScale(scale + FONT_STEP));
+            if (res) res.addEventListener('click', () => setScale(1));
+        }
+        bind('menu-font-decrease', 'menu-font-increase', 'menu-font-reset');
+    })();
+
+    // ==========================================
+    // APP MENU — Bottom-right popup menu
+    // ==========================================
+    (function appMenu() {
+        const menu = document.getElementById('launcher-menu');
+        const toggle = document.getElementById('launcher-menu-toggle');
+        const panel = document.getElementById('launcher-menu-panel');
+        if (!menu || !toggle || !panel) return;
+
+        function open() {
+            menu.dataset.open = 'true';
+            toggle.setAttribute('aria-expanded', 'true');
+        }
+        function close() {
+            delete menu.dataset.open;
+            toggle.setAttribute('aria-expanded', 'false');
+        }
+        function isOpen() { return menu.dataset.open === 'true'; }
+
+        toggle.addEventListener('click', (e) => {
+            e.stopPropagation();
+            isOpen() ? close() : open();
+        });
+
+        document.addEventListener('click', (e) => {
+            if (!isOpen()) return;
+            if (!menu.contains(e.target)) close();
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && isOpen()) {
+                close();
+                toggle.focus();
+            }
+        });
+
+        panel.addEventListener('click', (e) => {
+            const item = e.target.closest('.launcher-menu__item');
+            if (item && !item.disabled) close();
+        });
+    })();
+
+    // ==========================================
+    // PWA INSTALL — Service worker & install flow
+    // ==========================================
+    (function pwaInstall() {
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('sw.js').catch(err => console.log('SW registration failed', err));
+        }
+
+        const installBtn = document.getElementById('install-btn');
+        const installSection = document.getElementById('menu-install-section');
+        let deferredPrompt;
+
+        function showInstallUI() {
+            if (installSection) installSection.removeAttribute('hidden');
+        }
+
+        function hideInstallUI() {
+            if (installSection) installSection.setAttribute('hidden', '');
+        }
+
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            deferredPrompt = e;
+            showInstallUI();
+        });
+
+        if (installBtn) {
+            installBtn.addEventListener('click', async () => {
+                if (!deferredPrompt) return;
+                deferredPrompt.prompt();
+                const { outcome } = await deferredPrompt.userChoice;
+                deferredPrompt = null;
+                hideInstallUI();
+                if (outcome === 'accepted') console.log('PWA installed');
+            });
+        }
+
+        window.addEventListener('appinstalled', () => {
+            deferredPrompt = null;
+            hideInstallUI();
+        });
+    })();
+</script>
+
+</body>
+</html>
