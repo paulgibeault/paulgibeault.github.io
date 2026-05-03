@@ -253,6 +253,23 @@ Re-run `./dev.sh` after editing source — it rebuilds and restages atomically.
 Only the games you pass on the command line are mounted; clicking a launcher
 button for a game that wasn't staged will 404.
 
+### Dev-mode tracing
+
+To watch the launcher↔game postMessage handshake, append `?dev=1` to either
+the launcher or the game URL once. The flag persists in
+`arcade.v1._meta.dev` (cleared with `?dev=0`), and both the launcher and the
+SDK log every message they send or receive via `console.debug`:
+
+```
+[Arcade launcher → si-syn] {type: "arcade:welcome", version: 2, ...}
+[Arcade si-syn ←]          {type: "arcade:welcome", version: 2, ...}
+[Arcade si-syn →]          {type: "arcade:hello", gameId: "si-syn", ...}
+```
+
+Useful when "did the welcome arrive yet?" is a real question — e.g. when a
+game's UI takes a moment to render and you can't tell whether it's blocked
+on the handshake or just slow.
+
 ---
 
 ## 13. Acceptance checklist
@@ -268,6 +285,28 @@ A game is considered integrated when all of the following pass:
 - [ ] Switching to launcher view and back fires `onSuspend` then `onResume`; the game pauses while hidden and resumes cleanly.
 - [ ] Standalone URL (`https://paulgibeault.github.io/<gameId>/`) still works exactly as before.
 - [ ] Service worker (if any) does not intercept requests for `/arcade-sdk.js` or other launcher assets (no `[Arcade SDK]` warning in console).
+
+### Automated check
+
+The launcher repo ships [`tools/acceptance.mjs`](tools/acceptance.mjs), a
+Playwright-driven runner that verifies every item above against a staged
+launcher. From the launcher repo:
+
+```sh
+# one-time setup
+npm install
+npx playwright install chromium
+
+# in one shell: stage launcher + game
+./dev.sh ../<your-game-repo>
+
+# in another shell: run the checklist
+npm run acceptance -- http://127.0.0.1:4791/<gameId>/
+```
+
+Output is one line per check (✓/✗) with a brief detail when something
+fails. Exit code is non-zero if any check fails — wire it into a per-game
+pre-deploy script if you want regression coverage.
 
 ---
 

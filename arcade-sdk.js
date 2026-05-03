@@ -272,9 +272,31 @@
         applySettingsToDOM();
     }
 
+    // ─── Dev-mode tracing ─────────────────────────────────────────
+    // When arcade.v1._meta.dev === 'true' (set by ?dev=1 on either launcher
+    // or game), every postMessage in/out is logged with console.debug. Safe
+    // in production: the flag is opt-in and the cost is one localStorage
+    // read per message.
+    function devModeOn() {
+        try { return localStorage.getItem('arcade.v1._meta.dev') === 'true'; }
+        catch (e) { return false; }
+    }
+    function honorDevQueryParam() {
+        try {
+            var p = new URLSearchParams(window.location.search).get('dev');
+            if (p === null) return;
+            if (p === '0' || p === 'false') {
+                localStorage.removeItem('arcade.v1._meta.dev');
+            } else {
+                localStorage.setItem('arcade.v1._meta.dev', 'true');
+            }
+        } catch (e) {}
+    }
+
     // ─── postMessage protocol ─────────────────────────────────────
     function postToParent(msg) {
         if (!framed) return;
+        if (devModeOn()) console.debug('[Arcade ' + (gameId || '?') + ' →]', msg);
         try { window.parent.postMessage(msg, parentOrigin || window.location.origin); }
         catch (e) {}
     }
@@ -295,6 +317,7 @@
         if (!data || typeof data !== 'object') return;
         var t = data.type;
         if (typeof t !== 'string' || t.indexOf(MSG_PREFIX) !== 0) return;
+        if (devModeOn()) console.debug('[Arcade ' + (gameId || '?') + ' ←]', data);
 
         switch (t) {
             case 'arcade:welcome':
@@ -373,6 +396,7 @@
         }
         gameId = opts.gameId;
 
+        honorDevQueryParam();
         injectBaseStyle();
         hydrateSettingsFromStorage();
         try { window.addEventListener('storage', onStorage); } catch (e) {}
