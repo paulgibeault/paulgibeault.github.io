@@ -229,7 +229,33 @@ both pull from `paulgibeault.github.io/images/<gameId>.png`.
 
 ---
 
-## 12. Acceptance checklist
+## 12. Local development
+
+The launcher and games must run **same-origin** for the postMessage handshake,
+shared `localStorage`, and iframe `allow-same-origin` to work end-to-end. The
+launcher repo ships [`dev.sh`](dev.sh) to stage everything for you:
+
+```sh
+# from the launcher repo
+./dev.sh ../<your-game-repo>            # one game
+./dev.sh ../si-syn ../pi-game           # multiple, served side-by-side
+./dev.sh stop                           # kill the dev server
+```
+
+`dev.sh` builds each game (`npm run build` if `package.json` declares a build
+script; otherwise serves the dir as-is), copies the launcher next to the
+game(s), rewrites absolute `https://paulgibeault.github.io` URLs to the local
+origin, and serves the result on `127.0.0.1:4791` (override with
+`ARCADE_PORT`). The launcher's own service worker auto-skips on loopback
+hosts, so edits aren't masked by stale cache.
+
+Re-run `./dev.sh` after editing source — it rebuilds and restages atomically.
+Only the games you pass on the command line are mounted; clicking a launcher
+button for a game that wasn't staged will 404.
+
+---
+
+## 13. Acceptance checklist
 
 A game is considered integrated when all of the following pass:
 
@@ -245,7 +271,7 @@ A game is considered integrated when all of the following pass:
 
 ---
 
-## 13. Reference
+## 14. Reference
 
 - Platform design: [ARCADE_PLATFORM.md](ARCADE_PLATFORM.md)
 - SDK source: [arcade-sdk.js](arcade-sdk.js)
