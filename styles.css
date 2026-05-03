@@ -223,6 +223,40 @@ body.app-in-game .launcher-menu { display: none !important; }
     border-color: var(--field-gold);
 }
 
+.launcher-menu__inline {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 4px 10px;
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: var(--snow-white);
+    cursor: pointer;
+}
+.launcher-menu__input {
+    width: 44px;
+    background: transparent;
+    border: 1px solid var(--card-border);
+    color: var(--snow-white);
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    padding: 3px 6px;
+    border-radius: 4px;
+    text-align: center;
+    -moz-appearance: textfield;
+}
+.launcher-menu__input::-webkit-outer-spin-button,
+.launcher-menu__input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+.launcher-menu__input:focus-visible {
+    outline: none;
+    border-color: var(--field-gold);
+    color: var(--field-gold);
+}
+
 .launcher-menu__item {
     display: flex;
     align-items: center;
