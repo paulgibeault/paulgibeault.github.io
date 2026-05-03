@@ -104,15 +104,15 @@ The `arcade.v1.` prefix is the **only** thing the export/import logic trusts. Ke
 
 ## Iframe pool
 
-Replace the single `<iframe>` at [index.html:1405](index.html#L1405) with a lazy-grown map of one iframe per game, all kept mounted, toggled via `display:none`.
+A lazy-grown map of one iframe per game, all kept mounted, toggled via `hidden`. Lives in the `platformController` IIFE in [index.html](index.html) — see `ensureIframe`, `showGame`, and `hideGameView`.
 
 - First launch of a game: full load.
 - Every subsequent launch: instant, with audio context, scroll, WebGL state intact.
-- The current quit handler at [index.html:1622-1627](index.html#L1622-L1627) becomes "hide" instead of `src='about:blank'`.
+- Quit hides the active iframe rather than tearing it down (`src='about:blank'`).
 
 **Watch list:**
 - Memory: each mounted iframe holds its own JS heap. With 5 games this is fine; revisit if the library grows.
-- Battery: hidden iframes can keep timers/audio running. The launcher should send a lifecycle hint (`arcade:lifecycle.suspend` / `.resume`) so games can pause loops on hide. Add to the protocol when the pool ships.
+- Battery: hidden iframes can keep timers/audio running. The launcher emits `arcade:lifecycle.suspend` / `.resume` so games can pause loops on hide.
 - Provide an escape hatch: a launcher setting to disable the pool (tear down on quit) for low-memory devices.
 
 ---

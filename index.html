@@ -1007,8 +1007,17 @@
     // PWA INSTALL — Service worker & install flow
     // ==========================================
     (function pwaInstall() {
+        // Skip SW on loopback so dev edits aren't masked by the cache, and
+        // unregister any SW left over from a previous dev session.
+        const isLoopback = /^(127\.|localhost$|0\.0\.0\.0$|::1$)/.test(location.hostname);
         if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('sw.js').catch(err => console.log('SW registration failed', err));
+            if (isLoopback) {
+                navigator.serviceWorker.getRegistrations()
+                    .then(rs => rs.forEach(r => r.unregister()))
+                    .catch(() => {});
+            } else {
+                navigator.serviceWorker.register('sw.js').catch(err => console.log('SW registration failed', err));
+            }
         }
 
         const installBtn = document.getElementById('install-btn');

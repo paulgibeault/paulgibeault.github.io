@@ -30,9 +30,17 @@ implementer's checklist.
 Drop two lines into `<head>` of `index.html`, before any game script that touches storage:
 
 ```html
-<script src="https://paulgibeault.github.io/arcade-sdk.js"></script>
+<script src="/arcade-sdk.js"></script>
 <script>Arcade.init({ gameId: '<your-game-id>' });</script>
 ```
+
+Use a **root-relative** URL (`/arcade-sdk.js`), not the absolute
+`https://paulgibeault.github.io/...` form. Both work in production, but
+root-relative also resolves correctly when a local-dev harness stages the
+launcher and game side-by-side under `127.0.0.1`, so no rewrite is needed.
+The only place root-relative breaks is opening `index.html` directly from
+disk via `file://` — which doesn't work for any modern game (modules, fonts,
+storage, fetch) anyway, so serve over `http://localhost` for dev.
 
 The SDK is a singleton (`window.Arcade`) and is safe to load standalone — when
 not framed it locks `peer.status()` to `'unavailable'` and storage falls back
@@ -205,6 +213,8 @@ and the launcher live on the same origin, sloppy scopes will collide.
 - [ ] `manifest.json` `"scope"` and `"start_url"` are scoped to `/<gameId>/`, not `/`.
 - [ ] If the game registers a service worker, register it with `{ scope: '/<gameId>/' }` and place `sw.js` inside that path.
 - [ ] The service worker only caches assets under `/<gameId>/`. **Never** cache `/arcade-sdk.js` or anything at the launcher root — the SDK will `console.warn` if it detects this at load.
+
+> The launcher's own service worker lives at `/sw.js` (root scope) and intentionally caches only launcher-owned files (`index.html`, `arcade-sdk.js`, `styles.css`, launcher images). It does not intercept game URLs. The launcher SW is also skipped on loopback hosts (`localhost`, `127.x`, `::1`) so local-dev edits to launcher or SDK are never masked by stale cache.
 
 ---
 
