@@ -4,10 +4,15 @@
 // against a running staged launcher.
 //
 //   node tools/acceptance.mjs http://127.0.0.1:4791/si-syn/
+//   node tools/acceptance.mjs --pool http://127.0.0.1:4791/
+//
+// Per-game mode (default): GAME_INTEGRATION §13 checks against the given game.
+// --pool mode: launcher-only test of the bounded LRU iframe pool (issue #7).
+//   Requires at least 3 games staged (e.g. `./dev.sh ../si-syn ../hecknsic ../pi-game`).
 //
 // Assumes the URL is already reachable — typically by running `./dev.sh
-// ../<game-repo>` in another shell. The game must be mounted at
-// <origin>/<gameId>/ and the launcher at <origin>/.
+// ../<game-repo> [...]` in another shell. The launcher must be mounted at
+// <origin>/ and (for per-game mode) the game at <origin>/<gameId>/.
 //
 // Setup (once):
 //   npm install
@@ -18,9 +23,12 @@
 import { chromium } from 'playwright';
 import { readFile } from 'node:fs/promises';
 
-const url = process.argv[2];
+const argv = process.argv.slice(2);
+const poolMode = argv[0] === '--pool';
+const url = poolMode ? argv[1] : argv[0];
 if (!url) {
     console.error('usage: node tools/acceptance.mjs <game-url>');
+    console.error('       node tools/acceptance.mjs --pool <launcher-url>');
     process.exit(2);
 }
 
@@ -28,12 +36,12 @@ let parsed;
 try { parsed = new URL(url); } catch { console.error('invalid URL:', url); process.exit(2); }
 const origin = parsed.origin;
 const segments = parsed.pathname.split('/').filter(Boolean);
-if (!segments.length) {
+const gameId = poolMode ? null : segments[0];
+if (!poolMode && !gameId) {
     console.error('URL must include a game path, e.g. /si-syn/');
     process.exit(2);
 }
-const gameId = segments[0];
-const gameUrl = `${origin}/${gameId}/`;
+const gameUrl = gameId ? `${origin}/${gameId}/` : null;
 const launcherUrl = `${origin}/`;
 
 const checks = [];
@@ -42,6 +50,18 @@ const record = (n, name, ok, detail) => checks.push({ n, name, ok, detail: detai
 const browser = await chromium.launch({ headless: true });
 
 try {
+    if (poolMode) {
+        await runPoolMode();
+    } else {
+        await runPerGame();
+    }
+} finally {
+    await browser.close();
+}
+
+await printAndExit();
+
+async function runPerGame() {
     // ─── Standalone phase ────────────────────────────────────────────
     {
         const ctx = await browser.newContext();
@@ -210,11 +230,205 @@ try {
 
         await ctx.close();
     }
-} finally {
-    await browser.close();
 }
 
-await printAndExit();
+// ─── Pool-mode (issue #7): bounded LRU iframe pool ───────────────────
+async function runPoolMode() {
+    const ctx = await browser.newContext();
+    const page = await ctx.newPage();
+    const errors = [];
+    page.on('pageerror', (err) => errors.push(err.message));
+    page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+
+    try {
+        await page.goto(launcherUrl, { waitUntil: 'load', timeout: 10_000 });
+    } catch (e) {
+        record(1, 'launcher loads', false, `goto failed: ${e.message}`);
+        await ctx.close();
+        return;
+    }
+
+    // Set cap=2 explicitly so the test is deterministic regardless of any
+    // user setting bleed-through.
+    await page.evaluate(() => {
+        localStorage.setItem('arcade.v1.global.poolCap', JSON.stringify(2));
+    });
+
+    const games = await page.$$eval('.launcher-btn[data-game-id]', (nodes) =>
+        nodes.map((n) => ({
+            gameId: n.dataset.gameId,
+            href: n.getAttribute('href'),
+        }))
+    );
+
+    if (games.length < 3) {
+        record(1, 'launcher has at least 3 games staged', false,
+            `found ${games.length}; pool eviction needs ≥3 — re-run ./dev.sh with more repos`);
+        await ctx.close();
+        return;
+    }
+    record(1, 'launcher has at least 3 games staged', true, `${games.length} games`);
+
+    const [a, b, c] = games;
+
+    async function poolSnapshot() {
+        return page.evaluate(() => {
+            const ids = [...document.querySelectorAll('#iframe-host iframe')]
+                .map((f) => f.dataset.gameId);
+            return ids;
+        });
+    }
+
+    async function launch(g) {
+        await page.evaluate(() => document.getElementById('quit-game-btn')?.click());
+        await page.waitForTimeout(50);
+        await page.click(`.launcher-btn[data-game-id="${g.gameId}"]`);
+        // Wait for the SDK in the iframe to come up so we know it's a real,
+        // settled launch (not just an attached <iframe>).
+        await page
+            .waitForFunction((gid) => {
+                const f = document.querySelector(`iframe[data-game-id="${gid}"]`);
+                return !!(f && f.contentWindow && f.contentWindow.Arcade?.context);
+            }, g.gameId, { timeout: 10_000 })
+            .catch(() => {});
+        await page.waitForTimeout(200);
+    }
+
+    // Plant a probe before A is evicted: write a known marker into A's
+    // localStorage (via the launcher origin — same origin) and confirm it
+    // survives eviction + relaunch.
+    await launch(a);
+    await page.evaluate((gid) => {
+        localStorage.setItem(`arcade.v1.${gid}.acceptance.probe`, JSON.stringify('preserved'));
+    }, a.gameId);
+
+    await launch(b);
+
+    const after2 = await poolSnapshot();
+    record(2, 'pool size = 2 after launching 2 games at cap=2',
+        after2.length === 2,
+        `iframes: [${after2.join(', ')}]`);
+
+    // Launch C — should evict A (LRU).
+    await launch(c);
+    const after3 = await poolSnapshot();
+    record(3, 'launching 3rd game evicts LRU iframe (cap=2)',
+        after3.length === 2,
+        `iframes: [${after3.join(', ')}]`);
+    record(4, 'evicted iframe is the LRU (game A), not the active or MRU',
+        !after3.includes(a.gameId) &&
+        after3.includes(b.gameId) &&
+        after3.includes(c.gameId),
+        `iframes: [${after3.join(', ')}]`);
+
+    // Verify localStorage for evicted game is intact.
+    const probe = await page.evaluate((gid) =>
+        localStorage.getItem(`arcade.v1.${gid}.acceptance.probe`), a.gameId);
+    record(5, 'evicted game\'s arcade.v1.<gameId>.* localStorage survives',
+        probe === JSON.stringify('preserved'),
+        `probe=${probe}`);
+
+    // Re-launch A — should be a fresh load, and B (now LRU) should be evicted.
+    await launch(a);
+    const after4 = await poolSnapshot();
+    record(6, 'relaunching evicted game restores it; new LRU is evicted',
+        after4.length === 2 &&
+        after4.includes(a.gameId) &&
+        !after4.includes(b.gameId),
+        `iframes: [${after4.join(', ')}]`);
+
+    // Helper: drive the numeric input the same way a user would (set value,
+    // dispatch change). The launcher persists on change, not input.
+    async function setCap(n) {
+        await page.evaluate((v) => {
+            const el = document.getElementById('menu-pool-cap-input');
+            if (!el) return;
+            el.value = String(v);
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+        }, n);
+        await page.waitForTimeout(100);
+    }
+
+    // Test cap = gameCount (effectively "all") — pool should grow.
+    const gameCount = await page.$$eval('.launcher-btn[data-game-id]', (n) => n.length);
+    await setCap(gameCount);
+    await launch(b);  // pool now has [a, c, b]; cap=gameCount so no eviction
+    const afterAll = await poolSnapshot();
+    record(7, 'cap=gameCount allows pool to grow beyond 2',
+        afterAll.length >= 3,
+        `cap=${gameCount} iframes: [${afterAll.join(', ')}]`);
+
+    // Test cap=1 immediate trim — should evict back to active only.
+    await setCap(1);
+    const afterTrim = await poolSnapshot();
+    record(8, 'lowering cap to 1 immediately trims pool to active game',
+        afterTrim.length === 1 && afterTrim.includes(b.gameId),
+        `iframes: [${afterTrim.join(', ')}]`);
+
+    // Test out-of-range input is clamped (e.g. 999 → gameCount; 0 → 1).
+    await setCap(999);
+    const clampedHigh = await page.evaluate(() =>
+        Number(JSON.parse(localStorage.getItem('arcade.v1.global.poolCap'))));
+    await setCap(0);
+    const clampedLow = await page.evaluate(() =>
+        Number(JSON.parse(localStorage.getItem('arcade.v1.global.poolCap'))));
+    record(9, 'cap input clamps out-of-range values to [1, gameCount]',
+        clampedHigh === gameCount && clampedLow === 1,
+        `999 → ${clampedHigh}, 0 → ${clampedLow} (gameCount=${gameCount})`);
+
+    // With cap=1, sequential launches must hold pool.size at exactly 1 — the
+    // outgoing active game must be evicted to make room for the incoming one.
+    await setCap(1);
+    await launch(a);
+    let snap = await poolSnapshot();
+    record(10, 'cap=1: pool stays at 1 after sequential launches (1)',
+        snap.length === 1 && snap.includes(a.gameId),
+        `iframes: [${snap.join(', ')}]`);
+    await launch(b);
+    snap = await poolSnapshot();
+    record(11, 'cap=1: outgoing active is evicted on next launch',
+        snap.length === 1 && snap.includes(b.gameId),
+        `iframes: [${snap.join(', ')}]`);
+
+    // After cap-decrease eviction, relaunching an evicted game must produce a
+    // working iframe (not an orphan stuck on about:blank). This is the user
+    // bug report: "Apps that were unloaded due to being past the limit,
+    // because I decreased it, do not reload."
+    await setCap(gameCount);
+    await launch(a);
+    await launch(b);
+    await launch(c);
+    await page.evaluate(() => document.getElementById('quit-game-btn')?.click());
+    await page.waitForTimeout(80);
+    await setCap(1);
+    snap = await poolSnapshot();
+    const trimmedTo = snap[0];
+    // Pick an evicted game (not the one that survived the trim) to relaunch.
+    const evicted = [a, b, c].find((g) => g.gameId !== trimmedTo);
+    await page.click(`.launcher-btn[data-game-id="${evicted.gameId}"]`);
+    const reloaded = await page
+        .waitForFunction((gid) => {
+            const f = document.querySelector(`iframe[data-game-id="${gid}"]`);
+            if (!f) return false;
+            // Real load: iframe is in the DOM, points at the game URL (not
+            // about:blank), and its document has rendered something.
+            try {
+                const doc = f.contentWindow?.document;
+                return f.src && !f.src.endsWith('about:blank') &&
+                    doc?.readyState === 'complete' &&
+                    (doc?.body?.children?.length || 0) > 0;
+            } catch (e) { return false; }
+        }, evicted.gameId, { timeout: 10_000 })
+        .then(() => true).catch(() => false);
+    record(12, 'evicted-by-cap-decrease game reloads on relaunch',
+        reloaded, `relaunched=${evicted.gameId}, trimmedTo=${trimmedTo}`);
+
+    record(13, 'no console errors during pool exercise',
+        errors.length === 0,
+        errors.slice(0, 2).join(' | '));
+
+    await ctx.close();
+}
 
 async function printAndExit() {
     checks.sort((a, b) => a.n - b.n);

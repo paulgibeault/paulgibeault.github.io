@@ -265,6 +265,12 @@
             </div>
         </div>
         <div class="launcher-menu__section">
+            <label class="launcher-menu__inline" for="menu-pool-cap-input" title="How many recently-played games stay loaded in memory. Lower saves battery; higher gives instant relaunch.">
+                <span>Keep in memory:</span>
+                <input type="number" id="menu-pool-cap-input" class="launcher-menu__input" inputmode="numeric" min="1" step="1" />
+            </label>
+        </div>
+        <div class="launcher-menu__section">
             <div class="launcher-menu__heading">Game Data</div>
             <button type="button" class="launcher-menu__item" id="btn-save" title="Export all arcade save data to a JSON file">
                 <span class="launcher-menu__item-icon" aria-hidden="true">↧</span>
@@ -447,6 +453,53 @@
     })();
 
     // ==========================================
+    // POOL CAP CONTROL — How many recent games to keep mounted
+    // ==========================================
+    // The user types any positive integer; we clamp to [1, gameCount] where
+    // gameCount is the number of launcher buttons. A value at the cap
+    // effectively means "all games" and disables eviction.
+    (function poolCapControl() {
+        const KEY = 'arcade.v1.global.poolCap';
+        const DEFAULT = 2;
+        const input = document.getElementById('menu-pool-cap-input');
+        if (!input) return;
+
+        const gameCount = document.querySelectorAll('.launcher-btn[data-game-id]').length || 1;
+        input.max = String(gameCount);
+        input.title = `1–${gameCount}`;
+
+        function clamp(n) {
+            if (!isFinite(n)) return DEFAULT;
+            return Math.max(1, Math.min(Math.floor(n), gameCount));
+        }
+
+        function read() {
+            try {
+                const raw = localStorage.getItem(KEY);
+                if (raw === null) return clamp(DEFAULT);
+                return clamp(Number(JSON.parse(raw)));
+            } catch (e) { return clamp(DEFAULT); }
+        }
+
+        function write(n) {
+            const v = clamp(n);
+            localStorage.setItem(KEY, JSON.stringify(v));
+            input.value = String(v);
+            if (window.__arcade && window.__arcade.applyPoolCap) {
+                window.__arcade.applyPoolCap();
+            }
+        }
+
+        input.value = String(read());
+        // Persist on commit (blur / Enter), not on every keystroke — avoids
+        // applying a transient typo like "1" while the user is typing "12".
+        input.addEventListener('change', () => write(input.value));
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+        });
+    })();
+
+    // ==========================================
     // APP MENU — Bottom-right popup menu
     // ==========================================
     (function appMenu() {
@@ -549,12 +602,54 @@
         const viewLauncher = window.__arcade.viewLauncher;
 
         // ---- iframe pool ----
+        // Map insertion order = recency; re-inserting on showGame promotes to MRU.
+        // Pool is bounded by readPoolCap(): user-tunable 1..gameCount via the
+        // launcher menu (gameCount = launcher buttons; cap=gameCount disables
+        // eviction since pool size can't exceed it). Eviction zeroes the iframe
+        // (about:blank) and removes it from the DOM, freeing the JS heap, audio
+        // context, and WebGL context. Persistent state lives in
+        // arcade.v1.<gameId>.* localStorage and survives.
         const pool = new Map(); // gameId -> { iframe, name }
         let activeGameId = null;
+        const POOL_CAP_DEFAULT = 2;
+
+        function readPoolCap() {
+            const n = Math.floor(Number(readGlobal('poolCap', POOL_CAP_DEFAULT)));
+            return isFinite(n) && n >= 1 ? n : POOL_CAP_DEFAULT;
+        }
+
+        function evictLRU(opts) {
+            const cap = readPoolCap();
+            // makingRoom = caller is about to add a new entry, so target size
+            // is cap - 1. On a settings change with no insert pending, target
+            // is the cap itself.
+            const target = (opts && opts.makingRoom) ? cap - 1 : cap;
+            // The currently-active game is protected — except when launching
+            // a NEW game that is about to take over as active. In that case
+            // the caller passes newActiveId so the *outgoing* active is
+            // evictable (otherwise cap=1 launches would leak a stale entry).
+            const protectedId = (opts && opts.newActiveId) || activeGameId;
+            while (pool.size > target) {
+                let lruId = null;
+                for (const gid of pool.keys()) {
+                    if (gid !== protectedId) { lruId = gid; break; }
+                }
+                if (!lruId) return;  // only the protected entry remains — never evict it
+                const entry = pool.get(lruId);
+                // Defensive flush — entry is already non-active (and thus already
+                // suspended), but the acceptance criteria call for an explicit
+                // hint before we drop it so cooperative games can persist state.
+                postToIframe(lruId, { type: 'arcade:lifecycle.suspend' });
+                try { entry.iframe.src = 'about:blank'; } catch (e) {}
+                entry.iframe.remove();
+                pool.delete(lruId);
+            }
+        }
 
         function ensureIframe(gameId, src, name) {
             let entry = pool.get(gameId);
             if (entry) return entry;
+            evictLRU({ makingRoom: true, newActiveId: gameId });
             const iframe = document.createElement('iframe');
             iframe.src = src;
             iframe.dataset.gameId = gameId;
@@ -570,6 +665,11 @@
 
         function showGame(gameId, src, name) {
             const entry = ensureIframe(gameId, src, name);
+            // Promote to MRU by re-inserting at the end of the Map's order.
+            if (pool.has(gameId) && [...pool.keys()].pop() !== gameId) {
+                pool.delete(gameId);
+                pool.set(gameId, entry);
+            }
             const previousGameId = activeGameId;
             for (const [gid, e] of pool) {
                 e.iframe.hidden = (gid !== gameId);
@@ -603,6 +703,7 @@
         }
 
         window.__arcade.hideGameView = hideGameView;
+        window.__arcade.applyPoolCap = evictLRU;
 
         launcherBtns.forEach((btn) => {
             btn.addEventListener('click', (e) => {

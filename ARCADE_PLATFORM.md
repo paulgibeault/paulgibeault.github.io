@@ -104,16 +104,22 @@ The `arcade.v1.` prefix is the **only** thing the export/import logic trusts. Ke
 
 ## Iframe pool
 
-A lazy-grown map of one iframe per game, all kept mounted, toggled via `hidden`. Lives in the `platformController` IIFE in [index.html](index.html) — see `ensureIframe`, `showGame`, and `hideGameView`.
+A bounded LRU map of recently-played games, all kept mounted, toggled via `hidden`. Lives in the `platformController` IIFE in [index.html](index.html) — see `ensureIframe`, `showGame`, `evictLRU`, and `hideGameView`.
 
 - First launch of a game: full load.
-- Every subsequent launch: instant, with audio context, scroll, WebGL state intact.
-- Quit hides the active iframe rather than tearing it down (`src='about:blank'`).
+- Every subsequent launch within the cap: instant, with audio context, scroll, WebGL state intact.
+- Quit hides the active iframe rather than tearing it down — instant relaunch of the last-played game.
+- When launching a new game would exceed the cap, the least-recently-used non-active entry is evicted: an `arcade:lifecycle.suspend` is sent (defensive flush — the entry is already non-active and thus already suspended), then `iframe.src = 'about:blank'` and the iframe is removed from the DOM. This frees the JS heap, audio context, and WebGL context.
 
-**Watch list:**
-- Memory: each mounted iframe holds its own JS heap. With 5 games this is fine; revisit if the library grows.
-- Battery: hidden iframes can keep timers/audio running. The launcher emits `arcade:lifecycle.suspend` / `.resume` so games can pause loops on hide.
-- Provide an escape hatch: a launcher setting to disable the pool (tear down on quit) for low-memory devices.
+**Cap policy:**
+- Default cap is **2** — keeps back-and-forth between two games instant (the common case) without unbounded growth as the catalog expands.
+- User-tunable via the *Keep in Memory* numeric input in the launcher menu. The user types any positive integer; the launcher clamps to `[1, gameCount]` where `gameCount` is the number of launcher buttons. A value at the cap (e.g. `5` when the catalog has 5 games) effectively disables eviction. Persisted at `arcade.v1.global.poolCap`.
+- The active game is **never** evicted, even at cap=1.
+- Lowering the cap trims excess entries immediately, not on the next launch.
+
+**What survives eviction:** persistent state is in `arcade.v1.<gameId>.*` localStorage and is untouched. A re-launched game does a fresh load and restores user-visible progress via the SDK's normal init path. Only in-memory state (audio decode buffers, scroll position, ephemeral UI state) is lost.
+
+**Why this matters:** WebGL contexts are a limited resource per page (browsers may drop the oldest if too many are alive); hidden iframes that haven't implemented `onSuspend` correctly keep burning CPU/battery. The cap bounds both costs regardless of catalog size and protects against misbehaving games.
 
 ---
 
@@ -189,7 +195,6 @@ If a user reports lost data:
 
 ## Open follow-ons (not in initial scope)
 
-- **Lifecycle hints** for the iframe pool (`suspend`/`resume`) so hidden games can pause work — add when battery impact becomes measurable.
 - **IndexedDB migration** for storage if any single game outgrows localStorage's ~5 MB ceiling.
 - **Last-N auto-backups in IndexedDB** as a secondary recovery channel.
 - **SDK version negotiation** — the handshake already carries `version`; bump and branch when the protocol changes.
@@ -198,5 +203,5 @@ If a user reports lost data:
 
 ## Decisions captured
 
-1. **Iframe pool: try it.** Monitor memory and battery; ship a "tear-down on quit" toggle if it becomes a problem.
+1. **Iframe pool: bounded LRU.** Default cap of 2; user-tunable to any integer in `[1, gameCount]` via the launcher menu. Active game is never evicted. Persistent state survives via `arcade.v1.<gameId>.*` localStorage.
 2. **`arcade-sdk.js` hosted at `https://paulgibeault.github.io/arcade-sdk.js`** (this repo's GitHub Pages root). Single source of truth; same-origin with every game.

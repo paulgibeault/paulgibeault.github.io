@@ -150,11 +150,23 @@ Arcade.onSettingsChange((snap) => { /* relayout canvas, etc. */ });
 
 ---
 
-## 6. Lifecycle — pause when hidden
+## 6. Lifecycle & resource utilization
 
-The launcher's iframe pool keeps every game mounted; switching away just hides
-the iframe (`display:none`). Hidden games still run timers and `requestAnimationFrame`
-unless paused, which wastes battery. The SDK delivers explicit hints:
+The launcher keeps a bounded LRU pool of recently-played iframes. The active
+game is visible; recent inactive games stay mounted (hidden) for instant
+relaunch; least-recently-used games beyond the cap are evicted entirely
+(`iframe.src = 'about:blank'` + DOM removal). The user-facing default cap is
+**2** with a numeric input in the launcher menu accepting any integer in
+`[1, gameCount]` (where `gameCount` is the number of games in the launcher).
+
+That means a well-behaved game must do two things: **pause cleanly when hidden**,
+and **survive eviction without data loss**.
+
+### 6a. Pause when hidden
+
+Hidden games still run timers and `requestAnimationFrame` unless paused, which
+wastes battery — and a pool slot occupied by a runaway game pushes other games
+out of the cache sooner. The SDK delivers explicit hints:
 
 - [ ] Subscribe to `Arcade.onSuspend(fn)` to pause your game loop / mute audio.
 - [ ] Subscribe to `Arcade.onResume(fn)` to unpause and reset any `lastTime` accumulators.
@@ -165,6 +177,34 @@ let paused = false;
 Arcade.onSuspend(() => { paused = true; audio.suspend(); });
 Arcade.onResume(() => { paused = false; lastFrame = performance.now(); audio.resume(); });
 ```
+
+### 6b. Survive eviction
+
+When a game is evicted from the pool its `window` is destroyed — JS heap, audio
+context, WebGL context, and any in-memory game state all go away. A subsequent
+launch is a **fresh page load**, identical to opening the standalone URL.
+
+- [ ] Anything worth preserving across launches must hit `arcade.v1.<gameId>.*` localStorage during play (or, at the latest, in your `onSuspend` handler). The SDK's `Arcade.state.set(...)` does this for you; raw `localStorage` is fine if you namespace correctly.
+- [ ] Do **not** assume your iframe will be alive next time the user launches your game. There is no per-iframe in-memory cache that persists across eviction.
+- [ ] In `onSuspend`, flush any debounced/coalesced writes — pending state could be lost if the launcher evicts before the next animation frame.
+
+### 6c. Be a good iframe citizen — resource hygiene
+
+Even before eviction, while a game sits hidden in the pool it should hold as
+little as possible:
+
+- [ ] Pause `requestAnimationFrame` loops in `onSuspend` (don't just skip rendering — cancel the rAF and re-request it in `onResume`).
+- [ ] `audio.suspend()` your `AudioContext`. A suspended context still exists but stops the audio thread.
+- [ ] Release WebGL contexts you don't need. Browsers cap the number of live WebGL contexts per page; the launcher's pool can have several at once. If your game has multiple canvases, share one context, or call `loseContext()` on transient ones.
+- [ ] Clear `setInterval` / `setTimeout` chains on suspend; restart on resume. Forgotten intervals are the #1 source of battery drain in hidden iframes.
+- [ ] Avoid retaining decoded asset buffers (large `ArrayBuffer`s from `decodeAudioData`, big textures) that you can re-fetch cheaply on resume — local-cache hits are nearly free.
+- [ ] Network: cancel in-flight `fetch` / WebSocket traffic on suspend if it's not user-visible work. The user is no longer looking at your game.
+- [ ] Test memory under repeated launch/quit cycles in DevTools → Memory → Heap snapshot. Snapshot before a launch and after returning to the launcher; the heap should not grow monotonically.
+
+The launcher's LRU cap protects users from games that ignore this guidance, but
+a cooperative game keeps the user's whole arcade experience snappier — under
+the cap, your hidden iframe is competing with up to one other game for memory,
+audio, and GPU resources.
 
 ---
 
@@ -283,6 +323,7 @@ A game is considered integrated when all of the following pass:
 - [ ] Launcher Save → exported JSON contains the game's keys; Launcher Load of that file restores them and the game reflects the restored state (after `onStateReplaced` or page reload).
 - [ ] Changing the launcher's font scale visibly resizes text in the game without a reload.
 - [ ] Switching to launcher view and back fires `onSuspend` then `onResume`; the game pauses while hidden and resumes cleanly.
+- [ ] Setting *Keep in Memory* to `1` in the launcher menu, launching another game, then re-launching this game does a fresh load and restores user-visible progress (high score, current level, etc.) from `arcade.v1.<gameId>.*` localStorage.
 - [ ] Standalone URL (`https://paulgibeault.github.io/<gameId>/`) still works exactly as before.
 - [ ] Service worker (if any) does not intercept requests for `/arcade-sdk.js` or other launcher assets (no `[Arcade SDK]` warning in console).
 
@@ -327,7 +368,7 @@ child  → parent: arcade:hello              { gameId, version }
 parent → child:  arcade:welcome            { version, peerStatus, settings }
 parent → child:  arcade:settings.changed   { settings }
 parent → child:  arcade:state.replaced     { }                      // after file import
-parent → child:  arcade:lifecycle.suspend  { }                      // iframe hidden
+parent → child:  arcade:lifecycle.suspend  { }                      // iframe hidden, or about to be evicted
 parent → child:  arcade:lifecycle.resume   { }                      // iframe shown
 parent → child:  arcade:peer.status        { status }
 parent → child:  arcade:peer.message       { payload, fromPeer }
