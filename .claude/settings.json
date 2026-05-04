@@ -12,7 +12,13 @@
       "Read(//Users/paulgibeault/work/zibaldone/**)",
       "Read(//Users/paulgibeault/work/QRCodeP2P/**)",
       "Bash(curl -sS http://localhost:8766/index.html)",
-      "Bash(curl -sS http://localhost:8766/profile.html)"
+      "Bash(curl -sS http://localhost:8766/profile.html)",
+      "Bash(node /tmp/repro_evict_relaunch.mjs)",
+      "Bash(node tools/repro_evict.mjs)"
+    ],
+    "additionalDirectories": [
+      "/tmp",
+      "/private/tmp"
     ]
   }
 }

@@ -117,8 +117,24 @@ body::after {
 }
 
 /* ---- APP MENU (bottom-right floating menu) ---- */
-/* Hidden when a game iframe is fullscreen on the launcher page. */
-body.app-in-game .launcher-menu { display: none !important; }
+/* In-game, the floating launcher button is replaced by the topbar hamburger;
+   the panel itself is repositioned to drop down from under the topbar so it
+   overlays the game iframe (which sits at z-index 3000). */
+body.app-in-game .launcher-menu__toggle { display: none; }
+body.app-in-game .launcher-menu {
+    bottom: auto;
+    right: 16px;
+    top: 40px;
+    z-index: 3002;
+}
+body.app-in-game .launcher-menu__panel {
+    bottom: auto;
+    top: 0;
+    transform: translateY(-8px);
+}
+body.app-in-game .launcher-menu[data-open="true"] .launcher-menu__panel {
+    transform: translateY(0);
+}
 
 .launcher-menu {
     position: fixed;

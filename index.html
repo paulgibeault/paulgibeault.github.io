@@ -231,6 +231,20 @@
             font-size: 1rem; letter-spacing: 2px; text-transform: uppercase; opacity: 0.8;
             margin: 0; padding: 0;
         }
+        .game-topbar__actions {
+            display: flex; align-items: center; gap: 8px;
+        }
+        .topbar-btn {
+            background: rgba(0, 0, 0, 0.5); border: 1px solid var(--field-gold);
+            color: var(--snow-white); padding: 4px 10px; border-radius: 4px;
+            font-family: var(--font-display); font-size: 0.8rem; cursor: pointer;
+            transition: all 0.2s ease; display: flex; align-items: center; justify-content: center;
+        }
+        .topbar-btn:hover,
+        .topbar-btn[aria-expanded="true"] {
+            background: var(--field-gold); color: #000;
+        }
+        .topbar-btn__icon { font-size: 1rem; line-height: 1; }
         .quit-btn {
             background: rgba(0, 0, 0, 0.5); border: 1px solid var(--field-gold);
             color: var(--snow-white); padding: 4px 10px; border-radius: 4px;
@@ -297,7 +311,7 @@
             </button>
         </div>
     </div>
-    <button type="button" class="launcher-menu__toggle" id="launcher-menu-toggle" aria-haspopup="true" aria-expanded="false" aria-controls="launcher-menu-panel" aria-label="Open menu" title="Menu">
+    <button type="button" class="launcher-menu__toggle" id="launcher-menu-toggle" data-launcher-menu-toggle aria-haspopup="true" aria-expanded="false" aria-controls="launcher-menu-panel" aria-label="Open menu" title="Menu">
         <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
             <line x1="4" y1="7" x2="20" y2="7"/>
             <line x1="4" y1="12" x2="20" y2="12"/>
@@ -354,9 +368,18 @@
     <div id="view-game" class="hidden">
         <div class="game-topbar">
             <h2 class="game-topbar__title" id="game-topbar-title">Paul's Arcade</h2>
-            <button class="quit-btn" id="quit-game-btn" aria-label="Quit Game" title="Return to Launcher">
-                <span class="quit-btn__icon">✕</span>
-            </button>
+            <div class="game-topbar__actions">
+                <button type="button" class="topbar-btn" id="topbar-menu-toggle" data-launcher-menu-toggle aria-haspopup="true" aria-expanded="false" aria-controls="launcher-menu-panel" aria-label="Open menu" title="Menu">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                        <line x1="4" y1="7" x2="20" y2="7"/>
+                        <line x1="4" y1="12" x2="20" y2="12"/>
+                        <line x1="4" y1="17" x2="20" y2="17"/>
+                    </svg>
+                </button>
+                <button class="quit-btn" id="quit-game-btn" aria-label="Quit Game" title="Return to Launcher">
+                    <span class="quit-btn__icon">✕</span>
+                </button>
+            </div>
         </div>
         <div id="iframe-host"></div>
     </div>
@@ -500,38 +523,49 @@
     })();
 
     // ==========================================
-    // APP MENU — Bottom-right popup menu
+    // APP MENU — Popup menu with multiple toggle anchors.
+    // The bottom-right launcher button and the in-game topbar hamburger
+    // both carry [data-launcher-menu-toggle] and share this single panel.
     // ==========================================
     (function appMenu() {
         const menu = document.getElementById('launcher-menu');
-        const toggle = document.getElementById('launcher-menu-toggle');
         const panel = document.getElementById('launcher-menu-panel');
-        if (!menu || !toggle || !panel) return;
+        const toggles = document.querySelectorAll('[data-launcher-menu-toggle]');
+        if (!menu || !panel || !toggles.length) return;
 
+        function setExpanded(v) {
+            toggles.forEach((t) => t.setAttribute('aria-expanded', v ? 'true' : 'false'));
+        }
         function open() {
             menu.dataset.open = 'true';
-            toggle.setAttribute('aria-expanded', 'true');
+            setExpanded(true);
         }
         function close() {
             delete menu.dataset.open;
-            toggle.setAttribute('aria-expanded', 'false');
+            setExpanded(false);
         }
         function isOpen() { return menu.dataset.open === 'true'; }
 
-        toggle.addEventListener('click', (e) => {
-            e.stopPropagation();
-            isOpen() ? close() : open();
+        toggles.forEach((toggle) => {
+            toggle.addEventListener('click', (e) => {
+                e.stopPropagation();
+                isOpen() ? close() : open();
+            });
         });
 
         document.addEventListener('click', (e) => {
             if (!isOpen()) return;
+            // Clicks on any toggle were already handled (and stopped propagating);
+            // anything outside the panel itself closes.
             if (!menu.contains(e.target)) close();
         });
 
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape' && isOpen()) {
                 close();
-                toggle.focus();
+                // Focus whichever toggle is currently visible (offsetParent==null when display:none).
+                const visible = Array.from(toggles).find((t) => t.offsetParent !== null);
+                if (visible) visible.focus();
             }
         });
 
@@ -543,6 +577,7 @@
 
         window.__arcade = window.__arcade || {};
         window.__arcade.launcherMenu = menu;
+        window.__arcade.closeLauncherMenu = close;
     })();
 
     // ==========================================
@@ -555,6 +590,8 @@
         const quitGameBtn = document.getElementById('quit-game-btn');
 
         quitGameBtn.addEventListener('click', () => {
+            // Close the menu first so it doesn't linger open in launcher view.
+            if (window.__arcade.closeLauncherMenu) window.__arcade.closeLauncherMenu();
             window.__arcade.hideGameView();
         });
 
@@ -658,7 +695,13 @@
             iframe.setAttribute('title', name);
             iframe.hidden = true;
             iframeHost.appendChild(iframe);
-            entry = { iframe, name };
+            // Captured at mount so postMessage targets the iframe's real origin —
+            // games can be hosted at a different origin than the launcher (e.g.
+            // launcher on localhost, game on github.io during dev).
+            let origin;
+            try { origin = new URL(src, window.location.href).origin; }
+            catch (e) { origin = window.location.origin; }
+            entry = { iframe, name, origin };
             pool.set(gameId, entry);
             return entry;
         }
@@ -728,7 +771,7 @@
             const entry = pool.get(gameId);
             if (!entry || !entry.iframe.contentWindow) return;
             if (devModeOn()) console.debug('[Arcade launcher → ' + gameId + ']', msg);
-            entry.iframe.contentWindow.postMessage(msg, window.location.origin);
+            entry.iframe.contentWindow.postMessage(msg, entry.origin || window.location.origin);
         }
 
         function broadcast(msg) {
