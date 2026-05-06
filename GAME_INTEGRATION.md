@@ -118,7 +118,7 @@ Arcade.state.migrate('v1', () => {
 
 - [ ] Use `Arcade.player.name()` / `Arcade.player.setName(s)` for the sticky display name. It lives at `arcade.v1.global.playerName` so every game shares it.
 - [ ] If your game has a leaderboard, use `Arcade.scores.add(category, { score, name?, meta? })` and `Arcade.scores.list(category, { limit })`. The SDK keeps the top 100 sorted descending and stamps `name` (from `Arcade.player.name()`) and `ts` automatically.
-- [ ] If your game tracks counters (games played / won / streak / best time), use `Arcade.stats.update(category, prev => next)` for atomic-style updates and `Arcade.stats.get(category)` to read.
+- [ ] If your game tracks counters (games played / won / streak / best time), use `Arcade.stats.update(category, prev => next)` for atomic-style updates and `Arcade.stats.get(category)` to read. When adding a new field to an existing stats category, use `Arcade.stats.getOrInit(category, DEFAULTS)` instead of `get` — it deep-merges defaults under the stored value so saves from older versions pick up newly-added fields without a migration.
 
 ---
 
@@ -141,6 +141,22 @@ To benefit:
 - [ ] If your game has a dark/light theme already, key its CSS off `[data-theme="dark"]` / `[data-theme="light"]` rather than rolling your own toggle.
 - [ ] If your game has tween-heavy effects, multiply durations by `getComputedStyle(document.documentElement).getPropertyValue('--motion-scale')` (or skip animations when `Arcade.settings.reducedMotion()` is `true`).
 - [ ] If your game has handedness-sensitive UI (e.g. control palette position), key it off `[data-handedness="left"]`.
+
+### Canvas-rendered games
+
+- [ ] **Font scale**: multiply every `ctx.font` size by `Arcade.settings.fontScale()`. Re-render on `Arcade.onSettingsChange(...)`.
+- [ ] **Theme**: if you support both, branch palette/style choices on `Arcade.settings.theme()`. If your game has a single mandatory aesthetic (e.g. cozy-solitaire's cabin-warm palette), it's fine to opt out of theme — document this in the game's README.
+- [ ] **Reduced motion**: gate canvas tweens, particle systems, and shader animations on `Arcade.settings.reducedMotion()`.
+- [ ] **Handedness**: if a game-controlled overlay (e.g. on-screen joystick, action palette) lives on the canvas, switch its anchor side based on `Arcade.settings.handedness()`.
+
+For most canvas games, a single subscription that flips a couple of cached
+multipliers and triggers a redraw is enough:
+
+```js
+let fontMult = Arcade.settings.fontScale();
+Arcade.onSettingsChange((s) => { fontMult = s.fontScale; markDirty(); });
+ctx.font = `${14 * fontMult}px Georgia, serif`;
+```
 
 Subscribe explicitly only when you need to react beyond CSS:
 
@@ -177,6 +193,35 @@ let paused = false;
 Arcade.onSuspend(() => { paused = true; audio.suspend(); });
 Arcade.onResume(() => { paused = false; lastFrame = performance.now(); audio.resume(); });
 ```
+
+For wall-time tracking (best-time stats, an elapsed-time UI), use
+`Arcade.session.start()` instead of hand-rolling `performance.now()` math —
+the returned tracker subscribes to the lifecycle hooks above, so suspended
+intervals don't accrue:
+
+```js
+const t = Arcade.session.start();
+// ...in your render loop / stats write:
+display.textContent = formatTime(t.elapsedMs());
+
+// Manual pause for an in-game modal — composes with onSuspend/onResume:
+openPauseMenu();   t.pause();
+closePauseMenu();  t.resume();
+
+t.reset();   // back to 0, still running (or still paused, if it was paused)
+t.stop();    // detach lifecycle listeners when the timer is no longer needed
+```
+
+Each `start()` returns a fresh, independent tracker — multiple concurrent
+timers (per-round + total session, etc.) are fine.
+
+When the launcher imports a save (`arcade:state.replaced`), every live
+tracker auto-resets to 0. The imported state has its own elapsed snapshot,
+so re-hydrate game-time UI from `Arcade.state` in your `onStateReplaced`
+handler; the wall clock since "now" is a separate concern that resets
+naturally with the new session. The tracker does not auto-persist on
+suspend — if you need elapsed to survive a tab close, write
+`t.elapsedMs()` into `Arcade.state` from your own `onSuspend` handler.
 
 ### 6b. Survive eviction
 

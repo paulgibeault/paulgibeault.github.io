@@ -51,7 +51,12 @@
  *
  *   // Mutable per-category counter / blob
  *   Arcade.stats.get(category)
+ *   Arcade.stats.getOrInit(category, defaults)    deep-merge load
  *   Arcade.stats.update(category, prev => next)
+ *
+ *   // Suspended-time-aware game timer
+ *   const t = Arcade.session.start();             auto-pauses on onSuspend
+ *   t.elapsedMs() / t.pause() / t.resume() / t.reset() / t.stop()
  *
  * AUTO-APPLIED CSS HOOKS (set on <html> by the SDK):
  *     style="--font-scale: <n>; --motion-scale: 0|1; --audio-volume: 0..1"
@@ -656,6 +661,23 @@
             var v = readJSON(statsKey(category));
             return isPlainObject(v) ? v : {};
         },
+        // Read with defaults — mirrors Arcade.state.getOrInit. If nothing is
+        // stored, write defaults. If a value is stored and both are plain
+        // objects, deep-merge defaults under the stored value (so newly-added
+        // stat fields get their defaults). Otherwise return stored as-is.
+        getOrInit: function (category, defaults) {
+            ensureGameId();
+            var k = statsKey(category);
+            var current = readJSON(k);
+            if (current === null) {
+                writeJSON(k, defaults);
+                return defaults;
+            }
+            if (isPlainObject(defaults) && isPlainObject(current)) {
+                return deepMerge(defaults, current);
+            }
+            return current;
+        },
         update: function (category, updater) {
             ensureGameId();
             if (typeof updater !== 'function') {
@@ -674,6 +696,103 @@
         }
     };
 
+    // ─── Session timer ────────────────────────────────────────────
+    // Wall-time tracker that auto-pauses while the game is suspended (iframe
+    // hidden). Each `start()` returns an independent tracker — multiple
+    // concurrent timers (round + total session, etc.) are fine.
+    //
+    // Auto-reset on launcher import: when `arcade:state.replaced` fires (the
+    // user loaded a save), every live tracker resets to 0. The imported state
+    // carries its own elapsed snapshot (if the game serialized one), and the
+    // game's onStateReplaced handler is responsible for re-hydrating UI from
+    // it — the wall clock since "now" is a separate concern.
+    //
+    // Persistence is the game's responsibility — if you need elapsed to
+    // survive a tab close, write `t.elapsedMs()` into Arcade.state on suspend.
+    function createSessionTimer() {
+        var startedAt = (typeof performance !== 'undefined' && performance.now)
+            ? performance.now() : Date.now();
+        function now() {
+            return (typeof performance !== 'undefined' && performance.now)
+                ? performance.now() : Date.now();
+        }
+        var accumPaused = 0;          // total ms spent paused, subtracted from elapsed
+        var pauseStartedAt = null;    // non-null iff currently in a paused interval
+        var manualPaused = false;
+        var lifecyclePaused = false;
+        var stopped = false;
+
+        function isPaused() { return manualPaused || lifecyclePaused; }
+        function freezePause() {
+            if (pauseStartedAt === null) pauseStartedAt = now();
+        }
+        function unfreezePause() {
+            if (pauseStartedAt !== null) {
+                accumPaused += now() - pauseStartedAt;
+                pauseStartedAt = null;
+            }
+        }
+
+        function onSuspendHandler() {
+            if (stopped) return;
+            if (!isPaused()) freezePause();
+            lifecyclePaused = true;
+        }
+        function onResumeHandler() {
+            if (stopped) return;
+            lifecyclePaused = false;
+            if (!isPaused()) unfreezePause();
+        }
+
+        var unsubSuspend = makeSubscriber(listeners.suspend)(onSuspendHandler);
+        var unsubResume = makeSubscriber(listeners.resume)(onResumeHandler);
+        var unsubReplaced = makeSubscriber(listeners.stateReplaced)(function () {
+            if (stopped) return;
+            tracker.reset();
+        });
+
+        var tracker = {
+            elapsedMs: function () {
+                var paused = accumPaused;
+                if (pauseStartedAt !== null) paused += now() - pauseStartedAt;
+                var ms = now() - startedAt - paused;
+                return ms < 0 ? 0 : ms;
+            },
+            pause: function () {
+                if (stopped || manualPaused) return;
+                if (!isPaused()) freezePause();
+                manualPaused = true;
+            },
+            resume: function () {
+                if (stopped || !manualPaused) return;
+                manualPaused = false;
+                if (!isPaused()) unfreezePause();
+            },
+            // Reset elapsed to 0. If the timer is currently paused (manual or
+            // lifecycle), it stays paused — elapsed will stay at 0 until resume.
+            reset: function () {
+                if (stopped) return;
+                startedAt = now();
+                accumPaused = 0;
+                pauseStartedAt = isPaused() ? startedAt : null;
+            },
+            stop: function () {
+                if (stopped) return;
+                stopped = true;
+                unsubSuspend();
+                unsubResume();
+                unsubReplaced();
+            }
+        };
+        return tracker;
+    }
+    var sessionApi = {
+        start: function () {
+            ensureGameId();
+            return createSessionTimer();
+        }
+    };
+
     // ─── Public surface ───────────────────────────────────────────
     var api = {
         init: init,
@@ -689,6 +808,7 @@
         ui: uiApi,
         scores: scoresApi,
         stats: statsApi,
+        session: sessionApi,
         onSuspend: makeSubscriber(listeners.suspend),
         onResume: makeSubscriber(listeners.resume),
         onStateReplaced: makeSubscriber(listeners.stateReplaced),
