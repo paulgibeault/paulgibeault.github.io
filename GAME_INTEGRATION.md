@@ -219,9 +219,18 @@ When the launcher imports a save (`arcade:state.replaced`), every live
 tracker auto-resets to 0. The imported state has its own elapsed snapshot,
 so re-hydrate game-time UI from `Arcade.state` in your `onStateReplaced`
 handler; the wall clock since "now" is a separate concern that resets
-naturally with the new session. The tracker does not auto-persist on
-suspend — if you need elapsed to survive a tab close, write
-`t.elapsedMs()` into `Arcade.state` from your own `onSuspend` handler.
+naturally with the new session.
+
+To make elapsed survive reloads (and pick up the imported value on
+`stateReplaced` instead of resetting), pass a `persistKey`:
+
+```js
+const t = Arcade.session.start({ persistKey: 'sessionElapsed' });
+```
+
+The tracker reads `Arcade.state.get('sessionElapsed')` on start, writes
+`t.elapsedMs()` back on suspend / reset / stop, and on `stateReplaced`
+re-reads the freshly imported value as the new baseline.
 
 ### 6b. Survive eviction
 

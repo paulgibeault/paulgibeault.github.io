@@ -1,4 +1,4 @@
-const CACHE_NAME = 'paul-arcade-v9';
+const CACHE_NAME = 'paul-arcade-v10';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
@@ -12,6 +12,7 @@ const ASSETS_TO_CACHE = [
   './images/si-syn.png',
   './images/hecknsic.png',
   './images/cozy-solitaire.png',
+  './images/moon-glow.png',
   './images/qrcodep2p.png',
   './images/zibaldone.png',
   './images/usai.png'

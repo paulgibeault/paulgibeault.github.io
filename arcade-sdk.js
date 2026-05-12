@@ -56,6 +56,8 @@
  *
  *   // Suspended-time-aware game timer
  *   const t = Arcade.session.start();             auto-pauses on onSuspend
+ *   const t = Arcade.session.start({ persistKey: 'sessionElapsed' });
+ *                                                 elapsed survives reloads
  *   t.elapsedMs() / t.pause() / t.resume() / t.reset() / t.stop()
  *
  * AUTO-APPLIED CSS HOOKS (set on <html> by the SDK):
@@ -701,20 +703,26 @@
     // hidden). Each `start()` returns an independent tracker — multiple
     // concurrent timers (round + total session, etc.) are fine.
     //
-    // Auto-reset on launcher import: when `arcade:state.replaced` fires (the
-    // user loaded a save), every live tracker resets to 0. The imported state
-    // carries its own elapsed snapshot (if the game serialized one), and the
-    // game's onStateReplaced handler is responsible for re-hydrating UI from
-    // it — the wall clock since "now" is a separate concern.
+    // Optional `persistKey` (string): when set, the tracker reads its initial
+    // elapsed from Arcade.state[persistKey] on start, writes elapsedMs() back
+    // on suspend / reset / stop, and on stateReplaced re-reads the freshly
+    // imported value as the new baseline (instead of resetting to 0). Stored
+    // as a JSON number under arcade.v1.<gameId>.<persistKey>.
     //
-    // Persistence is the game's responsibility — if you need elapsed to
-    // survive a tab close, write `t.elapsedMs()` into Arcade.state on suspend.
-    function createSessionTimer() {
-        var startedAt = (typeof performance !== 'undefined' && performance.now)
-            ? performance.now() : Date.now();
+    // With no persistKey, stateReplaced resets the tracker to 0 and the game
+    // owns hydration.
+    function createSessionTimer(opts) {
+        var persistKey = (opts && typeof opts.persistKey === 'string' && opts.persistKey)
+            ? opts.persistKey : null;
         function now() {
             return (typeof performance !== 'undefined' && performance.now)
                 ? performance.now() : Date.now();
+        }
+        var startedAt = now();
+        var baseOffset = 0;
+        if (persistKey) {
+            var stored = stateApi.get(persistKey);
+            if (typeof stored === 'number' && stored >= 0) baseOffset = stored;
         }
         var accumPaused = 0;          // total ms spent paused, subtracted from elapsed
         var pauseStartedAt = null;    // non-null iff currently in a paused interval
@@ -737,6 +745,7 @@
             if (stopped) return;
             if (!isPaused()) freezePause();
             lifecyclePaused = true;
+            if (persistKey) stateApi.set(persistKey, tracker.elapsedMs());
         }
         function onResumeHandler() {
             if (stopped) return;
@@ -748,14 +757,22 @@
         var unsubResume = makeSubscriber(listeners.resume)(onResumeHandler);
         var unsubReplaced = makeSubscriber(listeners.stateReplaced)(function () {
             if (stopped) return;
-            tracker.reset();
+            if (persistKey) {
+                var s = stateApi.get(persistKey);
+                baseOffset = (typeof s === 'number' && s >= 0) ? s : 0;
+                startedAt = now();
+                accumPaused = 0;
+                pauseStartedAt = isPaused() ? startedAt : null;
+            } else {
+                tracker.reset();
+            }
         });
 
         var tracker = {
             elapsedMs: function () {
                 var paused = accumPaused;
                 if (pauseStartedAt !== null) paused += now() - pauseStartedAt;
-                var ms = now() - startedAt - paused;
+                var ms = baseOffset + (now() - startedAt - paused);
                 return ms < 0 ? 0 : ms;
             },
             pause: function () {
@@ -774,10 +791,13 @@
                 if (stopped) return;
                 startedAt = now();
                 accumPaused = 0;
+                baseOffset = 0;
                 pauseStartedAt = isPaused() ? startedAt : null;
+                if (persistKey) stateApi.set(persistKey, 0);
             },
             stop: function () {
                 if (stopped) return;
+                if (persistKey) stateApi.set(persistKey, tracker.elapsedMs());
                 stopped = true;
                 unsubSuspend();
                 unsubResume();
@@ -787,9 +807,9 @@
         return tracker;
     }
     var sessionApi = {
-        start: function () {
+        start: function (options) {
             ensureGameId();
-            return createSessionTimer();
+            return createSessionTimer(options);
         }
     };
 
