@@ -12,7 +12,7 @@ const ASSETS_TO_CACHE = [
   './images/si-syn.png',
   './images/hecknsic.png',
   './images/cozy-solitaire.png',
-  './images/moon-glow.png',
+  './images/moon-lit.png',
   './images/qrcodep2p.png',
   './images/zibaldone.png',
   './images/usai.png'
