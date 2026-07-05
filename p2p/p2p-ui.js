@@ -70,7 +70,7 @@ export class P2PUIManager {
         }
         if (this.peerNode.peers.has(data.peerId)) {
             this.logDiag('info', `Applying Answer from ${source}.`);
-            this._setStage(2, 'done'); // answer received (host)
+            this._setStage(1, 'done'); // their reply arrived (link path)
             this.peerNode.acceptAnswer(data);
             // Ack back so a relay tab (link tennis) can show "delivered".
             try { this.bc.postMessage({ type: 'answer-ack', peerId: data.peerId }); } catch(_) {}
@@ -87,10 +87,10 @@ export class P2PUIManager {
 
     _relayAnswerToHostTab(data) {
         this.logDiag('info', 'Acting as relay: forwarding answer to your game tab...');
+        this.ui.workArea.style.display = 'block';
         this.ui.qrContainer.style.display = 'block';
         if (this.ui.qrPlaceholder) this.ui.qrPlaceholder.style.display = 'none';
-        this.ui.btnHost.style.display = 'none';
-        this.ui.btnJoin.style.display = 'none';
+        this.ui.choice.style.display = 'none';
         this.ui.btnShareSdp.style.display = 'none';
         this.ui.btnCopySdp.style.display = 'none';
         this.ui.qrInstructions.innerHTML =
@@ -135,8 +135,8 @@ export class P2PUIManager {
 
     _initStages(role) {
         this._stageLabels = role === 'host'
-            ? ['Offer created', 'Invite sent', 'Answer received', 'Connected']
-            : ['Offer received', 'Answer created', 'Reply sent', 'Connected'];
+            ? ['Show your code', 'Scan theirs', 'Play!']
+            : ['Scan their code', 'Show yours', 'Play!'];
         this._stageStates = this._stageLabels.map(() => 'pending');
         this._renderStages();
     }
@@ -150,10 +150,14 @@ export class P2PUIManager {
     _renderStages() {
         if (!this.ui.stages || !this._stageLabels) return;
         this.ui.stages.style.display = 'flex';
+        // The first non-done step is "where you are" — highlighted so users
+        // always know what to do next.
+        const activeIdx = this._stageStates.findIndex(s => s !== 'done');
         this.ui.stages.innerHTML = this._stageLabels.map((label, i) => {
             const state = this._stageStates[i];
-            const icon = state === 'done' ? '✅' : (state === 'error' ? '❌' : '◻️');
-            const cls = `p2p-stage p2p-stage-${state}`;
+            const isActive = i === activeIdx && state !== 'error';
+            const icon = state === 'done' ? '✅' : (state === 'error' ? '❌' : `${i + 1}.`);
+            const cls = `p2p-stage p2p-stage-${state}${isActive ? ' p2p-stage-active' : ''}`;
             return `<span class="${cls}">${icon} ${label}</span>`;
         }).join('<span class="p2p-stage-arrow">→</span>');
     }
@@ -194,25 +198,22 @@ export class P2PUIManager {
                 //       if the same browser is running the host, the connection
                 //       completes automatically without any scanning.
                 // -------------------------------------------------------
-                this.ui.btnHost.style.display = 'none';
-                this.ui.btnJoin.style.display = 'none';
+                this.ui.choice.style.display = 'none';
                 this._initStages('joiner');
-                this._setStage(0, 'done'); // offer received
+                this._setStage(0, 'done'); // their invite arrived (via link)
 
-                this.logDiag('info', 'Computing Answer SDP...');
+                this.logDiag('info', 'Invite link received. Preparing your reply code...');
                 const answerData = await this.peerNode.createAnswer(data);
-                this._setStage(1, 'done'); // answer created
 
-                const encoded = await ConnectionUtils.encodePayload(answerData);
-                this.rawSDPPayload = encoded;
-
-                // PRIMARY path: send the reply link back through the same chat
-                // thread the invite arrived on ("link tennis"). QR is secondary.
+                // QR-first even on the link path: show OUR code for them to
+                // scan. Replying by link stays available as the fallback.
                 await this.displayQRCode(answerData,
-                    "✅ Answer ready! Tap \"Send reply link\" and send it back in the SAME chat you were invited from. The host taps it — done. (Or the host can scan this QR.)");
-                this.ui.btnShareSdp.textContent = '📤 Send reply link';
+                    "You're invited! 🎉 One more step: show THIS code to the player who invited you — ask them to tap “They scanned it?” and point their camera here. (Or send a reply link back in the same chat.)");
+                this._setStage(1, 'done'); // your code is showing
+                this.ui.btnShareSdp.textContent = '📤 Can’t scan? Send a reply link back';
 
                 // BONUS path: try all inter-tab channels silently in parallel
+                const encoded = this.rawSDPPayload; // set by displayQRCode
                 const answerObj = JSON.parse(answerData);
                 this._attemptAutoReturn(answerObj, encoded);
 
@@ -227,6 +228,7 @@ export class P2PUIManager {
                 if (this.peerNode.peers.has(data.peerId)) {
                     // Rare: this very tab holds the pending offer.
                     this._tryApplyAnswer(data, 'URL fragment');
+                    this.ui.workArea.style.display = 'block';
                     this.ui.qrContainer.style.display = 'block';
                     this.ui.qrInstructions.innerHTML =
                         '<strong>Answer received!</strong> Completing connection...';
@@ -338,27 +340,57 @@ export class P2PUIManager {
         <div id="p2p-modal-overlay" class="p2p-modal-overlay" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="p2p-modal-title">
             <div class="p2p-modal">
                 <header class="p2p-header">
-                    <h2 id="p2p-modal-title">Multiplayer Connection <span style="font-size: 0.5em; color: #888; vertical-align: middle; font-weight: normal; margin-left: 10px;">v1.5.1</span></h2>
-                    <button id="p2p-btn-close" class="p2p-btn-danger" style="border:none; border-radius:4px; padding:4px 8px; cursor:pointer;" aria-label="Close modal">X</button>
+                    <h2 id="p2p-modal-title">Play Together <span style="font-size: 0.5em; color: #888; vertical-align: middle; font-weight: normal; margin-left: 10px;">v1.6.0</span></h2>
+                    <button id="p2p-btn-close" class="p2p-btn-danger" style="border:none; border-radius:4px; padding:4px 8px; cursor:pointer;" aria-label="Close">X</button>
                 </header>
-                <div id="p2p-status-badge" class="p2p-status-disconnected">DISCONNECTED</div>
-                <div id="p2p-stages" style="display:none; flex-wrap:wrap; align-items:center; gap:4px; font-size:11px; color:#aaa; margin:8px 0; padding:6px 8px; background:#181818; border-radius:6px;"></div>
+                <div id="p2p-status-badge" class="p2p-status-disconnected">Not connected yet</div>
+                <div id="p2p-stages" style="display:none; flex-wrap:wrap; align-items:center; gap:6px; font-size:12px; color:#aaa; margin:10px 0; padding:8px 10px; background:#181818; border-radius:8px;"></div>
                 
-                <div class="p2p-panels">
-                    <div class="p2p-panel">
-                        <h3 style="margin-top:0">1. Host Session</h3>
-                        <button id="p2p-btn-host" class="p2p-btn p2p-btn-primary">Host (Create Offer)</button>
-                        <button id="p2p-btn-add-player" class="p2p-btn p2p-btn-primary" style="display:none;">Add Another Player</button>
-                        <button id="p2p-btn-scan-ans" class="p2p-btn p2p-btn-secondary" style="display:none;">📷 Scan Answer QR</button>
+                <div id="p2p-choice" class="p2p-panel" style="margin-bottom:15px;">
+                    <p class="p2p-guide">Play with someone in the same room — you'll point your cameras at each other's screens, like taking a photo.</p>
+                    <button id="p2p-btn-host" class="p2p-btn p2p-btn-primary p2p-btn-big">🎮 Start &amp; invite a player</button>
+                    <button id="p2p-btn-join" class="p2p-btn p2p-btn-primary p2p-btn-big">📷 Join — scan their code</button>
+                    <button id="p2p-btn-add-player" class="p2p-btn p2p-btn-primary p2p-btn-big" style="display:none;">➕ Invite another player</button>
+                </div>
+
+                <div id="p2p-work-area" class="p2p-panel" style="margin-bottom: 15px; display:none;">
+                    <div id="p2p-qr-container" style="display:none; text-align:center;">
+                        <p id="p2p-qr-instructions" class="p2p-guide"></p>
+                        <div id="p2p-qr-canvas" class="p2p-qr-frame"></div>
+                        <button id="p2p-btn-scan-ans" class="p2p-btn p2p-btn-primary p2p-btn-big" style="display:none; margin-top:14px;">👍 They scanned it? Now scan THEIR code</button>
+                        <div class="p2p-secondary-actions">
+                            <button id="p2p-btn-share-sdp" class="p2p-btn p2p-text-btn" style="width:auto;">📤 Can't scan? Send a link instead</button>
+                            <button id="p2p-btn-copy-sdp" class="p2p-btn p2p-text-btn" style="width:auto;">Copy as text</button>
+                        </div>
+                        <div id="p2p-share-toast" style="display:none; margin-top:8px; color:#4ade80; font-size:13px;"></div>
                     </div>
-                    <div class="p2p-panel">
-                        <h3 style="margin-top:0">2. Join Session</h3>
-                        <button id="p2p-btn-join" class="p2p-btn p2p-btn-primary">Join (Scan Offer)</button>
+
+                    <div id="p2p-scanner-container" style="display:none;">
+                        <p id="p2p-scan-guide" class="p2p-guide">Point your camera at the code on the other player's screen.</p>
+                        <div id="p2p-reader" aria-label="Camera view for scanning the other player's code" role="region"></div>
+                        <details class="p2p-trouble" style="margin-top:10px;">
+                            <summary style="cursor:pointer; color:#888; font-size:13px;">Having trouble scanning?</summary>
+                            <div style="margin-top:8px; text-align:left; font-size:13px; color:#aaa;">
+                                <p style="margin:4px 0;">• Turn up the other screen's brightness and hold steady about a hand's width away.</p>
+                                <p style="margin:4px 0;">• If they sent you a link or a screenshot instead:</p>
+                            </div>
+                            <div class="p2p-paste-section">
+                                <input type="text" id="p2p-paste-input" placeholder="Paste the link here...">
+                                <button id="p2p-btn-submit-paste" class="p2p-btn p2p-btn-secondary" style="margin-bottom:0; width:auto;">Go</button>
+                            </div>
+                            <label class="p2p-btn p2p-btn-secondary" style="display:inline-block; margin-top:10px; width:auto; cursor:pointer;">
+                                📁 Use a photo of their code
+                                <input type="file" id="p2p-file-scan" accept="image/*" style="display:none;">
+                            </label>
+                        </details>
+                        <button id="p2p-btn-cancel-scan" class="p2p-btn p2p-btn-danger" style="margin-top:10px;">← Back</button>
                     </div>
+
+                    <div id="p2p-qr-placeholder" class="p2p-qr-placeholder" style="display:none;"></div>
                 </div>
 
                 <details class="p2p-advanced-settings" style="margin-bottom:15px; border: 1px solid #404040; border-radius: 8px; padding: 12px; background: #1f1f1f;">
-                    <summary style="cursor:pointer; font-weight:600; font-size:13px; color:#aaa; user-select:none;">⚙️ Advanced Connection Settings</summary>
+                    <summary style="cursor:pointer; font-weight:600; font-size:13px; color:#aaa; user-select:none;">⚙️ Advanced settings (you can ignore this)</summary>
                     <div style="margin-top:10px; display:flex; flex-direction:column; gap:8px; font-size:12px; color:#ddd;">
                         <label style="display:flex; align-items:center; gap:10px;">
                             <span>Connection mode:</span>
@@ -382,45 +414,14 @@ export class P2PUIManager {
                     </div>
                 </details>
 
-                <div class="p2p-panel" style="margin-bottom: 15px;">
-                    <div id="p2p-qr-container" style="display:none; text-align:center;">
-                        <p id="p2p-qr-instructions"></p>
-                        <button id="p2p-btn-share-sdp" class="p2p-btn p2p-btn-primary" style="width:auto; padding: 10px 24px; font-size:15px;">📤 Share Link</button>
-                        <div id="p2p-share-toast" style="display:none; margin-top:8px; color:#4ade80; font-size:13px;"></div>
-                        <details style="margin-top:12px;">
-                            <summary style="cursor:pointer; color:#888; font-size:12px;">Show QR code instead</summary>
-                            <div id="p2p-qr-canvas" style="margin-top:8px;"></div>
-                        </details>
-                        <br>
-                        <button id="p2p-btn-copy-sdp" class="p2p-btn p2p-text-btn" style="width:auto;">Copy Raw Data</button>
-                    </div>
-                    
-                    <div id="p2p-scanner-container" style="display:none;">
-                        <div id="p2p-reader" aria-label="QR Code Scanner Camera View" role="region"></div>
-                        <div class="p2p-paste-section">
-                            <input type="text" id="p2p-paste-input" placeholder="Paste raw data or answer link...">
-                            <button id="p2p-btn-submit-paste" class="p2p-btn p2p-btn-secondary" style="margin-bottom:0; width:auto;">Submit</button>
-                        </div>
-                        <label class="p2p-btn p2p-btn-secondary" style="display:inline-block; margin-top:10px; width:auto; cursor:pointer;">
-                            📁 Decode QR from image / screenshot
-                            <input type="file" id="p2p-file-scan" accept="image/*" style="display:none;">
-                        </label>
-                        <button id="p2p-btn-cancel-scan" class="p2p-btn p2p-btn-danger" style="margin-top:10px;">Cancel Scan</button>
-                    </div>
-                    
-                    <div id="p2p-qr-placeholder" class="p2p-qr-placeholder">
-                        Select Host or Join to begin.
-                    </div>
-                </div>
-
-                <div class="p2p-panel">
-                    <h3 style="margin-top:0; font-size:14px;">Diagnostics
-                        <button id="p2p-btn-copy-transcript" class="p2p-btn p2p-text-btn" style="float:right; width:auto; font-size:11px; padding:2px 8px; margin:0;">📋 Copy transcript</button>
-                    </h3>
-                    <div id="p2p-diagnostics-out" class="p2p-diagnostics-box" role="log" aria-live="polite">
+                <details class="p2p-panel" style="margin-top:4px;">
+                    <summary style="cursor:pointer; font-weight:600; font-size:13px; color:#aaa; user-select:none;">🔧 Troubleshooting log
+                        <button id="p2p-btn-copy-transcript" class="p2p-btn p2p-text-btn" style="float:right; width:auto; font-size:11px; padding:2px 8px; margin:0;">📋 Copy</button>
+                    </summary>
+                    <div id="p2p-diagnostics-out" class="p2p-diagnostics-box" role="log" aria-live="polite" style="margin-top:8px;">
                         <div class="p2p-diag-info">[SYSTEM] Engine initialized.</div>
                     </div>
-                </div>
+                </details>
             </div>
         </div>
         `;
@@ -455,7 +456,10 @@ export class P2PUIManager {
             optIceMode: document.getElementById('p2p-opt-icemode'),
             stages: document.getElementById('p2p-stages'),
             fileScan: document.getElementById('p2p-file-scan'),
-            btnCopyTranscript: document.getElementById('p2p-btn-copy-transcript')
+            btnCopyTranscript: document.getElementById('p2p-btn-copy-transcript'),
+            choice: document.getElementById('p2p-choice'),
+            scanGuide: document.getElementById('p2p-scan-guide'),
+            workArea: document.getElementById('p2p-work-area')
         };
 
         // Initialize UI values from PeerManager options
@@ -570,144 +574,165 @@ export class P2PUIManager {
             if (this.peerNode.isHost) {
                 let connectedCount = 0;
                 this.peerNode.peers.forEach(p => { if (p.status === 'connected') connectedCount++; });
-                
+
                 if (connectedCount > 0) {
-                    this.ui.statusBadge.textContent = `HOSTING (${connectedCount} PEERS)`;
+                    this.ui.statusBadge.textContent = connectedCount > 1
+                        ? `🎉 Connected — ${connectedCount} players!`
+                        : '🎉 Connected!';
                     this.ui.statusBadge.className = 'p2p-status-connected';
-                    this._setStage(3, 'done');
+                    this._setStage(2, 'done');
                     this.cleanupUI();
-                    
+
+                    this.ui.choice.style.display = 'block';
                     this.ui.btnHost.style.display = 'none';
                     this.ui.btnJoin.style.display = 'none';
                     this.ui.btnScanAns.style.display = 'none';
-                    this.ui.btnAddPlayer.style.display = 'inline-block';
+                    this.ui.btnAddPlayer.style.display = 'block';
+                    setTimeout(() => this.hide(), 1800);
                 } else if (status === 'disconnected') {
-                    this.ui.statusBadge.textContent = 'DISCONNECTED';
+                    this.ui.statusBadge.textContent = 'Not connected yet';
                     this.ui.statusBadge.className = 'p2p-status-disconnected';
                 } else {
-                    this.ui.statusBadge.textContent = 'CONNECTING...';
+                    this.ui.statusBadge.textContent = 'Connecting…';
                     this.ui.statusBadge.className = 'p2p-status-connecting';
                 }
             } else {
-                this.ui.statusBadge.textContent = status.toUpperCase();
                 this.ui.statusBadge.className = '';
                 if (status === 'connected') {
+                    this.ui.statusBadge.textContent = '🎉 Connected!';
                     this.ui.statusBadge.classList.add('p2p-status-connected');
-                    this._setStage(3, 'done');
+                    this._setStage(2, 'done');
                     this.cleanupUI();
                     setTimeout(() => this.hide(), 1500);
                 }
                 else if (status === 'finalizing') {
-                    // ICE path is up but the host hasn't applied our answer yet.
-                    // Keep the answer QR / reply-link UI fully visible — the
-                    // ceremony is NOT done until the data channel opens.
-                    this.ui.statusBadge.textContent = 'ALMOST THERE — HOST NEEDS YOUR ANSWER';
+                    // Network path is up but they haven't scanned our code yet.
+                    // Keep our code fully visible — the job isn't done.
+                    this.ui.statusBadge.textContent = 'Waiting for them to scan your code…';
                     this.ui.statusBadge.classList.add('p2p-status-connecting');
                 }
-                else if (status === 'disconnected' || status === 'failed') this.ui.statusBadge.classList.add('p2p-status-disconnected');
-                else this.ui.statusBadge.classList.add('p2p-status-connecting');
+                else if (status === 'disconnected' || status === 'failed') {
+                    this.ui.statusBadge.textContent = 'Not connected yet';
+                    this.ui.statusBadge.classList.add('p2p-status-disconnected');
+                }
+                else {
+                    this.ui.statusBadge.textContent = 'Connecting…';
+                    this.ui.statusBadge.classList.add('p2p-status-connecting');
+                }
             }
         });
 
         // ---- HOST: create offer ----
+        // ---- INVITER: show code, then scan theirs ----
         this.ui.btnHost.addEventListener('click', async () => {
-            this.logDiag('info', '--- HOST SEQUENCE ---');
-            this.ui.btnHost.style.display = 'none';
-            this.ui.btnJoin.style.display = 'none';
-            this.ui.btnScanAns.style.display = 'block';
+            this.logDiag('info', '--- INVITE SEQUENCE ---');
+            this.ui.choice.style.display = 'none';
             this._initStages('host');
 
             try {
                 const offerData = await this.peerNode.createOffer();
-                this._setStage(0, 'done'); // offer created
+                this._setStage(0, 'done'); // your code is ready & showing
 
-                // Prefer Share API for offer delivery — resilient across devices
-                if (navigator.share) {
-                    await this.displayQRCode(offerData,
-                        "📤 Share this invite link with the joiner. When they send a reply link back, just tap it — or click \"Scan Answer QR\" to scan their screen.");
-                    this.logDiag('info', 'Offer ready. Share link generated.');
-                } else {
-                    // No Share API (desktop) — show QR for joiner to scan
-                    await this.displayQRCode(offerData, "Step 1: Have JOINER scan this QR code.");
-                }
+                // QR-first: the code IS the invite. Links are the fallback.
+                await this.displayQRCode(offerData,
+                    "Show this code to the other player. Ask them to tap “Join” on their device and point their camera here.");
+                this.ui.btnScanAns.style.display = 'block';
+                this.ui.btnShareSdp.textContent = '📤 Can’t scan? Send a link instead';
             } catch (e) {
                 this._setStage(0, 'error');
-                this.logDiag('error', 'Critical failure generating Host Offer.');
+                this.logDiag('error', 'Could not create your invite code.');
             }
         });
 
         this.ui.btnAddPlayer.addEventListener('click', async () => {
-            this.logDiag('info', '--- ADDING MULTIPLAYER ---');
-            this.ui.btnAddPlayer.style.display = 'none';
-            this.ui.btnScanAns.style.display = 'block';
-            
+            this.logDiag('info', '--- ADDING ANOTHER PLAYER ---');
+            this.ui.choice.style.display = 'none';
+            this._initStages('host');
+
             try {
                 const offerData = await this.peerNode.createOffer();
-                this.displayQRCode(offerData, "Step 1: Have NEW JOINER scan this QR code.");
+                this._setStage(0, 'done');
+                await this.displayQRCode(offerData,
+                    "Show this code to the new player. Ask them to tap “Join” and point their camera here.");
+                this.ui.btnScanAns.style.display = 'block';
             } catch (e) {
-                this.logDiag('error', 'Critical failure generating Additional Offer.');
+                this.logDiag('error', 'Could not create a new invite code.');
             }
         });
 
-        // ---- HOST: scan joiner's answer QR ----
+        // ---- INVITER step 2: scan the other player's return code ----
         this.ui.btnScanAns.addEventListener('click', () => {
-            this.logDiag('info', 'Opening scanner for Answer QR...');
+            this.logDiag('info', 'Opening camera to scan their code...');
+            this.ui.scanGuide.textContent =
+                'Point your camera at the code now showing on THEIR screen.';
             this.startScanner(async (answerData) => {
-                this.logDiag('info', 'Applying Answer...');
-                this._setStage(2, 'done'); // answer received
+                this.logDiag('info', 'Got it! Connecting...');
+                this._setStage(1, 'done'); // scanned their code
                 await this.peerNode.acceptAnswer(answerData);
             });
         });
 
-        // ---- JOINER: scan host's offer QR ----
+        // ---- JOINER: scan their code, then show yours ----
         this.ui.btnJoin.addEventListener('click', () => {
             this.logDiag('info', '--- JOIN SEQUENCE ---');
-            this.ui.btnHost.style.display = 'none';
-            this.ui.btnJoin.style.display = 'none';
+            this.ui.choice.style.display = 'none';
             this._initStages('joiner');
+            this.ui.scanGuide.textContent =
+                'Point your camera at the code on the other player’s screen.';
 
             this.startScanner(async (offerData) => {
-                this.logDiag('info', 'Ingested Offer. Computing Answer SDP...');
-                this._setStage(0, 'done'); // offer received
+                this.logDiag('info', 'Code scanned! Preparing your reply code...');
+                this._setStage(0, 'done'); // scanned their code
                 try {
                     const answerData = await this.peerNode.createAnswer(offerData);
-                    this._setStage(1, 'done'); // answer created
 
-                    // Show QR for host to scan — universal and reliable
+                    // Their turn to scan: show OUR code big and clear.
                     await this.displayQRCode(answerData,
-                        "📱 Show this QR to the HOST to scan. Or use Share/Copy to send them the reply link.");
+                        "Almost done! Now show THIS code to the other player — ask them to tap “They scanned it?” and point their camera here.");
+                    this._setStage(1, 'done'); // your code is showing
+                    this.ui.btnShareSdp.textContent = '📤 Can’t scan? Send a reply link instead';
 
-                    // Also attempt auto-forwarding via all inter-tab channels
+                    // Bonus: same-browser auto-connect channels
                     const encoded = this.rawSDPPayload; // set by displayQRCode
                     const answerObj = JSON.parse(answerData);
                     this._attemptAutoReturn(answerObj, encoded);
                 } catch (e) {
                     this._setStage(1, 'error');
-                    this.logDiag('error', 'Critical failure computing Joiner Answer.');
+                    this.logDiag('error', 'Could not prepare your reply code.');
                 }
             });
         });
 
         this.ui.btnCancelScan.addEventListener('click', () => {
             this.cleanupUI();
-            
-            if (this.peerNode.isHost && Array.from(this.peerNode.peers.values()).some(p => p.status === 'connected')) {
-                this.ui.btnAddPlayer.style.display = 'inline-block';
-                this.ui.btnScanAns.style.display = 'none';
-            } else {
-                this.ui.btnHost.style.display = 'inline-block';
-                this.ui.btnJoin.style.display = 'inline-block';
-                this.ui.btnScanAns.style.display = 'none';
-                if (this.ui.btnAddPlayer) this.ui.btnAddPlayer.style.display = 'none';
+
+            const hasPendingOffer = this.peerNode.isHost &&
+                Array.from(this.peerNode.peers.values()).some(p => p.status !== 'connected');
+
+            if (hasPendingOffer) {
+                // Inviter backing out of "scan theirs" — return to their own
+                // code (still valid, still rendered) rather than the start.
+                this.ui.workArea.style.display = 'block';
+                this.ui.qrContainer.style.display = 'block';
+                this.ui.btnScanAns.style.display = 'block';
+                return;
             }
-            
-            // Close any pending connections
+
+            // Otherwise abandon pending attempts and go back to the start.
             this.peerNode.peers.forEach((p, id) => {
                 if (p.status !== 'connected') {
                     p.connection.close();
                     this.peerNode.peers.delete(id);
                 }
             });
+
+            const anyConnected = Array.from(this.peerNode.peers.values()).some(p => p.status === 'connected');
+            this.ui.choice.style.display = 'block';
+            this.ui.btnScanAns.style.display = 'none';
+            this.ui.btnHost.style.display = anyConnected ? 'none' : 'block';
+            this.ui.btnJoin.style.display = anyConnected ? 'none' : 'block';
+            this.ui.btnAddPlayer.style.display = anyConnected ? 'block' : 'none';
+            if (this.ui.stages) this.ui.stages.style.display = 'none';
         });
 
         // ---- Share / Copy buttons ----
@@ -718,8 +743,9 @@ export class P2PUIManager {
                 : 'Tap this link to complete the connection.';
             const shared = await this._shareOrCopy(this.rawSDPPayload, type, instructions);
             if (shared) {
-                // host stage 1 = "Invite sent"; joiner stage 2 = "Reply sent"
-                this._setStage(this.peerNode.isHost ? 1 : 2, 'done');
+                // A sent link fulfills the same step as a scanned code:
+                // inviter step 1 (code delivered) / joiner step 2 (reply sent).
+                this._setStage(this.peerNode.isHost ? 0 : 1, 'done');
             }
         });
 
@@ -761,6 +787,7 @@ export class P2PUIManager {
     }
 
     async displayQRCode(dataStr, instructions) {
+        this.ui.workArea.style.display = 'block';
         this.ui.scannerContainer.style.display = 'none';
         if(this.ui.qrPlaceholder) this.ui.qrPlaceholder.style.display = 'none';
         this.ui.qrContainer.style.display = 'block';
@@ -786,6 +813,7 @@ export class P2PUIManager {
     }
 
     startScanner(onSuccess) {
+        this.ui.workArea.style.display = 'block';
         this.ui.qrContainer.style.display = 'none';
         if(this.ui.qrPlaceholder) this.ui.qrPlaceholder.style.display = 'none';
         this.ui.scannerContainer.style.display = 'block';
@@ -862,11 +890,9 @@ export class P2PUIManager {
     }
 
     cleanupUI() {
+        if (this.ui.workArea) this.ui.workArea.style.display = 'none';
         this.ui.qrContainer.style.display = 'none';
         this.ui.scannerContainer.style.display = 'none';
-        if(this.ui.qrPlaceholder && this.ui.statusBadge.textContent !== 'CONNECTED') {
-            this.ui.qrPlaceholder.style.display = 'block';
-        }
         if(this.html5Qrcode && this.html5Qrcode.isScanning) { 
             try { 
                 this.html5Qrcode.stop().then(() => {

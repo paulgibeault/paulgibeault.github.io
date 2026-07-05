@@ -4,7 +4,7 @@ Serverless WebRTC transport (packed QR/link signaling) powering `Arcade.peer.*`.
 
 - **Upstream:** https://github.com/paulgibeault/QRCodeP2P — develop and test
   transport changes THERE (it has the unit/e2e/cross-engine suites), then sync.
-- **Synced from commit:** `b038cbb` (v1.5.1, 2026-07-04)
+- **Synced from commit:** `b8f219f` (2026-07-04)
 - **Re-sync:** `./tools/sync-p2p.sh` (copies modules, records the commit here)
 
 `vendor/` holds the two QR libraries (qrcodejs 1.0.0, html5-qrcode 2.3.8) so
