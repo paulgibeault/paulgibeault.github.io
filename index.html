@@ -305,6 +305,12 @@
                 <span class="launcher-menu__item-label">Multiplayer</span>
                 <span class="launcher-menu__item-tag" id="menu-multiplayer-status" hidden></span>
             </button>
+            <label class="launcher-menu__inline" for="menu-device-name-input" title="Name shown to other devices when you connect">
+                <span>This device</span>
+                <input type="text" id="menu-device-name-input" class="launcher-menu__peer-input" maxlength="60" placeholder="My device" />
+            </label>
+            <div class="launcher-menu__heading" id="menu-known-peers-heading" hidden>Known Peers</div>
+            <div id="menu-known-peers-list"></div>
         </div>
         <div class="launcher-menu__section" id="menu-install-section" hidden>
             <button type="button" class="launcher-menu__item" id="install-btn" title="Install as PWA">
@@ -539,6 +545,136 @@
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
         });
+    })();
+
+    // ==========================================
+    // KNOWN PEERS — name, rename, delete previously-connected devices.
+    // Pure localStorage CRUD (arcade.v1._meta.deviceName / .knownPeers) so
+    // the panel is instant and doesn't force-load the P2P bridge module. The
+    // bridge (arcade-p2p.js) is the only writer of NEW entries — it records
+    // one on every identity handshake once a real connection opens — and
+    // pushes a live refresh here via ArcadeP2P.onPeerIdentity (wired in the
+    // platformController's loadP2P(), since that's the only place the bridge
+    // is ever imported).
+    // ==========================================
+    (function knownPeersController() {
+        const DEVICE_NAME_KEY = 'arcade.v1._meta.deviceName';
+        const KNOWN_PEERS_KEY = 'arcade.v1._meta.knownPeers';
+
+        const nameInput = document.getElementById('menu-device-name-input');
+        const heading = document.getElementById('menu-known-peers-heading');
+        const list = document.getElementById('menu-known-peers-list');
+        if (!nameInput || !heading || !list) return;
+
+        function readKnownPeers() {
+            try {
+                const raw = localStorage.getItem(KNOWN_PEERS_KEY);
+                const obj = raw ? JSON.parse(raw) : null;
+                return (obj && typeof obj === 'object') ? obj : {};
+            } catch (e) { return {}; }
+        }
+        function writeKnownPeers(map) {
+            try { localStorage.setItem(KNOWN_PEERS_KEY, JSON.stringify(map)); } catch (e) {}
+        }
+        function relativeTime(iso) {
+            const then = Date.parse(iso);
+            if (!isFinite(then)) return 'a while ago';
+            const mins = Math.round((Date.now() - then) / 60000);
+            if (mins < 1) return 'just now';
+            if (mins < 60) return mins + 'm ago';
+            const hours = Math.round(mins / 60);
+            if (hours < 24) return hours + 'h ago';
+            return Math.round(hours / 24) + 'd ago';
+        }
+
+        function render() {
+            const known = readKnownPeers();
+            const ids = Object.keys(known).sort((a, b) =>
+                Date.parse(known[b].lastConnectedAt || 0) - Date.parse(known[a].lastConnectedAt || 0));
+            list.innerHTML = '';
+            heading.hidden = ids.length === 0;
+            if (ids.length === 0) {
+                const empty = document.createElement('div');
+                empty.className = 'launcher-menu__peer-empty';
+                empty.textContent = 'Connect to a device to remember it here.';
+                list.appendChild(empty);
+                return;
+            }
+            for (const id of ids) {
+                const peer = known[id];
+                const displayName = peer.name || 'Unnamed device';
+
+                const row = document.createElement('div');
+                row.className = 'launcher-menu__peer-row';
+
+                const info = document.createElement('div');
+                info.className = 'launcher-menu__peer-info';
+                const nameEl = document.createElement('span');
+                nameEl.className = 'launcher-menu__peer-name';
+                nameEl.textContent = displayName;
+                const metaEl = document.createElement('span');
+                metaEl.className = 'launcher-menu__peer-meta';
+                metaEl.textContent = 'Last connected ' + relativeTime(peer.lastConnectedAt);
+                info.appendChild(nameEl);
+                info.appendChild(metaEl);
+
+                const renameBtn = document.createElement('button');
+                renameBtn.type = 'button';
+                renameBtn.className = 'launcher-menu__peer-btn';
+                renameBtn.title = 'Rename';
+                renameBtn.setAttribute('aria-label', 'Rename ' + displayName);
+                renameBtn.textContent = '✎';
+                renameBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const next = window.prompt('Rename this connection:', displayName);
+                    if (next === null) return;
+                    const trimmed = next.trim().slice(0, 60);
+                    if (!trimmed) return;
+                    const map = readKnownPeers();
+                    if (!map[id]) return;
+                    map[id].name = trimmed;
+                    writeKnownPeers(map);
+                    render();
+                });
+
+                const deleteBtn = document.createElement('button');
+                deleteBtn.type = 'button';
+                deleteBtn.className = 'launcher-menu__peer-btn';
+                deleteBtn.title = 'Delete';
+                deleteBtn.setAttribute('aria-label', 'Delete ' + displayName);
+                deleteBtn.textContent = '✕';
+                deleteBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    if (!window.confirm('Forget "' + displayName + '"?')) return;
+                    const map = readKnownPeers();
+                    delete map[id];
+                    writeKnownPeers(map);
+                    render();
+                });
+
+                row.appendChild(info);
+                row.appendChild(renameBtn);
+                row.appendChild(deleteBtn);
+                list.appendChild(row);
+            }
+        }
+
+        try { nameInput.value = localStorage.getItem(DEVICE_NAME_KEY) || ''; } catch (e) {}
+        nameInput.addEventListener('change', () => {
+            const trimmed = nameInput.value.trim().slice(0, 60);
+            try {
+                if (trimmed) localStorage.setItem(DEVICE_NAME_KEY, trimmed);
+                else localStorage.removeItem(DEVICE_NAME_KEY);
+            } catch (e) {}
+            nameInput.value = trimmed;
+        });
+        nameInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); nameInput.blur(); }
+        });
+
+        render();
+        window.__arcade = window.__arcade || {};
+        window.__arcade.renderKnownPeers = render; // live-refresh hook for the P2P bridge
     })();
 
     // ==========================================
@@ -787,6 +923,16 @@
                         tag.textContent = status === 'connected' ? 'Connected' : 'Connecting…';
                     }
                     if (status === 'connected') showToast('Multiplayer connected!');
+                });
+                ArcadeP2P.onPeerIdentity(({ name }) => {
+                    // Arrives a beat after 'connected' (one more data-channel
+                    // round trip) — swap the generic tag for the peer's
+                    // stored/self-reported name once we know it.
+                    const tag = document.getElementById('menu-multiplayer-status');
+                    if (tag && !tag.hidden && p2pBridge && p2pBridge.status() === 'connected') {
+                        tag.textContent = name;
+                    }
+                    if (window.__arcade.renderKnownPeers) window.__arcade.renderKnownPeers();
                 });
                 ArcadeP2P.onMessage((targetGameId, payload) => {
                     // Route by the sender's gameId — both devices run the same

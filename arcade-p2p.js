@@ -11,15 +11,28 @@
  *   - at startup when the URL carries a #p2p-offer= / #p2p-answer= fragment
  *     (an invite or reply link pointed at the launcher).
  *
- * Wire envelope between launchers (invisible to games):
- *   { arcade: 1, gameId, payload }
- * The receiving bridge routes by gameId to the matching mounted iframe.
+ * Wire envelopes between launchers (invisible to games):
+ *   { arcade: 1, gameId, payload }        — a game's message, routed by gameId
+ *   { arcade: 1, kind: 'identity', deviceId, name } — this device announcing
+ *     itself once its data channel opens (see "known peers" below)
  *
  * Status vocabulary mapping (transport → SDK):
  *   connected                    → 'connected'   (data channel OPEN — the
  *                                                 transport's v1.5.1 meaning)
  *   finalizing/checking/new/...  → 'connecting'
  *   disconnected/failed/closed   → 'idle'
+ *
+ * Known peers — naming/reconnect-recognition (no server, still one ceremony
+ * per connection; WebRTC can't skip the offer/answer round trip):
+ *   Each device has a persistent `deviceId` (random, generated once) and a
+ *   user-editable `deviceName`. The moment ANY peer's data channel opens, we
+ *   broadcast our identity; the receiving side upserts `knownPeers[deviceId]`
+ *   — `name` is a local editable label (defaults to the peer's self-reported
+ *   name on first contact, then never auto-overwritten by later handshakes;
+ *   only the index.html "Known Peers" menu panel renames/deletes it),
+ *   `remoteName` is whatever the peer most recently reported about itself.
+ *   Storage keys (see ARCADE_PLATFORM.md's storage convention):
+ *     arcade.v1._meta.deviceId, .deviceName, .knownPeers
  */
 
 const SDK_STATUS = {
@@ -31,6 +44,68 @@ const SDK_STATUS = {
 
 function mapStatus(transportStatus) {
     return SDK_STATUS[transportStatus] || 'connecting';
+}
+
+const META_PREFIX = 'arcade.v1._meta.';
+const DEVICE_ID_KEY = META_PREFIX + 'deviceId';
+const DEVICE_NAME_KEY = META_PREFIX + 'deviceName';
+const KNOWN_PEERS_KEY = META_PREFIX + 'knownPeers';
+const DEFAULT_DEVICE_NAME = 'My device';
+
+function randomDeviceId() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+        return window.crypto.randomUUID();
+    }
+    return 'dev-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+function getMyDeviceId() {
+    try {
+        let id = localStorage.getItem(DEVICE_ID_KEY);
+        if (!id) {
+            id = randomDeviceId();
+            localStorage.setItem(DEVICE_ID_KEY, id);
+        }
+        return id;
+    } catch (e) {
+        return randomDeviceId(); // storage unavailable — ephemeral fallback
+    }
+}
+
+function getMyDeviceName() {
+    try { return localStorage.getItem(DEVICE_NAME_KEY) || DEFAULT_DEVICE_NAME; }
+    catch (e) { return DEFAULT_DEVICE_NAME; }
+}
+
+function readKnownPeers() {
+    try {
+        const raw = localStorage.getItem(KNOWN_PEERS_KEY);
+        const obj = raw ? JSON.parse(raw) : null;
+        return (obj && typeof obj === 'object') ? obj : {};
+    } catch (e) { return {}; }
+}
+
+function writeKnownPeers(map) {
+    try { localStorage.setItem(KNOWN_PEERS_KEY, JSON.stringify(map)); } catch (e) {}
+}
+
+const peerIdentityListeners = []; // fn({deviceId, name, remoteName, isNew})
+
+function recordPeerIdentity(deviceId, remoteName) {
+    if (typeof deviceId !== 'string' || !deviceId) return;
+    const safeRemoteName = (typeof remoteName === 'string' && remoteName.trim())
+        ? remoteName.trim().slice(0, 60) : 'Unnamed device';
+    const known = readKnownPeers();
+    const existing = known[deviceId];
+    const now = new Date().toISOString();
+    known[deviceId] = existing
+        ? { ...existing, remoteName: safeRemoteName, lastConnectedAt: now, timesConnected: (existing.timesConnected || 0) + 1 }
+        : { name: safeRemoteName, remoteName: safeRemoteName, firstConnectedAt: now, lastConnectedAt: now, timesConnected: 1 };
+    writeKnownPeers(known);
+    const detail = { deviceId, name: known[deviceId].name, remoteName: safeRemoteName, isNew: !existing };
+    for (const fn of peerIdentityListeners) {
+        try { fn(detail); } catch (err) {}
+    }
 }
 
 function loadLocalScript(relPath, checkGlobal) {
@@ -73,14 +148,35 @@ async function ensureAddon() {
         const mp = new P2PAddon();
         await mp.init();
 
+        // Tracks which transport peerIds we've already announced our identity
+        // to, so a second peer joining an already-'connected' host (via
+        // "Invite another player") still gets our broadcast, without
+        // re-announcing on every redundant status event for a peer we've
+        // already greeted.
+        const announcedTo = new Set();
         mp.addEventListener('status', (e) => {
-            setStatus(mapStatus(e.detail.status));
+            const { peerId, status } = e.detail || {};
+            setStatus(mapStatus(status));
+            if (status === 'connected') {
+                if (peerId && !announcedTo.has(peerId)) {
+                    announcedTo.add(peerId);
+                    try {
+                        mp.send({ arcade: 1, kind: 'identity', deviceId: getMyDeviceId(), name: getMyDeviceName() });
+                    } catch (err) {}
+                }
+            } else if (peerId && (status === 'disconnected' || status === 'failed' || status === 'closed')) {
+                announcedTo.delete(peerId);
+            }
         });
 
         // 'data' fires with JSON already parsed when possible.
         mp.addEventListener('data', (e) => {
             const env = e.detail;
             if (!env || typeof env !== 'object' || env.arcade !== 1) return;
+            if (env.kind === 'identity') {
+                recordPeerIdentity(env.deviceId, env.name);
+                return;
+            }
             if (typeof env.gameId !== 'string') return;
             for (const fn of messageListeners) {
                 try { fn(env.gameId, env.payload); } catch (err) {}
@@ -118,6 +214,21 @@ export const ArcadeP2P = {
         return () => {
             const i = messageListeners.indexOf(fn);
             if (i >= 0) messageListeners.splice(i, 1);
+        };
+    },
+
+    /**
+     * Subscribe to peer identity handshakes — fires once per newly-connected
+     * transport peer once its self-reported identity arrives (a beat after
+     * its status goes 'connected'): fn({deviceId, name, remoteName, isNew}).
+     * `name` is the locally-stored label (see index.html's Known Peers menu
+     * panel for rename/delete); `isNew` marks a device seen for the first time.
+     */
+    onPeerIdentity(fn) {
+        peerIdentityListeners.push(fn);
+        return () => {
+            const i = peerIdentityListeners.indexOf(fn);
+            if (i >= 0) peerIdentityListeners.splice(i, 1);
         };
     },
 

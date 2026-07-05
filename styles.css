@@ -321,6 +321,72 @@ body.app-in-game .launcher-menu[data-open="true"] .launcher-menu__panel {
 }
 .launcher-menu__item--disabled .launcher-menu__item-icon { opacity: 0.4; }
 
+.launcher-menu__peer-input {
+    width: 110px;
+    background: transparent;
+    border: 1px solid var(--card-border);
+    color: var(--snow-white);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    padding: 4px 7px;
+    border-radius: 4px;
+}
+.launcher-menu__peer-input:focus-visible {
+    outline: none;
+    border-color: var(--field-gold);
+    color: var(--field-gold);
+}
+
+.launcher-menu__peer-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 4px;
+}
+.launcher-menu__peer-row:hover { background: rgba(255, 255, 255, 0.04); }
+.launcher-menu__peer-info { flex: 1; min-width: 0; }
+.launcher-menu__peer-name {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: var(--snow-white);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.launcher-menu__peer-meta {
+    display: block;
+    font-size: 0.62rem;
+    color: var(--text-secondary);
+}
+.launcher-menu__peer-btn {
+    flex-shrink: 0;
+    background: transparent;
+    border: 1px solid var(--card-border);
+    color: var(--text-secondary);
+    font-size: 0.7rem;
+    line-height: 1;
+    width: 22px;
+    height: 22px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.launcher-menu__peer-btn:hover,
+.launcher-menu__peer-btn:focus-visible {
+    background: var(--field-gold-dim);
+    color: var(--field-gold);
+    border-color: var(--field-gold);
+    outline: none;
+}
+.launcher-menu__peer-empty {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    padding: 4px 10px 2px;
+}
+
 /* ---- TOAST ---- */
 .launcher-toast {
     position: fixed;

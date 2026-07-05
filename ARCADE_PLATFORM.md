@@ -137,6 +137,18 @@ The transport behind `Arcade.peer.*` is [QRCodeP2P](https://github.com/paulgibea
 
 The transport's stage tracker (offer created → invite sent → answer received → connected) and copy-transcript button surface in the launcher's Multiplayer panel, so a failed real-world attempt reports exactly which leg died — this is the debugging backbone for all multiplayer support.
 
+### Known peers — naming and reconnect recognition (IMPLEMENTED)
+
+WebRTC can't skip the offer/answer ceremony — DTLS fingerprints must flow both ways every time a new `RTCPeerConnection` is created, so "reconnecting" is still one QR/link exchange. What this feature buys instead: the launcher *recognizes* who you just reconnected to and remembers what you called them.
+
+- Each device holds a persistent, random `deviceId` (`arcade.v1._meta.deviceId`) and a user-editable `deviceName` (`arcade.v1._meta.deviceName`, default "My device"), both generated/read lazily by `arcade-p2p.js`.
+- The instant any peer's data channel opens, both sides broadcast `{ arcade: 1, kind: 'identity', deviceId, name }` over the same channel used for game traffic (harmless to older peers — filtered out before game routing either way).
+- The receiving bridge upserts `arcade.v1._meta.knownPeers[deviceId]` — `name` is a local, user-editable label (defaults to the peer's self-reported name on first contact, then never silently overwritten), `remoteName` is whatever they most recently self-reported, plus `firstConnectedAt` / `lastConnectedAt` / `timesConnected`.
+- The launcher menu's **Known Peers** panel (`index.html`, pure localStorage CRUD, no P2P module load required just to view/rename/delete) lets you rename or forget any entry, and live-refreshes when `arcade-p2p.js` reports a fresh handshake via `ArcadeP2P.onPeerIdentity`.
+- Multi-peer safe: a host with several joiners (via "Invite another player") re-announces to each newly-connected peerId individually, so late joiners aren't left without a name exchange.
+
+This is the lighter-weight sibling of the RTCCertificate idea below — it makes reconnecting *legible* (you know who you're pairing with) without changing the transport itself.
+
 ---
 
 ## Storage convention
@@ -247,7 +259,7 @@ If a user reports lost data:
 - **IndexedDB migration** for storage if any single game outgrows localStorage's ~5 MB ceiling.
 - **Last-N auto-backups in IndexedDB** as a secondary recovery channel.
 - **SDK version negotiation** — the handshake already carries `version`; bump and branch when the protocol changes.
-- **Persistent peer identity** — cache `RTCCertificate` in IndexedDB so previously-paired devices exchange ~60-char reconnect payloads ("reconnect with Paul's iPhone") instead of the full ceremony.
+- **Certificate-pinned reconnect** — cache an `RTCCertificate` in IndexedDB so a previously-paired device's DTLS fingerprint is verifiable across sessions, as a foundation for shorter reconnect payloads. Named/recognized known peers (see "Known peers" above) already cover the naming half of this; the ceremony itself is still a full offer/answer round trip.
 - **PWA manifest + Android `share_target`** — installed launcher receives shared invite links directly; improves the re-entry story on both platforms.
 - **Audio-chirp answer leg** — ~140-byte payloads fit in a 2–4 s WebAudio FSK chirp; joiner's phone "sings" the answer to the host's laptop. Best return path for the phone→laptop direction where QR is most awkward.
 - **Safari "improve connection" camera grant** — unlocks host candidates for zero-server LAN play on Safari.
