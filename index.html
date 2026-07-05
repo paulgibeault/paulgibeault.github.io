@@ -616,6 +616,18 @@
 
                 const row = document.createElement('div');
                 row.className = 'launcher-menu__peer-row';
+                row.tabIndex = 0;
+                row.setAttribute('role', 'button');
+                row.setAttribute('aria-label', 'Reconnect to ' + displayName);
+                row.title = 'Open Multiplayer to reconnect';
+                row.addEventListener('click', () => {
+                    if (window.__arcade.openMultiplayerPanel) window.__arcade.openMultiplayerPanel();
+                });
+                row.addEventListener('keydown', (e) => {
+                    if (e.key !== 'Enter' && e.key !== ' ') return;
+                    e.preventDefault();
+                    row.click();
+                });
 
                 const info = document.createElement('div');
                 info.className = 'launcher-menu__peer-info';
@@ -967,12 +979,15 @@
             return p2pLoadPromise;
         }
 
+        function openMultiplayerPanel() {
+            if (window.__arcade.closeLauncherMenu) window.__arcade.closeLauncherMenu();
+            loadP2P().then((b) => b.openUI()).catch(() => {});
+        }
+        window.__arcade.openMultiplayerPanel = openMultiplayerPanel; // shared by the menu item + known-peer rows
+
         const menuMultiplayer = document.getElementById('menu-multiplayer');
         if (menuMultiplayer) {
-            menuMultiplayer.addEventListener('click', () => {
-                if (window.__arcade.closeLauncherMenu) window.__arcade.closeLauncherMenu();
-                loadP2P().then((b) => b.openUI()).catch(() => {});
-            });
+            menuMultiplayer.addEventListener('click', openMultiplayerPanel);
         }
 
         // Invite/reply links target the LAUNCHER URL — one stable re-entry
