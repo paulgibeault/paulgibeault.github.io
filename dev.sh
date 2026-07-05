@@ -116,15 +116,16 @@ mkdir -p "$STAGE_DIR"
 # Rewrite https://paulgibeault.github.io → local origin in HTML/JS/JSON.
 # Skip sw.js — the launcher itself opts out on loopback, and we don't want
 # stale launcher assets cached during dev.
-for f in index.html profile.html manifest.json arcade-sdk.js styles.css; do
+for f in index.html profile.html manifest.json arcade-sdk.js styles.css arcade-p2p.js; do
   src="$LAUNCHER_DIR/$f"
   if [ -f "$src" ]; then
     sed "s|https://paulgibeault.github.io|$LOCAL_ORIGIN|g" "$src" > "$STAGE_DIR/$f"
   fi
 done
 
-# Symlink images (large, no rewrite needed).
+# Symlink images and the vendored P2P transport (large/binary, no rewrite needed).
 ln -snf "$LAUNCHER_DIR/images" "$STAGE_DIR/images"
+ln -snf "$LAUNCHER_DIR/p2p" "$STAGE_DIR/p2p"
 
 # ─── stage each game ───────────────────────────────────────────────────
 for arg in "$@"; do

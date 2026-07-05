@@ -326,7 +326,10 @@ The launcher is one of two ways to run the game; the GitHub Pages URL is the oth
 
 ## 9. Iframe sandbox compatibility
 
-The launcher mounts each game in `<iframe sandbox="allow-scripts allow-same-origin" allowfullscreen>`.
+The launcher mounts each game in `<iframe sandbox="allow-scripts allow-same-origin allow-downloads" allowfullscreen>`.
+`allow-downloads` exists so a game can trigger `<a download>` (e.g. saving a
+file received over `Arcade.peer`) — without it, Chrome silently blocks
+anchor-triggered downloads from a sandboxed iframe.
 
 - [ ] No top-level navigation (`window.top.location = ...`) — it will be blocked.
 - [ ] No `window.open` to internal links; use in-game UI for help/about screens.
