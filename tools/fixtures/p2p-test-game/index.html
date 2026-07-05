@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>P2P Test Game</title>
+</head>
+<body>
+<h1>P2P Test Game</h1>
+<p id="status">peer: unknown</p>
+<pre id="log"></pre>
+
+<!-- The whole point of this fixture: a game that knows NOTHING about WebRTC,
+     QR codes, or signaling. It talks only to the Arcade SDK. If this game
+     can exchange messages across two devices, the framework owns the
+     connection end to end. -->
+<script src="/arcade-sdk.js"></script>
+<script>
+    Arcade.init({ gameId: 'p2p-test-game' });
+
+    window.__got = [];                       // received payloads (assertable)
+    window.__statuses = [Arcade.peer.status()];
+
+    const statusEl = document.getElementById('status');
+    const logEl = document.getElementById('log');
+
+    function render(s) {
+        statusEl.textContent = 'peer: ' + s;
+    }
+    Arcade.ready.then(() => render(Arcade.peer.status()));
+
+    Arcade.peer.onStatus((s) => {
+        window.__statuses.push(s);
+        render(s);
+    });
+
+    Arcade.peer.onMessage((payload) => {
+        window.__got.push(payload);
+        logEl.textContent += 'recv: ' + JSON.stringify(payload) + '\n';
+    });
+
+    // Test hooks
+    window.__send = (payload) => Arcade.peer.send(payload);
+    window.__peerStatus = () => Arcade.peer.status();
+</script>
+</body>
+</html>

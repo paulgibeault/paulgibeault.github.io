@@ -5,7 +5,8 @@
   "description": "Tooling for the Paul's Arcade launcher repo. The launcher itself is plain static HTML; this manifest exists only for dev tooling (Playwright-based acceptance runner).",
   "type": "module",
   "scripts": {
-    "acceptance": "node tools/acceptance.mjs"
+    "acceptance": "node tools/acceptance.mjs",
+    "p2p-acceptance": "node tools/p2p-acceptance.mjs"
   },
   "devDependencies": {
     "playwright": "^1.50.0"

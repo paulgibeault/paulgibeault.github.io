@@ -90,6 +90,55 @@ Seven message types total. The launcher routes peer messages by `gameId` so mult
 
 ---
 
+## Multiplayer transport — serverless P2P backbone (IMPLEMENTED)
+
+The transport behind `Arcade.peer.*` is [QRCodeP2P](https://github.com/paulgibeault/QRCodeP2P) (v1.5.1+): WebRTC data channels with **no signaling server** — the offer/answer exchange travels through QR codes or chat links. Proven cross-engine (Chrome/Firefox/WebKit) with automated Playwright tests; see its `IMPLEMENTATION_NOTES.md` for the wire format and test matrix.
+
+**Implementation map (this repo):**
+
+| Piece | File | Notes |
+| ----- | ---- | ----- |
+| Vendored transport | `p2p/` | synced from QRCodeP2P via `tools/sync-p2p.sh`; QR libs vendored under `p2p/vendor/` so runtime never touches a CDN |
+| Launcher bridge | `arcade-p2p.js` | lazy ES module: status mapping (transport → SDK vocabulary), `{arcade:1, gameId, payload}` envelope, per-game routing |
+| Launcher wiring | `index.html` platformController | Multiplayer menu item, `arcade:peer.send` → bridge, bridge status → `arcade:peer.status` broadcast, `#p2p-offer/answer` fragment boot |
+| Game-facing API | `arcade-sdk.js` `Arcade.peer.*` | unchanged — games needed zero edits |
+| Proof | `tools/p2p-acceptance.mjs` + `tools/fixtures/p2p-test-game/` | two headless launchers, real RTCPeerConnection, fixture game speaks only SDK |
+
+### Core facts the design builds on
+
+- **Payloads are tiny.** Binary template packing (`sdp-codec.js`) transmits only the SDP's entropy (ICE credentials, DTLS fingerprint, candidates): **112–153 chars**. QR codes scan instantly; links survive SMS/iMessage.
+- **One round trip is irreducible.** DTLS fingerprints must flow both ways and browsers cannot import certificate material, so the ceremony is always: offer out, answer back. All UX work goes into making each leg frictionless.
+- **The launcher owns the connection** — games never see any of this. `Arcade.peer.send/onMessage` is the whole game-facing surface, and a game works identically whether the connection came from a QR scan or a chat link.
+
+### Connection ceremony (host's launcher ⇄ joiner's launcher)
+
+1. **Invite (offer out):** host opens the launcher's Multiplayer panel → share sheet sends `https://paulgibeault.github.io/#p2p-offer=<packed>` through any chat app. Desktop fallback: QR code.
+2. **Reply (answer back), in order of preference:**
+   - **Link tennis** — joiner taps "Send reply link"; the answer returns through the same chat thread. On the host device the tapped link opens a relay tab that forwards the answer to the launcher tab (BroadcastChannel + localStorage + opener) and confirms delivery with an ack.
+   - **QR scan** — host scans the joiner's answer QR (same-room path; the camera grant also unlocks Safari host candidates — see below).
+   - **Screenshot decode** — joiner texts a screenshot of the answer QR; host decodes it from the image (remote path without link tennis).
+3. **Connected** — the launcher flips `peerStatus` and broadcasts `arcade:peer.status` to the foreground game.
+
+### Why the launcher URL matters (app re-entry)
+
+`#p2p-offer=` / `#p2p-answer=` fragments are handled by the **launcher**, giving every game multiplayer through one stable URL. Fragments never reach the server and are stripped after ingestion. Games embedded in iframes are unaffected — the fragment routing lives in the top-level launcher page only.
+
+### Connection modes & platform caveats (from the QRCodeP2P test matrix)
+
+| Mode | External touch | Works |
+| ---- | -------------- | ----- |
+| **Anywhere** (default) | Public STUN only (reflects your IP; no data or signaling transits it) | Cross-network + LAN, all engines |
+| **Same Wi-Fi only** | None whatsoever | LAN only; Chrome/Firefox always, Safari only with a camera grant |
+
+- **Safari withholds ICE candidates** without STUN or a device-capture permission. Consequence: Safari joiners on pure link tennis need "Anywhere" mode; the QR flow is immune because scanning grants the camera. The transport emits a diagnostic when zero candidates are gathered.
+- **Safari↔Safari link tennis on one LAN** is srflx↔srflx and depends on router NAT hairpinning. Mitigation (follow-on): one-time "improve connection" camera grant on Safari.
+
+### Diagnostics
+
+The transport's stage tracker (offer created → invite sent → answer received → connected) and copy-transcript button surface in the launcher's Multiplayer panel, so a failed real-world attempt reports exactly which leg died — this is the debugging backbone for all multiplayer support.
+
+---
+
 ## Storage convention
 
 | Scope         | Key shape                          | Owner                                       |
@@ -198,6 +247,10 @@ If a user reports lost data:
 - **IndexedDB migration** for storage if any single game outgrows localStorage's ~5 MB ceiling.
 - **Last-N auto-backups in IndexedDB** as a secondary recovery channel.
 - **SDK version negotiation** — the handshake already carries `version`; bump and branch when the protocol changes.
+- **Persistent peer identity** — cache `RTCCertificate` in IndexedDB so previously-paired devices exchange ~60-char reconnect payloads ("reconnect with Paul's iPhone") instead of the full ceremony.
+- **PWA manifest + Android `share_target`** — installed launcher receives shared invite links directly; improves the re-entry story on both platforms.
+- **Audio-chirp answer leg** — ~140-byte payloads fit in a 2–4 s WebAudio FSK chirp; joiner's phone "sings" the answer to the host's laptop. Best return path for the phone→laptop direction where QR is most awkward.
+- **Safari "improve connection" camera grant** — unlocks host candidates for zero-server LAN play on Safari.
 
 ---
 
@@ -205,3 +258,4 @@ If a user reports lost data:
 
 1. **Iframe pool: bounded LRU.** Default cap of 2; user-tunable to any integer in `[1, gameCount]` via the launcher menu. Active game is never evicted. Persistent state survives via `arcade.v1.<gameId>.*` localStorage.
 2. **`arcade-sdk.js` hosted at `https://paulgibeault.github.io/arcade-sdk.js`** (this repo's GitHub Pages root). Single source of truth; same-origin with every game.
+3. **Multiplayer transport: QRCodeP2P (serverless WebRTC).** The launcher owns the single `PeerManager`; games only ever see `Arcade.peer.*`. Signaling travels via packed QR/chat-link payloads (link tennis primary, QR/screenshot fallbacks). Default ICE mode "Anywhere" (public STUN, required for Safari joiners); "Same Wi-Fi only" available for zero-external-touch play. `#p2p-offer=`/`#p2p-answer=` fragments are launcher-level routes.

@@ -300,10 +300,10 @@
         </div>
         <div class="launcher-menu__section">
             <div class="launcher-menu__heading">Network</div>
-            <button type="button" class="launcher-menu__item launcher-menu__item--disabled" disabled aria-disabled="true" title="Multiplayer is not yet available">
+            <button type="button" class="launcher-menu__item" id="menu-multiplayer" title="Connect to another device — no server, QR codes and links only">
                 <span class="launcher-menu__item-icon" aria-hidden="true">⚇</span>
                 <span class="launcher-menu__item-label">Multiplayer</span>
-                <span class="launcher-menu__item-tag">Soon</span>
+                <span class="launcher-menu__item-tag" id="menu-multiplayer-status" hidden></span>
             </button>
         </div>
         <div class="launcher-menu__section" id="menu-install-section" hidden>
@@ -758,6 +758,63 @@
 
         window.__arcade.hideGameView = hideGameView;
         window.__arcade.applyPoolCap = evictLRU;
+        window.__arcade.showGame = showGame; // deep links + acceptance tests
+
+        // ---- multiplayer bridge (lazy) ----
+        // The P2P transport (vendored QRCodeP2P, see p2p/VENDORED.md) loads on
+        // first touch: Multiplayer menu click, or a #p2p-offer/#p2p-answer
+        // fragment at startup. Until then zero P2P bytes are parsed. Games
+        // talk only to the SDK; this is the launcher end of arcade:peer.*.
+        let p2pBridge = null;
+        let p2pLoadPromise = null;
+        function loadP2P() {
+            if (p2pBridge) return Promise.resolve(p2pBridge);
+            if (p2pLoadPromise) return p2pLoadPromise;
+            p2pLoadPromise = import('./arcade-p2p.js').then(({ ArcadeP2P }) => {
+                ArcadeP2P.onStatus((status) => {
+                    broadcast({ type: 'arcade:peer.status', status });
+                    const tag = document.getElementById('menu-multiplayer-status');
+                    if (tag) {
+                        tag.hidden = status === 'idle';
+                        tag.textContent = status === 'connected' ? 'Connected' : 'Connecting…';
+                    }
+                    if (status === 'connected') showToast('Multiplayer connected!');
+                });
+                ArcadeP2P.onMessage((targetGameId, payload) => {
+                    // Route by the sender's gameId — both devices run the same
+                    // game for a session, so target == sender's id. Messages
+                    // for unmounted games are dropped (game not running here).
+                    postToIframe(targetGameId, {
+                        type: 'arcade:peer.message',
+                        payload: payload,
+                        fromPeer: 'peer'
+                    });
+                });
+                p2pBridge = ArcadeP2P;
+                window.__arcade.p2p = ArcadeP2P; // debug + acceptance tests
+                return ArcadeP2P;
+            }).catch((e) => {
+                p2pLoadPromise = null;
+                showToast('Could not load multiplayer module.', { error: true });
+                throw e;
+            });
+            return p2pLoadPromise;
+        }
+
+        const menuMultiplayer = document.getElementById('menu-multiplayer');
+        if (menuMultiplayer) {
+            menuMultiplayer.addEventListener('click', () => {
+                if (window.__arcade.closeLauncherMenu) window.__arcade.closeLauncherMenu();
+                loadP2P().then((b) => b.openUI()).catch(() => {});
+            });
+        }
+
+        // Invite/reply links target the LAUNCHER URL — one stable re-entry
+        // point for every game. Boot the transport now so its fragment
+        // ingestion (joiner auto-answer / host-side relay+ack) runs.
+        if (/[#&]p2p-(offer|answer)=/.test(window.location.hash)) {
+            loadP2P().then((b) => b.ingestFragmentIfPresent()).catch(() => {});
+        }
 
         launcherBtns.forEach((btn) => {
             btn.addEventListener('click', (e) => {
@@ -862,14 +919,14 @@
             if (t.indexOf('arcade:') !== 0) return;
             switch (t) {
                 case 'arcade:hello':
-                    // Announce ourselves. peerStatus is 'idle' — peer transport
-                    // is not yet wired; peer.send currently no-ops in the SDK
-                    // until status becomes 'connected'. Settings ride along so
-                    // the game can apply them before first paint.
+                    // Announce ourselves. peerStatus reflects the live bridge
+                    // when loaded (a game mounted mid-session must see
+                    // 'connected' immediately). Settings ride along so the
+                    // game can apply them before first paint.
                     postToIframe(gameId, {
                         type: 'arcade:welcome',
                         version: 2,
-                        peerStatus: 'idle',
+                        peerStatus: p2pBridge ? p2pBridge.status() : 'idle',
                         settings: currentSettings()
                     });
                     // If this game is the active one, also send a resume hint
@@ -880,7 +937,10 @@
                     }
                     break;
                 case 'arcade:peer.send':
-                    // No transport yet — drop. Hook here when QRCodeP2P lands.
+                    // Wrap in the launcher envelope and ship over the data
+                    // channel. The SDK already gates on status==='connected',
+                    // so a null bridge here just means a stray message — drop.
+                    if (p2pBridge) p2pBridge.send(gameId, data.payload);
                     break;
                 case 'arcade:ui.toast':
                     // Game asked the launcher to display a toast.

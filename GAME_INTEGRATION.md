@@ -277,6 +277,43 @@ Arcade.ui.toast('Network down',   { kind: 'error', duration: 4000 });
 
 ---
 
+## 7a. Multiplayer — Arcade.peer (LIVE)
+
+The launcher owns a serverless WebRTC connection (vendored
+[QRCodeP2P](https://github.com/paulgibeault/QRCodeP2P), see `p2p/VENDORED.md`).
+Players pair through the launcher's **Multiplayer** menu — QR codes and chat
+links, no signaling server. Games never touch any of that; the whole surface is:
+
+```js
+Arcade.peer.status();              // 'unavailable' | 'idle' | 'connecting' | 'connected'
+Arcade.peer.onStatus(s => ...);    // gate multiplayer UI on this
+Arcade.peer.send({ move: 'e4' });  // JSON-safe payload; false unless connected
+Arcade.peer.onMessage(payload => ...);  // exactly what the other game sent
+```
+
+Rules of the road:
+
+- [ ] **Multiplayer is a bonus, never a requirement** — `status()` is
+      `'unavailable'` standalone and `'idle'` framed-but-unpaired. Core
+      gameplay must work in both.
+- [ ] Payloads must be JSON-serializable (structured clone is NOT used).
+      Keep them small and frequent rather than large and rare; chunk anything
+      big (the channel is ordered + reliable).
+- [ ] Both devices run the same game for a session. Messages are routed by
+      `gameId` — a message sent while the other device has a different game
+      mounted is dropped silently. Design for "my peer might not be listening
+      yet": announce with a hello payload and wait for the echo.
+- [ ] `'connected'` means the data channel is genuinely open (transport
+      v1.5.1 semantics) — safe to send immediately on the transition.
+- [ ] Don't cache `status()` at init: a game mounted mid-session receives
+      `'connected'` in its welcome, and live transitions arrive via `onStatus`.
+
+Try it: mount `tools/fixtures/p2p-test-game/` on two devices via the launcher
+and watch the message log; `node tools/p2p-acceptance.mjs` runs the automated
+two-launcher version headlessly.
+
+---
+
 ## 8. Standalone mode must keep working
 
 The launcher is one of two ways to run the game; the GitHub Pages URL is the other.
