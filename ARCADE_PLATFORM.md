@@ -143,7 +143,8 @@ WebRTC can't skip the offer/answer ceremony — DTLS fingerprints must flow both
 
 - Each device holds a persistent, random `deviceId` (`arcade.v1._meta.deviceId`) and a user-editable `deviceName` (`arcade.v1._meta.deviceName`, default "My device"), both generated/read lazily by `arcade-p2p.js`.
 - The instant any peer's data channel opens, both sides broadcast `{ arcade: 1, kind: 'identity', deviceId, name }` over the same channel used for game traffic (harmless to older peers — filtered out before game routing either way).
-- The receiving bridge upserts `arcade.v1._meta.knownPeers[deviceId]` — `name` is a local, user-editable label (defaults to the peer's self-reported name on first contact, then never silently overwritten), `remoteName` is whatever they most recently self-reported, plus `firstConnectedAt` / `lastConnectedAt` / `timesConnected`.
+- The receiving bridge upserts `arcade.v1._meta.knownPeers[deviceId]` — `name` is a local, user-editable label seeded from the peer's self-reported `remoteName`, plus `firstConnectedAt` / `lastConnectedAt` / `timesConnected`.
+- **First contact with a new device** (`ArcadeP2P.onPeerIdentity`'s `isNew` flag): the launcher prompts "Name this connection", pre-filled with the peer's self-reported name as a suggestion — accept it as-is or type something else. Reconnecting later never re-prompts; the stored `name` is never silently overwritten by later handshakes.
 - The launcher menu's **Known Peers** panel (`index.html`, pure localStorage CRUD, no P2P module load required just to view/rename/delete) lets you rename or forget any entry, and live-refreshes when `arcade-p2p.js` reports a fresh handshake via `ArcadeP2P.onPeerIdentity`.
 - Multi-peer safe: a host with several joiners (via "Invite another player") re-announces to each newly-connected peerId individually, so late joiners aren't left without a name exchange.
 

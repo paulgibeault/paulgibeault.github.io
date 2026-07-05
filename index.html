@@ -576,6 +576,16 @@
         function writeKnownPeers(map) {
             try { localStorage.setItem(KNOWN_PEERS_KEY, JSON.stringify(map)); } catch (e) {}
         }
+        function renamePeer(id, name) {
+            const trimmed = String(name || '').trim().slice(0, 60);
+            if (!trimmed) return false;
+            const map = readKnownPeers();
+            if (!map[id]) return false;
+            map[id].name = trimmed;
+            writeKnownPeers(map);
+            render();
+            return true;
+        }
         function relativeTime(iso) {
             const then = Date.parse(iso);
             if (!isFinite(then)) return 'a while ago';
@@ -628,13 +638,7 @@
                     e.stopPropagation();
                     const next = window.prompt('Rename this connection:', displayName);
                     if (next === null) return;
-                    const trimmed = next.trim().slice(0, 60);
-                    if (!trimmed) return;
-                    const map = readKnownPeers();
-                    if (!map[id]) return;
-                    map[id].name = trimmed;
-                    writeKnownPeers(map);
-                    render();
+                    renamePeer(id, next);
                 });
 
                 const deleteBtn = document.createElement('button');
@@ -675,6 +679,7 @@
         render();
         window.__arcade = window.__arcade || {};
         window.__arcade.renderKnownPeers = render; // live-refresh hook for the P2P bridge
+        window.__arcade.renamePeer = renamePeer;    // used to accept/edit a new-connection's suggested name
     })();
 
     // ==========================================
@@ -924,7 +929,7 @@
                     }
                     if (status === 'connected') showToast('Multiplayer connected!');
                 });
-                ArcadeP2P.onPeerIdentity(({ name }) => {
+                ArcadeP2P.onPeerIdentity(({ deviceId, name, remoteName, isNew }) => {
                     // Arrives a beat after 'connected' (one more data-channel
                     // round trip) — swap the generic tag for the peer's
                     // stored/self-reported name once we know it.
@@ -933,6 +938,13 @@
                         tag.textContent = name;
                     }
                     if (window.__arcade.renderKnownPeers) window.__arcade.renderKnownPeers();
+                    // First time pairing with this device: ask what to call it,
+                    // suggesting the name it reported about itself. Declining
+                    // (Cancel) just keeps that suggested name as-is.
+                    if (isNew && window.__arcade.renamePeer) {
+                        const chosen = window.prompt('Name this connection:', remoteName);
+                        if (chosen !== null) window.__arcade.renamePeer(deviceId, chosen);
+                    }
                 });
                 ArcadeP2P.onMessage((targetGameId, payload) => {
                     // Route by the sender's gameId — both devices run the same

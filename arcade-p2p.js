@@ -27,10 +27,11 @@
  *   Each device has a persistent `deviceId` (random, generated once) and a
  *   user-editable `deviceName`. The moment ANY peer's data channel opens, we
  *   broadcast our identity; the receiving side upserts `knownPeers[deviceId]`
- *   — `name` is a local editable label (defaults to the peer's self-reported
- *   name on first contact, then never auto-overwritten by later handshakes;
- *   only the index.html "Known Peers" menu panel renames/deletes it),
- *   `remoteName` is whatever the peer most recently reported about itself.
+ *   — `name` is a local editable label (seeded from the peer's self-reported
+ *   `remoteName` and offered as a suggestion index.html prompts the user to
+ *   accept/edit on first contact — see its onPeerIdentity({isNew}) handler —
+ *   then never auto-overwritten by later handshakes), `remoteName` is
+ *   whatever the peer most recently reported about itself.
  *   Storage keys (see ARCADE_PLATFORM.md's storage convention):
  *     arcade.v1._meta.deviceId, .deviceName, .knownPeers
  */
