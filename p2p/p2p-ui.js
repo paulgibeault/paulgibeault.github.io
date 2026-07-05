@@ -321,7 +321,73 @@ export class P2PUIManager {
         setTimeout(() => { this.ui.shareToast.style.display = 'none'; }, 3000);
     }
 
+    /**
+     * Puts the modal into a coherent screen for the CURRENT connection state.
+     * Called on every show() — closing the window mid-ceremony must never
+     * strand the user in a dead-end (no buttons, stale step bar) on reopen.
+     */
+    _restoreUIState() {
+        const peers = Array.from(this.peerNode.peers.values());
+        const connected = peers.some(p => p.status === 'connected');
+        const pending = peers.some(p => p.status !== 'connected');
+
+        if (connected) {
+            this.cleanupUI();
+            this.ui.choice.style.display = 'block';
+            this.ui.btnHost.style.display = 'none';
+            this.ui.btnJoin.style.display = 'none';
+            this.ui.btnAddPlayer.style.display = 'block';
+            return;
+        }
+
+        if (pending && this.rawSDPPayload) {
+            // Mid-ceremony with a still-valid code — resume where they left
+            // off: their code on screen, next step available.
+            this.ui.choice.style.display = 'none';
+            this.ui.workArea.style.display = 'block';
+            this.ui.scannerContainer.style.display = 'none';
+            this.ui.qrContainer.style.display = 'block';
+            if (this.peerNode.isHost) this.ui.btnScanAns.style.display = 'block';
+            return;
+        }
+
+        this._startOver(false);
+    }
+
+    /** Abandon any unfinished attempt and return to the first screen. */
+    _startOver(log = true) {
+        this.peerNode.peers.forEach((p, id) => {
+            if (p.status !== 'connected') {
+                try { p.connection.close(); } catch(_) {}
+                this.peerNode.peers.delete(id);
+            }
+        });
+        this.rawSDPPayload = '';
+        this._stageLabels = null;
+        this._stageStates = null;
+        this.cleanupUI();
+
+        if (this.ui.stages) { this.ui.stages.style.display = 'none'; this.ui.stages.innerHTML = ''; }
+        this.ui.qrInstructions.textContent = '';
+        this.ui.btnScanAns.style.display = 'none';
+        // Restore buttons a relay tab may have hidden
+        this.ui.btnShareSdp.style.display = '';
+        this.ui.btnCopySdp.style.display = '';
+
+        const anyConnected = Array.from(this.peerNode.peers.values()).some(p => p.status === 'connected');
+        this.ui.choice.style.display = 'block';
+        this.ui.btnHost.style.display = anyConnected ? 'none' : 'block';
+        this.ui.btnJoin.style.display = anyConnected ? 'none' : 'block';
+        this.ui.btnAddPlayer.style.display = anyConnected ? 'block' : 'none';
+
+        this.ui.statusBadge.textContent = anyConnected ? '🎉 Connected!' : 'Not connected yet';
+        this.ui.statusBadge.className = anyConnected ? 'p2p-status-connected' : 'p2p-status-disconnected';
+
+        if (log) this.logDiag('info', 'Starting over — previous attempt discarded.');
+    }
+
     show() {
+        this._restoreUIState();
         this.ui.overlay.style.display = 'flex';
         setTimeout(() => {
             const focusable = this.ui.overlay.querySelectorAll('button, input');
@@ -340,7 +406,7 @@ export class P2PUIManager {
         <div id="p2p-modal-overlay" class="p2p-modal-overlay" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="p2p-modal-title">
             <div class="p2p-modal">
                 <header class="p2p-header">
-                    <h2 id="p2p-modal-title">Play Together <span style="font-size: 0.5em; color: #888; vertical-align: middle; font-weight: normal; margin-left: 10px;">v1.6.0</span></h2>
+                    <h2 id="p2p-modal-title">Play Together <span style="font-size: 0.5em; color: #888; vertical-align: middle; font-weight: normal; margin-left: 10px;">v1.6.1</span></h2>
                     <button id="p2p-btn-close" class="p2p-btn-danger" style="border:none; border-radius:4px; padding:4px 8px; cursor:pointer;" aria-label="Close">X</button>
                 </header>
                 <div id="p2p-status-badge" class="p2p-status-disconnected">Not connected yet</div>
@@ -361,6 +427,7 @@ export class P2PUIManager {
                         <div class="p2p-secondary-actions">
                             <button id="p2p-btn-share-sdp" class="p2p-btn p2p-text-btn" style="width:auto;">📤 Can't scan? Send a link instead</button>
                             <button id="p2p-btn-copy-sdp" class="p2p-btn p2p-text-btn" style="width:auto;">Copy as text</button>
+                            <button id="p2p-btn-restart" class="p2p-btn p2p-text-btn" style="width:auto;">↩ Start over</button>
                         </div>
                         <div id="p2p-share-toast" style="display:none; margin-top:8px; color:#4ade80; font-size:13px;"></div>
                     </div>
@@ -459,7 +526,8 @@ export class P2PUIManager {
             btnCopyTranscript: document.getElementById('p2p-btn-copy-transcript'),
             choice: document.getElementById('p2p-choice'),
             scanGuide: document.getElementById('p2p-scan-guide'),
-            workArea: document.getElementById('p2p-work-area')
+            workArea: document.getElementById('p2p-work-area'),
+            btnRestart: document.getElementById('p2p-btn-restart')
         };
 
         // Initialize UI values from PeerManager options
@@ -719,21 +787,11 @@ export class P2PUIManager {
             }
 
             // Otherwise abandon pending attempts and go back to the start.
-            this.peerNode.peers.forEach((p, id) => {
-                if (p.status !== 'connected') {
-                    p.connection.close();
-                    this.peerNode.peers.delete(id);
-                }
-            });
-
-            const anyConnected = Array.from(this.peerNode.peers.values()).some(p => p.status === 'connected');
-            this.ui.choice.style.display = 'block';
-            this.ui.btnScanAns.style.display = 'none';
-            this.ui.btnHost.style.display = anyConnected ? 'none' : 'block';
-            this.ui.btnJoin.style.display = anyConnected ? 'none' : 'block';
-            this.ui.btnAddPlayer.style.display = anyConnected ? 'block' : 'none';
-            if (this.ui.stages) this.ui.stages.style.display = 'none';
+            this._startOver(false);
         });
+
+        // ---- Start over (escape hatch from any mid-ceremony screen) ----
+        this.ui.btnRestart.addEventListener('click', () => this._startOver());
 
         // ---- Share / Copy buttons ----
         this.ui.btnShareSdp.addEventListener('click', async () => {
