@@ -370,6 +370,14 @@
                     <p class="launcher-btn__subtitle">Card Games</p>
                 </div>
             </a>
+            <!-- TEMP local-dev only — not yet a real release, remove before pushing -->
+            <a href="https://paulgibeault.github.io/p2p-chat/" class="launcher-btn" data-game-id="p2p-chat" style="animation-delay: 0.5s">
+                <div class="launcher-btn__image-wrap"><img class="launcher-btn__image" src="images/p2p-chat.png" alt="P2P Chat"></div>
+                <div class="launcher-btn__body">
+                    <h3 class="launcher-btn__name">P2P Chat</h3>
+                    <p class="launcher-btn__subtitle">Multiplayer Demo</p>
+                </div>
+            </a>
         </div>
     </div>
 
@@ -701,7 +709,7 @@
             const iframe = document.createElement('iframe');
             iframe.src = src;
             iframe.dataset.gameId = gameId;
-            iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+            iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-downloads');
             iframe.setAttribute('allowfullscreen', '');
             iframe.setAttribute('title', name);
             iframe.hidden = true;
