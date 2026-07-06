@@ -619,9 +619,12 @@
                 row.tabIndex = 0;
                 row.setAttribute('role', 'button');
                 row.setAttribute('aria-label', 'Reconnect to ' + displayName);
-                row.title = 'Open Multiplayer to reconnect';
+                row.title = 'Reconnect — get a fresh invite code to show or send';
                 row.addEventListener('click', () => {
-                    if (window.__arcade.openMultiplayerPanel) window.__arcade.openMultiplayerPanel();
+                    // One-tap reconnect: skip the Host/Join choice and put a
+                    // fresh invite code on screen immediately. The other
+                    // device joins by scanning it or tapping the sent link.
+                    if (window.__arcade.openMultiplayerPanel) window.__arcade.openMultiplayerPanel({ mode: 'host' });
                 });
                 row.addEventListener('keydown', (e) => {
                     if (e.key !== 'Enter' && e.key !== ' ') return;
@@ -949,7 +952,14 @@
                     }
                     prevPeerStatus = status;
                 });
-                ArcadeP2P.onPeerIdentity(({ deviceId, name, remoteName, isNew }) => {
+                ArcadeP2P.onPeerIdentity(({ deviceId, name, remoteName, isNew, fingerprintChanged }) => {
+                    // Identity-pinning notice (TOFU): a changed device
+                    // fingerprint is expected ~monthly (browser certificate
+                    // renewal) or after they clear browser data — but if
+                    // neither applies, the user should re-verify in person.
+                    if (fingerprintChanged) {
+                        showToast('⚠️ ' + name + "'s device identity changed since last time. Normal after ~a month or a browser reset — if unexpected, verify in person.", { error: true });
+                    }
                     // Arrives a beat after 'connected' (one more data-channel
                     // round trip) — swap the generic tag for the peer's
                     // stored/self-reported name once we know it.
@@ -987,9 +997,9 @@
             return p2pLoadPromise;
         }
 
-        function openMultiplayerPanel() {
+        function openMultiplayerPanel(options) {
             if (window.__arcade.closeLauncherMenu) window.__arcade.closeLauncherMenu();
-            loadP2P().then((b) => b.openUI()).catch(() => {});
+            loadP2P().then((b) => b.openUI(options)).catch(() => {});
         }
         window.__arcade.openMultiplayerPanel = openMultiplayerPanel; // shared by the menu item + known-peer rows
 

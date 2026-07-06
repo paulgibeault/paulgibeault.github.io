@@ -45,16 +45,21 @@ const browser = await chromium.launch({
     headless: true,
     args: ['--disable-features=WebRtcHideLocalIpsWithMdns']
 });
-const context = await browser.newContext();
 // Hermetic: never touch external STUN; loopback host candidates suffice.
-await context.addInitScript(`
+const FORCE_LOCAL_ICE = `
     const OrigRTC = window.RTCPeerConnection;
     window.RTCPeerConnection = class extends OrigRTC {
         constructor(cfg = {}) { super({ ...cfg, iceServers: [] }); }
     };
-`);
+`;
+// SEPARATE contexts per simulated device: distinct localStorage + IndexedDB,
+// so deviceIds and identity certificates genuinely differ like real devices.
+const contextH = await browser.newContext();
+const contextJ = await browser.newContext();
+await contextH.addInitScript(FORCE_LOCAL_ICE);
+await contextJ.addInitScript(FORCE_LOCAL_ICE);
 
-async function launcherPage(label) {
+async function launcherPage(label, context) {
     const page = await context.newPage();
     page.on('pageerror', err => console.error(`  [${label} pageerror]`, err.message));
     await page.goto(`${BASE}/`);
@@ -65,8 +70,8 @@ async function launcherPage(label) {
 try {
     console.log('\nP2P acceptance — launcher-owned multiplayer\n');
 
-    const H = await launcherPage('host');
-    const J = await launcherPage('joiner');
+    const H = await launcherPage('host', contextH);
+    const J = await launcherPage('joiner', contextJ);
 
     // 1. Load the bridge on both (as the Multiplayer menu item would).
     for (const [page, label] of [[H, 'host'], [J, 'joiner']]) {
@@ -162,6 +167,59 @@ try {
 
     const sawIdle = await fH.evaluate(() => window.__statuses.includes('idle'));
     check("game never saw 'idle' during the blip", !sawIdle);
+
+    // 8. Identity pinning (transport v1.8): the host must have recorded the
+    //    joiner's device with the DTLS fingerprint of the direct link.
+    const FP_RE = /^[0-9A-F]{2}(:[0-9A-F]{2}){19,63}$/;
+    await H.waitForFunction(`(() => {
+        const raw = localStorage.getItem('arcade.v1._meta.knownPeers');
+        if (!raw) return false;
+        const known = JSON.parse(raw);
+        return Object.values(known).some(p => typeof p.fingerprint === 'string' && p.fingerprint.includes(':'));
+    })()`, null, { timeout: 10000 });
+    const hostView = await H.evaluate(() => {
+        const known = JSON.parse(localStorage.getItem('arcade.v1._meta.knownPeers'));
+        const myId = localStorage.getItem('arcade.v1._meta.deviceId');
+        const entries = Object.entries(known);
+        return { entries, myId };
+    });
+    const [peerDeviceId, peerRecord] = hostView.entries[0];
+    check('host recorded the joiner with a well-formed fingerprint',
+        FP_RE.test(peerRecord.fingerprint || ''), (peerRecord.fingerprint || 'none').slice(0, 12) + '…');
+    check('recorded deviceId differs from own (distinct devices)', peerDeviceId !== hostView.myId);
+
+    // 9. Pinning policy: same device announcing a DIFFERENT fingerprint later
+    //    must flag the change (notice) and re-record — never silently match.
+    const policy = await H.evaluate(() => {
+        const rec = window.__arcade.p2p._recordPeerIdentity;
+        const fpA = 'AA:' + Array(31).fill('11').join(':');
+        const fpB = 'BB:' + Array(31).fill('22').join(':');
+        const first = rec('policy-test-device', 'Pin Tester', fpA);
+        const same = rec('policy-test-device', 'Pin Tester', fpA);
+        const changed = rec('policy-test-device', 'Pin Tester', fpB);
+        const stored = JSON.parse(localStorage.getItem('arcade.v1._meta.knownPeers'))['policy-test-device'];
+        return { first: first.fingerprintChanged, same: same.fingerprintChanged,
+                 changed: changed.fingerprintChanged, storedFp: stored.fingerprint, changedAt: stored.fingerprintChangedAt };
+    });
+    check('first sighting records without a change flag', policy.first === false);
+    check('re-announce with the same fingerprint stays quiet', policy.same === false);
+    check('changed fingerprint is flagged and re-recorded (TOFU-with-notice)',
+        policy.changed === true && policy.storedFp.startsWith('BB:') && !!policy.changedAt);
+
+    // 10. One-tap reconnect entry: openUI({mode:'host'}) must land on a fresh
+    //     invite code — no Host/Join choice screen in between.
+    await H.evaluate(() => window.__arcade.openMultiplayerPanel({ mode: 'host' }));
+    await H.waitForFunction(`(() => {
+        const qr = document.getElementById('p2p-qr-container');
+        const choice = document.getElementById('p2p-choice-buttons') || { style: {} };
+        return qr && qr.style.display === 'block';
+    })()`, null, { timeout: 15000 });
+    const choiceHidden = await H.evaluate(() => {
+        const overlay = document.getElementById('p2p-modal-overlay');
+        const host = document.getElementById('p2p-btn-host');
+        return overlay.style.display === 'flex' && (!host || host.offsetParent === null);
+    });
+    check('mode:host opens straight to a fresh invite code (no choice screen)', choiceHidden);
 
     await H.close(); await J.close();
 } catch (e) {

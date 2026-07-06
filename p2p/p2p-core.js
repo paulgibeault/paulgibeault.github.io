@@ -132,6 +132,57 @@ export class ConnectionUtils {
 }
 
 // ==========================================
+// Persistent device identity (v1.8)
+// ==========================================
+// One ECDSA certificate per browser profile, stored in IndexedDB and passed
+// to every RTCPeerConnection, so this device's DTLS fingerprint is STABLE
+// across page loads. What that buys:
+//   - peers can RECORD the fingerprint per known device and notice when it
+//     changes (see the launcher's identity pinning),
+//   - reconnect payloads can eventually omit/abbreviate the fingerprint for
+//     known pairs (~60-char codes), and
+//   - the future rendezvous layer gets a stable identity to bind to.
+// Browsers cap certificate lifetime (~30 days), so the fingerprint rotates
+// on that cadence — treat a changed fingerprint as "notify and re-record on
+// a manual ceremony", never as a silent hard-fail. Storage failures (private
+// browsing, etc.) fall back to a normal ephemeral certificate.
+
+const IDENTITY_DB = 'qrp2p-identity';
+const IDENTITY_STORE = 'identity';
+
+function identityDbOpen() {
+    return new Promise((resolve, reject) => {
+        const req = indexedDB.open(IDENTITY_DB, 1);
+        req.onupgradeneeded = () => req.result.createObjectStore(IDENTITY_STORE);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+    });
+}
+
+async function identityDbGet(key) {
+    const db = await identityDbOpen();
+    try {
+        return await new Promise((resolve, reject) => {
+            const req = db.transaction(IDENTITY_STORE, 'readonly').objectStore(IDENTITY_STORE).get(key);
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+    } finally { db.close(); }
+}
+
+async function identityDbPut(key, value) {
+    const db = await identityDbOpen();
+    try {
+        return await new Promise((resolve, reject) => {
+            const tx = db.transaction(IDENTITY_STORE, 'readwrite');
+            tx.objectStore(IDENTITY_STORE).put(value, key);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    } finally { db.close(); }
+}
+
+// ==========================================
 // CORE: WebRTC Manager
 // ==========================================
 //
@@ -199,8 +250,13 @@ export class PeerManager extends EventTarget {
             // offer a "give up" action (disconnectPeer) long before this fires.
             interruptedGraceMs: options.interruptedGraceMs || 300000,
             wakeProbeTimeoutMs: options.wakeProbeTimeoutMs || 3000,
-            outboxLimit: options.outboxLimit || 1000
+            outboxLimit: options.outboxLimit || 1000,
+            // Stable DTLS identity across sessions (v1.8) — see the identity
+            // section above. Opt out with persistentIdentity: false.
+            persistentIdentity: options.persistentIdentity !== false
         };
+        this._certificate = null;
+        this._certPromise = null;
 
         this._onVisibility = () => {
             if (!document.hidden) this._onWake();
@@ -214,6 +270,59 @@ export class PeerManager extends EventTarget {
         return Math.random().toString(36).substring(2, 9);
     }
 
+    /**
+     * Loads (or mints) this device's persistent certificate so every
+     * connection presents the same DTLS fingerprint. Resolves to null when
+     * disabled or unavailable — connections then use a normal ephemeral cert.
+     * Regenerates ahead of expiry: browsers cap certificate lifetime (~30
+     * days), so fingerprint rotation on that cadence is expected and pinning
+     * layers must treat it as notify-and-re-record, not as an attack.
+     */
+    async _ensureCertificate() {
+        if (!this.options.persistentIdentity ||
+            typeof RTCPeerConnection.generateCertificate !== 'function') return null;
+        if (!this._certPromise) {
+            this._certPromise = (async () => {
+                try {
+                    let cert = await identityDbGet('certificate');
+                    if (!cert || !cert.expires || cert.expires < Date.now() + 24 * 3600 * 1000) {
+                        cert = await RTCPeerConnection.generateCertificate({ name: 'ECDSA', namedCurve: 'P-256' });
+                        await identityDbPut('certificate', cert);
+                        this.dispatchEvent(new CustomEvent('diagnostic', { detail: {
+                            type: 'sys', msg: 'New device identity certificate generated (previous one missing or near expiry).'
+                        }}));
+                    }
+                    this._certificate = cert;
+                    return cert;
+                } catch (e) {
+                    this.dispatchEvent(new CustomEvent('diagnostic', { detail: {
+                        type: 'warn', msg: `Persistent identity unavailable (${e.message}) — using an ephemeral certificate this session.`
+                    }}));
+                    this._certificate = null;
+                    return null;
+                }
+            })();
+        }
+        return this._certPromise;
+    }
+
+    /** DTLS fingerprint value from an SDP string (uppercase hex:hex:…), or null. */
+    static extractFingerprint(sdp) {
+        const m = /a=fingerprint:\S+\s+([0-9A-Fa-f:]+)/.exec(sdp || '');
+        return m ? m[1].toUpperCase() : null;
+    }
+
+    /**
+     * The REMOTE device's DTLS fingerprint on one link — its transferable
+     * identity. Stable across sessions when the peer runs with
+     * persistentIdentity (rotates with its ~monthly certificate renewal).
+     */
+    getPeerFingerprint(peerId) {
+        const peerData = this.peers.get(peerId);
+        const desc = peerData && peerData.connection.remoteDescription;
+        return desc ? PeerManager.extractFingerprint(desc.sdp) : null;
+    }
+
     initPeer(peerId, type) {
         if(this.peers.has(peerId)) {
             const existing = this.peers.get(peerId);
@@ -224,7 +333,8 @@ export class PeerManager extends EventTarget {
             this.peers.delete(peerId);
         }
 
-        const rtcConfig = this.options.iceMode === 'local' ? { iceServers: [] } : STUN_SERVERS;
+        const rtcConfig = this.options.iceMode === 'local' ? { iceServers: [] } : { ...STUN_SERVERS };
+        if (this._certificate) rtcConfig.certificates = [this._certificate];
         const peerConnection = new RTCPeerConnection(rtcConfig);
         const peerData = {
             connection: peerConnection,
@@ -396,17 +506,21 @@ export class PeerManager extends EventTarget {
         }
 
         // Host relays APP messages between clients — each destination link
-        // gets its own reliability sequence. Control frames are never relayed.
+        // gets its own reliability sequence, and the relay marks the frame so
+        // receivers know it did NOT originate from their direct link partner
+        // (identity/fingerprint claims must never bind through a relay).
+        // The host always stamps relayed:true itself, so a sender cannot
+        // launder a relayed frame into looking direct.
         if (this.isHost && msg.from !== this.myId) {
             this.peers.forEach((destData, destId) => {
-                if (destId !== peerId) this._sendAppTo(destId, { text: msg.text, from: msg.from });
+                if (destId !== peerId) this._sendAppTo(destId, { text: msg.text, from: msg.from, relayed: true });
             });
         }
 
         // Destructure only the expected fields to avoid merging arbitrary keys
-        const { text, from } = msg;
+        const { text, from, relayed } = msg;
         this.dispatchEvent(new CustomEvent('message', {
-            detail: { text, from, incoming: true, peerId }
+            detail: { text, from, relayed: !!relayed, incoming: true, peerId }
         }));
     }
 
@@ -517,7 +631,9 @@ export class PeerManager extends EventTarget {
         if (!open && peerData.status !== 'interrupted') return false;
 
         const seq = ++peerData.outSeq;
-        const wire = JSON.stringify({ text: msg.text, from: msg.from, seq });
+        const wire = JSON.stringify(msg.relayed
+            ? { text: msg.text, from: msg.from, seq, relayed: true }
+            : { text: msg.text, from: msg.from, seq });
         peerData.outbox.push({ seq, wire });
         if (peerData.outbox.length > this.options.outboxLimit) {
             peerData.outbox.splice(0, peerData.outbox.length - this.options.outboxLimit);
@@ -737,6 +853,7 @@ export class PeerManager extends EventTarget {
 
     async createOffer() {
         this.isHost = true;
+        await this._ensureCertificate();
         const peerId = this.generateId();
         const peerData = this.initPeer(peerId, 'client');
         this.setupDataChannel(peerId, peerData.connection.createDataChannel('data'));
@@ -776,6 +893,7 @@ export class PeerManager extends EventTarget {
 
     async createAnswer(offerPayload) {
         this.isHost = false;
+        await this._ensureCertificate();
         const hostPeerId = offerPayload.peerId;
         const peerData = this.initPeer(hostPeerId, 'host');
 

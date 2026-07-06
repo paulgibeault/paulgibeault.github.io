@@ -150,7 +150,11 @@ WebRTC can't skip the offer/answer ceremony — DTLS fingerprints must flow both
 - The launcher menu's **Known Peers** panel (`index.html`, pure localStorage CRUD, no P2P module load required just to view/rename/delete) lets you rename or forget any entry, and live-refreshes when `arcade-p2p.js` reports a fresh handshake via `ArcadeP2P.onPeerIdentity`.
 - Multi-peer safe: a host with several joiners (via "Invite another player") re-announces to each newly-connected peerId individually, so late joiners aren't left without a name exchange.
 
-This is the lighter-weight sibling of the RTCCertificate idea below — it makes reconnecting *legible* (you know who you're pairing with) without changing the transport itself.
+### One-tap reconnect + identity pinning (IMPLEMENTED, transport v1.8)
+
+- **One-tap reconnect:** tapping a Known Peers row opens the Multiplayer modal in `{mode:'host'}` — no Host/Join choice screen, a *fresh* invite code is on screen immediately (show it or send it as a link; link-tennis automates the other device's half). Signaling stays one-time-use by design — that's what keeps a leaked old invite link harmless — so "reconnect" means *fresh code, zero navigation*, not replay.
+- **Persistent identity:** the transport now keeps one ECDSA `RTCCertificate` per browser profile (IndexedDB), so a device's DTLS fingerprint is stable across sessions. Each known peer records the fingerprint of its DIRECT link (`knownPeers[deviceId].fingerprint`); identities arriving via the host's relay never bind a fingerprint (the transport stamps relayed frames).
+- **Pinning policy is TOFU-with-notice, not hard-fail:** every connection today is a manual in-person ceremony — that exchange IS the authentication — and browsers rotate certificates ~monthly, so a changed fingerprint surfaces a warning toast (`fingerprintChanged` on `onPeerIdentity`) telling the user to re-verify in person if unexpected. Hard cryptographic pair-binding is the rendezvous follow-up's job (`QRCodeP2P/RECONNECT_RENDEZVOUS.md`, ratcheting pair secret).
 
 ---
 

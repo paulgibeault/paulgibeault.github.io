@@ -102,23 +102,39 @@ function writeKnownPeers(map) {
     try { localStorage.setItem(KNOWN_PEERS_KEY, JSON.stringify(map)); } catch (e) {}
 }
 
-const peerIdentityListeners = []; // fn({deviceId, name, remoteName, isNew})
+const peerIdentityListeners = []; // fn({deviceId, name, remoteName, isNew, fingerprintChanged})
 
-function recordPeerIdentity(deviceId, remoteName) {
-    if (typeof deviceId !== 'string' || !deviceId) return;
+/**
+ * Upserts a known peer. `fingerprint` is the DTLS fingerprint of the DIRECT
+ * link the identity arrived on (null for relayed identities — those name a
+ * device but must never bind an identity key). Pinning policy is trust-on-
+ * first-use with change NOTICE, not hard-fail: every connection today is a
+ * manual in-person ceremony (that exchange IS the authentication), and
+ * browsers rotate certificates ~monthly, so a changed fingerprint means
+ * "tell the user", never "silently trust" and never "silently block".
+ */
+function recordPeerIdentity(deviceId, remoteName, fingerprint) {
+    if (typeof deviceId !== 'string' || !deviceId) return null;
     const safeRemoteName = (typeof remoteName === 'string' && remoteName.trim())
         ? remoteName.trim().slice(0, 60) : 'Unnamed device';
+    const safeFp = (typeof fingerprint === 'string' && /^[0-9A-F]{2}(:[0-9A-F]{2}){19,63}$/.test(fingerprint)) ? fingerprint : null;
     const known = readKnownPeers();
     const existing = known[deviceId];
     const now = new Date().toISOString();
+    const prevFp = existing ? existing.fingerprint : null;
+    const fingerprintChanged = !!(prevFp && safeFp && prevFp !== safeFp);
     known[deviceId] = existing
-        ? { ...existing, remoteName: safeRemoteName, lastConnectedAt: now, timesConnected: (existing.timesConnected || 0) + 1 }
-        : { name: safeRemoteName, remoteName: safeRemoteName, firstConnectedAt: now, lastConnectedAt: now, timesConnected: 1 };
+        ? { ...existing, remoteName: safeRemoteName, lastConnectedAt: now, timesConnected: (existing.timesConnected || 0) + 1,
+            fingerprint: safeFp || prevFp || null,
+            ...(fingerprintChanged ? { fingerprintChangedAt: now } : {}) }
+        : { name: safeRemoteName, remoteName: safeRemoteName, firstConnectedAt: now, lastConnectedAt: now, timesConnected: 1,
+            fingerprint: safeFp };
     writeKnownPeers(known);
-    const detail = { deviceId, name: known[deviceId].name, remoteName: safeRemoteName, isNew: !existing };
+    const detail = { deviceId, name: known[deviceId].name, remoteName: safeRemoteName, isNew: !existing, fingerprintChanged };
     for (const fn of peerIdentityListeners) {
         try { fn(detail); } catch (err) {}
     }
+    return detail;
 }
 
 function loadLocalScript(relPath, checkGlobal) {
@@ -212,14 +228,25 @@ async function ensureAddon() {
             }
         });
 
+        // Identity frames are handled at the TRANSPORT level, where the
+        // sending link's peerId — and therefore its DTLS fingerprint — is
+        // available. Only a direct (non-relayed) identity may bind a
+        // fingerprint; a relayed one still records the name.
+        mp.peerNode.addEventListener('message', (e) => {
+            const d = e.detail || {};
+            if (!d.incoming) return;
+            let env = null;
+            try { env = JSON.parse(d.text); } catch (err) { return; }
+            if (!env || env.arcade !== 1 || env.kind !== 'identity') return;
+            const fp = d.relayed ? null : mp.peerNode.getPeerFingerprint(d.peerId);
+            recordPeerIdentity(env.deviceId, env.name, fp);
+        });
+
         // 'data' fires with JSON already parsed when possible.
         mp.addEventListener('data', (e) => {
             const env = e.detail;
             if (!env || typeof env !== 'object' || env.arcade !== 1) return;
-            if (env.kind === 'identity') {
-                recordPeerIdentity(env.deviceId, env.name);
-                return;
-            }
+            if (env.kind === 'identity') return; // handled on the transport listener above
             if (typeof env.gameId !== 'string') return;
             for (const fn of messageListeners) {
                 try { fn(env.gameId, env.payload); } catch (err) {}
@@ -275,9 +302,14 @@ export const ArcadeP2P = {
         };
     },
 
-    /** Open the connection modal (Host / Join ceremony UI). */
-    async openUI() {
-        (await ensureAddon()).showUI();
+    /**
+     * Open the connection modal. Default: the Host / Join choice screen.
+     * {mode:'host'} skips straight to a FRESH invite code — the one-tap
+     * "Reconnect" entry for known peers (signaling is one-time-use by design,
+     * so reconnecting means a fresh code with zero navigation to reach it).
+     */
+    async openUI(options) {
+        (await ensureAddon()).showUI(options);
     },
 
     /**
@@ -304,7 +336,10 @@ export const ArcadeP2P = {
     },
 
     /** Test hook — the underlying P2PAddon (null until first use). */
-    _addon() { return addon; }
+    _addon() { return addon; },
+
+    /** Test hook — identity/pinning policy, exercised directly by acceptance. */
+    _recordPeerIdentity: recordPeerIdentity
 };
 
 export default ArcadeP2P;

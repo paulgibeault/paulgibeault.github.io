@@ -65,8 +65,10 @@ export class P2PAddon extends EventTarget {
         }
     }
 
-    showUI() {
-        if (this.ui) this.ui.show();
+    showUI(options) {
+        // options.mode === 'host' skips the choice screen and shows a fresh
+        // invite code immediately (one-tap reconnect entry).
+        if (this.ui) this.ui.show(options);
         else console.error("P2PAddon not initialized. Call init() first.");
     }
 

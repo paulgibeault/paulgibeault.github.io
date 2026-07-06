@@ -401,14 +401,51 @@ export class P2PUIManager {
         if (log) this.logDiag('info', 'Starting over — previous attempt discarded.');
     }
 
-    show() {
+    show(options = {}) {
         this._restoreUIState();
         this.ui.overlay.style.display = 'flex';
+        if (options.mode === 'host') {
+            // One-tap (re)connect entry: skip the choice screen and put a
+            // FRESH invite code on screen immediately. Used by "Reconnect"
+            // actions — WebRTC signaling is one-time-use by design (fresh ICE
+            // credentials every session), so reconnecting means a fresh code,
+            // just with zero navigation to reach it.
+            const addingPlayer = Array.from(this.peerNode.peers.values())
+                .some(p => p.status === 'connected' || p.status === 'interrupted');
+            this.startHostCeremony({ addingPlayer });
+            return;
+        }
         setTimeout(() => {
             const focusable = this.ui.overlay.querySelectorAll('button, input');
             const visible = Array.from(focusable).filter(el => ((el.offsetWidth > 0 || el.offsetHeight > 0) && el.style.display !== 'none'));
             if (visible.length) visible[0].focus();
         }, 50);
+    }
+
+    /**
+     * Begins the inviter flow: create a fresh offer and show its QR/link.
+     * Reused by the Host button, the Add-Player button, and show({mode:'host'}).
+     */
+    async startHostCeremony(opts = {}) {
+        const addingPlayer = !!opts.addingPlayer;
+        this.logDiag('info', addingPlayer ? '--- ADDING ANOTHER PLAYER ---' : '--- INVITE SEQUENCE ---');
+        this.ui.choice.style.display = 'none';
+        this._initStages('host');
+
+        try {
+            const offerData = await this.peerNode.createOffer();
+            this._setStage(0, 'done'); // your code is ready & showing
+
+            // QR-first: the code IS the invite. Links are the fallback.
+            await this.displayQRCode(offerData, addingPlayer
+                ? "Show this code to the new player. Ask them to tap “Join” and point their camera here."
+                : "Show this code to the other player. Ask them to tap “Join” on their device and point their camera here.");
+            this.ui.btnScanAns.style.display = 'block';
+            if (!addingPlayer) this.ui.btnShareSdp.textContent = '📤 Can’t scan? Send a link instead';
+        } catch (e) {
+            this._setStage(0, 'error');
+            this.logDiag('error', addingPlayer ? 'Could not create a new invite code.' : 'Could not create your invite code.');
+        }
     }
 
     hide() {
@@ -717,41 +754,9 @@ export class P2PUIManager {
 
         // ---- HOST: create offer ----
         // ---- INVITER: show code, then scan theirs ----
-        this.ui.btnHost.addEventListener('click', async () => {
-            this.logDiag('info', '--- INVITE SEQUENCE ---');
-            this.ui.choice.style.display = 'none';
-            this._initStages('host');
+        this.ui.btnHost.addEventListener('click', () => this.startHostCeremony());
 
-            try {
-                const offerData = await this.peerNode.createOffer();
-                this._setStage(0, 'done'); // your code is ready & showing
-
-                // QR-first: the code IS the invite. Links are the fallback.
-                await this.displayQRCode(offerData,
-                    "Show this code to the other player. Ask them to tap “Join” on their device and point their camera here.");
-                this.ui.btnScanAns.style.display = 'block';
-                this.ui.btnShareSdp.textContent = '📤 Can’t scan? Send a link instead';
-            } catch (e) {
-                this._setStage(0, 'error');
-                this.logDiag('error', 'Could not create your invite code.');
-            }
-        });
-
-        this.ui.btnAddPlayer.addEventListener('click', async () => {
-            this.logDiag('info', '--- ADDING ANOTHER PLAYER ---');
-            this.ui.choice.style.display = 'none';
-            this._initStages('host');
-
-            try {
-                const offerData = await this.peerNode.createOffer();
-                this._setStage(0, 'done');
-                await this.displayQRCode(offerData,
-                    "Show this code to the new player. Ask them to tap “Join” and point their camera here.");
-                this.ui.btnScanAns.style.display = 'block';
-            } catch (e) {
-                this.logDiag('error', 'Could not create a new invite code.');
-            }
-        });
+        this.ui.btnAddPlayer.addEventListener('click', () => this.startHostCeremony({ addingPlayer: true }));
 
         // ---- INVITER step 2: scan the other player's return code ----
         this.ui.btnScanAns.addEventListener('click', () => {
