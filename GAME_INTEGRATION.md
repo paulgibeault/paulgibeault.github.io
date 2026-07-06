@@ -1,7 +1,7 @@
 # Paul's Arcade — Game Integration Template
 
 The minimal contract every game must satisfy to slot cleanly into the launcher.
-The SDK is a single ~600-line file at `https://paulgibeault.github.io/arcade-sdk.js`;
+The SDK is a single file at `https://paulgibeault.github.io/arcade-sdk.js`;
 the rest is convention. Protocol version: **v2**.
 
 For background see [ARCADE_PLATFORM.md](ARCADE_PLATFORM.md). This file is the
@@ -17,11 +17,11 @@ implementer's checklist.
 
 | Game           | gameId           | Repo                                           |
 | -------------- | ---------------- | ---------------------------------------------- |
+| Moon Lit       | `moon-lit`       | `paulgibeault/moon-lit`                        |
 | Pi Game        | `pi-game`        | `paulgibeault/pi-game`                         |
 | Si Syndicate   | `si-syn`         | `paulgibeault/si-syn`                          |
 | HecknSic       | `hecknsic`       | `paulgibeault/hecknsic`                        |
 | Cozy Solitaire | `cozy-solitaire` | `paulgibeault/cozy-solitaire`                  |
-| Sew What       | `sew-what`       | `paulgibeault/sew-what`                        |
 
 ---
 
@@ -349,7 +349,7 @@ anchor-triggered downloads from a sandboxed iframe.
 - [ ] No `window.open` to internal links; use in-game UI for help/about screens.
 - [ ] If the game requests fullscreen, request it on a user gesture only and target the game's own root element.
 
-`allow-same-origin` means **same-origin `localStorage` works directly inside the iframe** — you do **not** need a postMessage shim. If your game has one (legacy from earlier protocol versions), delete it as part of the SDK adoption.
+`allow-same-origin` means **same-origin `localStorage` works directly inside the iframe** — you do **not** need a postMessage shim. If your game has one (legacy from earlier protocol versions), delete it as part of the SDK adoption. (One older game, hecknsic, still ships such a shim; the launcher answers its `ls-proxy-request`/`ls-proxy-response` messages purely for backward compatibility — this is not a pattern to copy into new integrations.)
 
 ---
 
@@ -372,7 +372,7 @@ The launcher has both a portfolio card and a launcher button for every game;
 both pull from `paulgibeault.github.io/images/<gameId>.png`.
 
 - [ ] Provide a square cover image, ≥ 512×512, saved as `images/<gameId>.png` in the launcher repo (PR against `paulgibeault/paulgibeault.github.io`).
-- [ ] Update both the `#games` portfolio section and the `#view-launcher` grid in [index.html](index.html) — there's a `SYNC:` comment in the file marking the duplicate.
+- [ ] Update both the `#games` portfolio section in [profile.html](profile.html) and the `#view-launcher` grid in [index.html](index.html) — a comment above `#view-launcher` in `index.html` ("Game list is mirrored in profile.html...") marks the duplicate.
 - [ ] Provide a one-line subtitle (≤ 20 chars) for the launcher button (e.g. "Hex Puzzle", "Memorization").
 
 ---

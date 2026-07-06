@@ -23,13 +23,29 @@ Hosted at `https://paulgibeault.github.io/arcade-sdk.js` (one source of truth �
 
 ```js
 Arcade.init({ gameId: 'pi-game' });   // declares identity, runs handshake
+await Arcade.ready;                    // resolves on welcome (or immediately standalone)
 
 // STORAGE — sync, identical standalone or framed
 Arcade.state.get(key)                 // localStorage 'arcade.v1.<gameId>.<key>'
 Arcade.state.set(key, value)
+Arcade.state.remove(key)
+Arcade.state.getOrInit(key, defaults) // deep-merges defaults under any stored value
+Arcade.state.onChange(key, fn)
+Arcade.state.migrate(version, fn)     // runs fn exactly once per (gameId, version)
 Arcade.global.get(key)                // localStorage 'arcade.v1.global.<key>'
 Arcade.global.set(key, value)
 Arcade.onStateReplaced(fn)            // fires after a launcher import — re-read state
+
+// PLAYER, SCORES, STATS — shared identity + leaderboard/stat helpers
+Arcade.player.name() / setName(s)     // sticky display name, arcade.v1.global.playerName
+Arcade.scores.add(category, entry)    // top-100 sorted list, stamps name + ts
+Arcade.scores.list(category, opts) / best(category) / clear(category)
+Arcade.stats.get(category) / getOrInit(category, defaults) / update(category, fn)
+
+// LIFECYCLE — pause cleanly when the launcher hides/evicts this iframe
+Arcade.onSuspend(fn)                  // iframe hidden or about to be evicted
+Arcade.onResume(fn)                   // iframe shown again
+Arcade.session.start(opts)            // wall-clock tracker wired to suspend/resume
 
 // MULTIPLAYER — async, gracefully no-ops when standalone
 Arcade.peer.status()                  // 'unavailable' | 'idle' | 'connecting' | 'connected' | 'interrupted'
@@ -39,15 +55,22 @@ Arcade.peer.onStatus(fn)
 Arcade.peer.send(payload)
 Arcade.peer.onMessage(fn)
 
-// SETTINGS — launcher pushes its current values, SDK auto-applies CSS vars
+// SETTINGS — launcher pushes its current values, SDK auto-applies CSS vars/attrs
 Arcade.settings.fontScale()           // current launcher font scale (1 = default)
+Arcade.settings.theme()               // 'light' | 'dark'
+Arcade.settings.reducedMotion()       // boolean
+Arcade.settings.audioVolume()         // 0..1
+Arcade.settings.handedness()          // 'left' | 'right'
 Arcade.onSettingsChange(fn)           // fires when launcher updates a setting
 
+// UI — launcher-rendered toast when framed, in-place fallback standalone
+Arcade.ui.toast(message, { kind, duration })
+
 // CONTEXT — so games can light up extras when framed
-Arcade.context                        // { framed: boolean, version: number }
+Arcade.context                        // { framed: boolean, version: number, gameId }
 ```
 
-**Settings auto-apply:** on `Arcade.init()` the SDK injects a low-priority rule `:root { font-size: calc(100% * var(--font-scale, 1)); }` at the start of `<head>` and writes `--font-scale` onto `<html>` whenever the launcher pushes settings. Net effect: any rem/em-sized text in a game scales with the launcher's font setting **without code changes**. Games that explicitly set `:root { font-size: … }` themselves win the cascade and can opt back in via `var(--font-scale)` directly. Range: 0.5× – 3.0× (launcher clamp).
+**Settings auto-apply:** on `Arcade.init()` the SDK injects a low-priority rule `:root { font-size: calc(100% * var(--font-scale, 1)); }` at the start of `<head>` and writes `--font-scale` onto `<html>` whenever the launcher pushes settings. Net effect: any rem/em-sized text in a game scales with the launcher's font setting **without code changes**. Games that explicitly set `:root { font-size: … }` themselves win the cascade and can opt back in via `var(--font-scale)` directly. Range: 0.5× – 3.0× (launcher clamp). The SDK also applies `data-theme`, `--motion-scale`, `--audio-volume`, and `data-handedness` — see GAME_INTEGRATION.md §5 for the full DOM-hook table. Of the five settings, only `fontScale` and the iframe-pool cap have a real launcher-menu control today; `theme`/`reducedMotion` mirror `prefers-color-scheme`/`prefers-reduced-motion`, and `audioVolume`/`handedness` currently ship fixed defaults — there is no in-launcher toggle for them yet.
 
 **Standalone mode:** `framed=false`, `peer.status()` locked at `'unavailable'`. Storage just works because of same-origin localStorage.
 
@@ -71,9 +94,9 @@ All messages namespaced `arcade:` to avoid collision.
 ### Handshake
 
 ```
-child → parent:  { type: 'arcade:hello',   gameId, version: 1 }
-parent → child:  { type: 'arcade:welcome', version: 1, peerStatus: 'idle',
-                   settings: { fontScale } }
+child → parent:  { type: 'arcade:hello',   gameId, version: 2 }
+parent → child:  { type: 'arcade:welcome', version: 2, peerStatus: 'idle',
+                   settings: { fontScale, theme, reducedMotion, audioVolume, handedness } }
 ```
 
 If no `welcome` arrives within ~300ms, SDK locks into standalone mode.
@@ -81,14 +104,19 @@ If no `welcome` arrives within ~300ms, SDK locks into standalone mode.
 ### Multiplayer & lifecycle
 
 ```
-child  → parent: { type: 'arcade:peer.send',        payload }
-parent → child:  { type: 'arcade:peer.message',     payload, fromPeer }
-parent → child:  { type: 'arcade:peer.status',      status }
-parent → child:  { type: 'arcade:state.replaced' }              // after file import
-parent → child:  { type: 'arcade:settings.changed', settings }  // launcher setting updated
+child  → parent: { type: 'arcade:peer.send',         payload }
+parent → child:  { type: 'arcade:peer.message',      payload, fromPeer }
+parent → child:  { type: 'arcade:peer.status',       status }
+parent → child:  { type: 'arcade:state.replaced' }               // after file import
+parent → child:  { type: 'arcade:settings.changed',  settings }  // launcher setting updated
+parent → child:  { type: 'arcade:lifecycle.suspend' }             // iframe hidden, or about to be evicted
+parent → child:  { type: 'arcade:lifecycle.resume' }              // iframe shown
+child  → parent: { type: 'arcade:ui.toast',          message, kind, duration }
 ```
 
-Seven message types total. The launcher routes peer messages by `gameId` so multiple games could in principle multiplex one connection, though the current design assumes one foreground game at a time.
+Ten message types total (see GAME_INTEGRATION.md §14 for the full summary table). The launcher routes peer messages by `gameId` so multiple games could in principle multiplex one connection, though the current design assumes one foreground game at a time.
+
+**Legacy compatibility shim:** a small number of older games (e.g. hecknsic) shipped their own postMessage-backed `localStorage` override before the SDK existed. The launcher still answers that game's `'ls-proxy-request'`/`'ls-proxy-response'` protocol (namespaced into `arcade.v1.<gameId>.ls.<key>`) purely so those games don't hang — this is launcher-side legacy support, not part of the `arcade:` protocol, and new games should use `Arcade.state.*` directly rather than rolling a shim of their own.
 
 ---
 
@@ -104,7 +132,9 @@ The transport behind `Arcade.peer.*` is [QRCodeP2P](https://github.com/paulgibea
 | Launcher bridge | `arcade-p2p.js` | lazy ES module: status mapping (transport → SDK vocabulary), `{arcade:1, gameId, payload}` envelope, per-game routing |
 | Launcher wiring | `index.html` platformController | Multiplayer menu item, `arcade:peer.send` → bridge, bridge status → `arcade:peer.status` broadcast, `#p2p-offer/answer` fragment boot |
 | Game-facing API | `arcade-sdk.js` `Arcade.peer.*` | unchanged — games needed zero edits |
-| Proof | `tools/p2p-acceptance.mjs` + `tools/fixtures/p2p-test-game/` | two headless launchers, real RTCPeerConnection, fixture game speaks only SDK |
+| Proof | `tools/p2p-acceptance.mjs` (`npm run p2p-acceptance`) + `tools/fixtures/p2p-test-game/` | two headless launchers, real RTCPeerConnection, fixture game speaks only SDK |
+
+`arcade-p2p.js` also holds the Screen Wake Lock while a P2P session is `'connected'`/`'interrupted'`, so the screen dimming mid-session doesn't get treated as a connection loss.
 
 ### Core facts the design builds on
 
