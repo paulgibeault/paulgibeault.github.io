@@ -1,4 +1,4 @@
-const CACHE_NAME = 'paul-arcade-v18';
+const CACHE_NAME = 'paul-arcade-v19';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
@@ -12,6 +12,9 @@ const ASSETS_TO_CACHE = [
   './p2p/p2p-core.js',
   './p2p/sdp-codec.js',
   './p2p/p2p-addon.css',
+  './p2p/rendezvous-crypto.js',
+  './p2p/rendezvous-carriers.js',
+  './p2p/rendezvous.js',
   './p2p/vendor/qrcode.min.js',
   './p2p/vendor/html5-qrcode.min.js',
   './images/icon-192.png',

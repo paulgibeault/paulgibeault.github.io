@@ -643,6 +643,21 @@
                 info.appendChild(nameEl);
                 info.appendChild(metaEl);
 
+                const autoBtn = document.createElement('button');
+                autoBtn.type = 'button';
+                autoBtn.className = 'launcher-menu__peer-btn';
+                const autoOn = peer.autoReconnect === true;
+                autoBtn.textContent = autoOn ? '🔁' : '🚫';
+                autoBtn.title = autoOn
+                    ? 'Auto-reconnect is ON — tap to turn off'
+                    : 'Auto-reconnect is OFF — tap to turn on (takes effect next time you connect)';
+                autoBtn.setAttribute('aria-label', (autoOn ? 'Disable' : 'Enable') + ' auto-reconnect for ' + displayName);
+                autoBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    loadP2P().then((b) => autoOn ? b.disableAutoReconnect(id) : b.enableAutoReconnect(id))
+                        .then(() => render()).catch(() => {});
+                });
+
                 const renameBtn = document.createElement('button');
                 renameBtn.type = 'button';
                 renameBtn.className = 'launcher-menu__peer-btn';
@@ -672,6 +687,7 @@
                 });
 
                 row.appendChild(info);
+                row.appendChild(autoBtn);
                 row.appendChild(renameBtn);
                 row.appendChild(deleteBtn);
                 list.appendChild(row);
@@ -974,7 +990,25 @@
                     if (isNew && window.__arcade.renamePeer) {
                         const chosen = window.prompt('Name this connection:', remoteName);
                         if (chosen !== null) window.__arcade.renamePeer(deviceId, chosen);
+                        // Auto-reconnect opt-in (rendezvous): both sides must
+                        // agree; the pairing secret never leaves the devices
+                        // and relays carry only ciphertext.
+                        askAutoReconnect(deviceId, chosen !== null ? (chosen || name) : name);
                     }
+                });
+                function askAutoReconnect(deviceId, name) {
+                    const yes = window.confirm(
+                        'Reconnect with "' + name + '" automatically if the connection breaks?\n\n' +
+                        'Uses public relays to find each other again — everything sent through them is ' +
+                        'end-to-end encrypted; game data never leaves your devices unencrypted. ' +
+                        'You can change this anytime in Known Peers (🔁).');
+                    if (yes) ArcadeP2P.enableAutoReconnect(deviceId);
+                    else ArcadeP2P.disableAutoReconnect(deviceId);
+                    if (window.__arcade.renderKnownPeers) window.__arcade.renderKnownPeers();
+                }
+                ArcadeP2P.onPairRequest(({ deviceId, name }) => {
+                    // The other device opted in and ours has no stored answer.
+                    askAutoReconnect(deviceId, name);
                 });
                 ArcadeP2P.onMessage((targetGameId, payload) => {
                     // Route by the sender's gameId — both devices run the same
@@ -1005,7 +1039,7 @@
 
         const menuMultiplayer = document.getElementById('menu-multiplayer');
         if (menuMultiplayer) {
-            menuMultiplayer.addEventListener('click', openMultiplayerPanel);
+            menuMultiplayer.addEventListener('click', () => openMultiplayerPanel());
         }
 
         // Invite/reply links target the LAUNCHER URL — one stable re-entry
@@ -1013,6 +1047,15 @@
         // ingestion (joiner auto-answer / host-side relay+ack) runs.
         if (/[#&]p2p-(offer|answer)=/.test(window.location.hash)) {
             loadP2P().then((b) => b.ingestFragmentIfPresent()).catch(() => {});
+        } else {
+            // Resume-on-launch (rendezvous): if an auto-reconnect session was
+            // live recently, boot the transport and let it find the peer —
+            // this is how a game survives BOTH browsers being killed.
+            let lastLive = 0;
+            try { lastLive = parseInt(localStorage.getItem('arcade.v1._meta.lastLiveSession') || '0', 10); } catch (e) {}
+            if (lastLive && Date.now() - lastLive < 6 * 3600 * 1000) {
+                loadP2P().then((b) => b.resumeRendezvous()).catch(() => {});
+            }
         }
 
         launcherBtns.forEach((btn) => {

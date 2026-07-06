@@ -20,10 +20,64 @@ import { chromium } from 'playwright';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import http from 'node:http';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = 4799;
+const DROP_PORT = 4798;
 const BASE = `http://127.0.0.1:${PORT}`;
+
+// In-test dead-drop standing in for the public MQTT broker: the rendezvous
+// carrier is override-injected (window.__arcadeRdvCarrierFactory), so the
+// acceptance run never touches external infrastructure.
+const dropTopics = new Map();
+const dropServer = http.createServer((req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    const u = new URL(req.url, 'http://x');
+    const topic = u.searchParams.get('t') || '';
+    if (req.method === 'POST' && u.pathname === '/pub') {
+        let body = '';
+        req.on('data', c => body += c);
+        req.on('end', () => {
+            if (!dropTopics.has(topic)) dropTopics.set(topic, []);
+            dropTopics.get(topic).push(body);
+            res.end('ok');
+        });
+    } else if (u.pathname === '/sub') {
+        const arr = dropTopics.get(topic) || [];
+        const since = parseInt(u.searchParams.get('since') || '0', 10);
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ msgs: arr.slice(since), next: arr.length }));
+    } else res.end('');
+});
+dropServer.listen(DROP_PORT);
+
+const HTTP_CARRIER = `
+    window.__arcadeRdvCarrierFactory = () => ({
+        base: 'http://127.0.0.1:${DROP_PORT}',
+        subs: new Map(),
+        timer: null,
+        async connect() { if (!this.timer) this.timer = setInterval(() => this._poll(), 120); },
+        async _poll() {
+            for (const [topic, st] of this.subs) {
+                try {
+                    const r = await fetch(this.base + '/sub?t=' + topic + '&since=' + st.next);
+                    const j = await r.json();
+                    st.next = j.next;
+                    j.msgs.forEach(m => st.cbs.forEach(cb => { try { cb(m); } catch (e) {} }));
+                } catch (e) {}
+            }
+        },
+        async publish(topic, payload) { await fetch(this.base + '/pub?t=' + topic, { method: 'POST', body: payload }); },
+        subscribe(topic, cb) {
+            if (!this.subs.has(topic)) this.subs.set(topic, { next: 0, cbs: new Set() });
+            const st = this.subs.get(topic);
+            st.cbs.add(cb);
+            return () => st.cbs.delete(cb);
+        },
+        close() { clearInterval(this.timer); this.timer = null; this.subs.clear(); }
+    });
+`;
 
 let failures = 0;
 function check(name, ok, detail) {
@@ -56,8 +110,8 @@ const FORCE_LOCAL_ICE = `
 // so deviceIds and identity certificates genuinely differ like real devices.
 const contextH = await browser.newContext();
 const contextJ = await browser.newContext();
-await contextH.addInitScript(FORCE_LOCAL_ICE);
-await contextJ.addInitScript(FORCE_LOCAL_ICE);
+await contextH.addInitScript(FORCE_LOCAL_ICE + HTTP_CARRIER);
+await contextJ.addInitScript(FORCE_LOCAL_ICE + HTTP_CARRIER);
 
 async function launcherPage(label, context) {
     const page = await context.newPage();
@@ -206,7 +260,54 @@ try {
     check('changed fingerprint is flagged and re-recorded (TOFU-with-notice)',
         policy.changed === true && policy.storedFp.startsWith('BB:') && !!policy.changedAt);
 
-    // 10. One-tap reconnect entry: openUI({mode:'host'}) must land on a fresh
+    // 10. Rendezvous auto-reconnect (PROTOCOL.md §7): both sides opt in,
+    //     the connection is killed COMPLETELY, and the session must come
+    //     back through the dead-drop with zero interaction — games seeing
+    //     only interrupted → connected, with mid-repair sends delivered.
+    for (const page of [H, J]) {
+        await page.evaluate(() => {
+            window.__rdvEv = [];
+            const r = window.__arcade.p2p._rdv();
+            for (const t of ['pair-established', 'reconnecting', 'reconnected', 'gave-up']) {
+                r.addEventListener(t, () => window.__rdvEv.push(t));
+            }
+        });
+        await page.evaluate(() => {
+            const known = JSON.parse(localStorage.getItem('arcade.v1._meta.knownPeers'));
+            const peerDeviceId = Object.keys(known).find(id => id !== 'policy-test-device');
+            return window.__arcade.p2p.enableAutoReconnect(peerDeviceId);
+        });
+    }
+    await H.waitForFunction(`window.__rdvEv.includes('pair-established')`, null, { timeout: 10000 });
+    await J.waitForFunction(`window.__rdvEv.includes('pair-established')`, null, { timeout: 10000 });
+    check('both sides paired for auto-reconnect (secrets derived over the live channel)', true);
+
+    const statusCountH = await fH.evaluate(() => window.__statuses.length);
+    await H.evaluate(() => {
+        const entry = Array.from(window.__arcade.p2p._addon().peerNode.peers.values())
+            .find(p => p.status === 'connected');
+        entry.dataChannel.close(); // hard kill: both sides go terminal
+    });
+    await fH.waitForFunction(`window.__peerStatus() === 'interrupted'`, null, { timeout: 10000 });
+    const sentDuringRepair = await fH.evaluate(() => window.__send({ hello: 'during-dead-link-repair' }));
+    check('game send while the link is DEAD (repairing) is accepted', sentDuringRepair === true);
+
+    for (const [page, label] of [[H, 'host'], [J, 'joiner']]) {
+        await page.waitForFunction(`window.__rdvEv.includes('reconnected')`, null, { timeout: 30000 });
+        check(`${label}: rendezvous reconnected through the dead-drop`, true);
+    }
+    await fH.waitForFunction(`window.__peerStatus() === 'connected'`, null, { timeout: 15000 });
+    await fJ.waitForFunction(
+        `window.__got.some(p => p && p.hello === 'during-dead-link-repair')`,
+        null, { timeout: 15000 }
+    );
+    check('message sent during the dead-link repair was delivered after adoption', true);
+
+    const sawIdleDuringRepair = await fH.evaluate(
+        (n) => window.__statuses.slice(n).includes('idle'), statusCountH);
+    check("game never saw 'idle' across the total connection loss", !sawIdleDuringRepair);
+
+    // 11. One-tap reconnect entry: openUI({mode:'host'}) must land on a fresh
     //     invite code — no Host/Join choice screen in between.
     await H.evaluate(() => window.__arcade.openMultiplayerPanel({ mode: 'host' }));
     await H.waitForFunction(`(() => {

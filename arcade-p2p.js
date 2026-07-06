@@ -41,8 +41,35 @@
  *   then never auto-overwritten by later handshakes), `remoteName` is
  *   whatever the peer most recently reported about itself.
  *   Storage keys (see ARCADE_PLATFORM.md's storage convention):
- *     arcade.v1._meta.deviceId, .deviceName, .knownPeers
+ *     arcade.v1._meta.deviceId, .deviceName, .knownPeers, .lastLiveSession
+ *
+ * Auto-reconnect (rendezvous, PROTOCOL.md §7) — OPT-IN PER PEER:
+ *   knownPeers[deviceId].autoReconnect gates everything. When both sides
+ *   opted in, a pairing secret is (re)established over the live channel on
+ *   every manual ceremony; if the connection later dies completely, the
+ *   transport re-signals through a public dead-drop relay — everything
+ *   published is end-to-end sealed; the relay can only delay or drop. While
+ *   an episode runs, games see 'interrupted'. resumeRendezvous() at startup
+ *   revives a recent session after a full browser restart.
  */
+
+import { RendezvousManager } from './p2p/rendezvous.js';
+import { MqttCarrier } from './p2p/rendezvous-carriers.js';
+
+// Free public MQTT-over-WSS broker used as the untrusted dead-drop. It sees
+// only ciphertext on unlinkable rotating topics, and only during repair.
+const RDV_BROKER_URL = 'wss://test.mosquitto.org:8081/mqtt';
+
+let rdv = null;
+let rdvReconnecting = false; // an episode is actively repairing a dead link
+
+function rdvCarrierFactory() {
+    // Test hook: acceptance injects a loopback/dead-drop carrier here.
+    if (typeof window !== 'undefined' && window.__arcadeRdvCarrierFactory) {
+        return window.__arcadeRdvCarrierFactory();
+    }
+    return new MqttCarrier({ url: RDV_BROKER_URL });
+}
 
 // Terminal link statuses have already been removed from the transport's peers
 // map by the time their event fires, so aggregation only ever sees live links.
@@ -56,14 +83,36 @@ function aggregateStatus(mp) {
     if (connected) return 'connected';
     if (interrupted) return 'interrupted';
     if (pending) return 'connecting';
+    // A rendezvous episode means a session is being repaired even though its
+    // dead link has left the peers map — games should keep waiting, not reset.
+    if (rdvReconnecting) return 'interrupted';
     return 'idle';
+}
+
+// Terminal teardown and the rendezvous 'reconnecting' claim race on the same
+// event: hold a would-be drop to 'idle' for a beat so games never glimpse a
+// spurious 'idle' when an auto-reconnect is about to take over.
+let idleHoldTimer = null;
+function applyStatus(mp) {
+    const next = aggregateStatus(mp);
+    if (idleHoldTimer) { clearTimeout(idleHoldTimer); idleHoldTimer = null; }
+    if (next === 'idle' && (sdkStatus === 'connected' || sdkStatus === 'interrupted')) {
+        idleHoldTimer = setTimeout(() => {
+            idleHoldTimer = null;
+            setStatus(aggregateStatus(mp));
+        }, 1500);
+        return;
+    }
+    setStatus(next);
 }
 
 const META_PREFIX = 'arcade.v1._meta.';
 const DEVICE_ID_KEY = META_PREFIX + 'deviceId';
 const DEVICE_NAME_KEY = META_PREFIX + 'deviceName';
 const KNOWN_PEERS_KEY = META_PREFIX + 'knownPeers';
+const LAST_LIVE_SESSION_KEY = META_PREFIX + 'lastLiveSession';
 const DEFAULT_DEVICE_NAME = 'My device';
+const RESUME_WINDOW_MS = 6 * 3600 * 1000; // resumeRendezvous freshness window
 
 function randomDeviceId() {
     if (window.crypto && typeof window.crypto.randomUUID === 'function') {
@@ -103,6 +152,12 @@ function writeKnownPeers(map) {
 }
 
 const peerIdentityListeners = []; // fn({deviceId, name, remoteName, isNew, fingerprintChanged})
+const pairRequestListeners = [];  // fn({deviceId, name}) — peer wants auto-reconnect, user undecided
+const identityLinks = new Map();  // deviceId → transport peerId of its DIRECT link
+
+function stampLiveSession() {
+    try { localStorage.setItem(LAST_LIVE_SESSION_KEY, String(Date.now())); } catch (e) {}
+}
 
 /**
  * Upserts a known peer. `fingerprint` is the DTLS fingerprint of the DIRECT
@@ -215,7 +270,7 @@ async function ensureAddon() {
         const announcedTo = new Set();
         mp.addEventListener('status', (e) => {
             const { peerId, status } = e.detail || {};
-            setStatus(aggregateStatus(mp));
+            applyStatus(mp);
             if (status === 'connected') {
                 if (peerId && !announcedTo.has(peerId)) {
                     announcedTo.add(peerId);
@@ -240,6 +295,49 @@ async function ensureAddon() {
             if (!env || env.arcade !== 1 || env.kind !== 'identity') return;
             const fp = d.relayed ? null : mp.peerNode.getPeerFingerprint(d.peerId);
             recordPeerIdentity(env.deviceId, env.name, fp);
+            if (!d.relayed) {
+                identityLinks.set(env.deviceId, d.peerId);
+                // A manual ceremony with an auto-reconnect peer is a fresh
+                // trust event: re-establish the pairing secret every time.
+                const known = readKnownPeers();
+                if (known[env.deviceId] && known[env.deviceId].autoReconnect && rdv) {
+                    rdv.enablePair(d.peerId, env.deviceId).catch(() => {});
+                    stampLiveSession();
+                }
+            }
+        });
+
+        // Rendezvous (PROTOCOL.md §7): zero-touch reconnection for opted-in
+        // pairs. The carrier moves only sealed blobs; episodes surface to
+        // games as 'interrupted' so nobody resets a running game.
+        rdv = new RendezvousManager(mp.peerNode, { carrierFactory: rdvCarrierFactory });
+        rdv.addEventListener('reconnecting', () => {
+            rdvReconnecting = true;
+            applyStatus(mp);
+        });
+        for (const done of ['reconnected', 'recovered-inband', 'gave-up']) {
+            rdv.addEventListener(done, () => {
+                rdvReconnecting = false;
+                applyStatus(mp);
+                if (done !== 'gave-up') stampLiveSession();
+            });
+        }
+        rdv.addEventListener('pair-established', () => stampLiveSession());
+        rdv.addEventListener('pair-request', (e) => {
+            // The other device opted in; ours decides based on the stored
+            // flag, or asks the user via the launcher's onPairRequest hook.
+            const { peerId } = e.detail || {};
+            const deviceId = [...identityLinks.entries()].find(([, pid]) => pid === peerId)?.[0];
+            if (!deviceId) return;
+            const known = readKnownPeers();
+            const flag = known[deviceId] && known[deviceId].autoReconnect;
+            if (flag === true) {
+                rdv.enablePair(peerId, deviceId).catch(() => {});
+            } else if (flag === undefined) {
+                for (const fn of pairRequestListeners) {
+                    try { fn({ deviceId, name: (known[deviceId] && known[deviceId].name) || 'Unnamed device' }); } catch (err) {}
+                }
+            } // flag === false → user declined; stay silent
         });
 
         // 'data' fires with JSON already parsed when possible.
@@ -335,8 +433,72 @@ export const ArcadeP2P = {
         return true;
     },
 
+    /**
+     * Turns auto-reconnect ON for a known peer and, if its direct link is
+     * live, (re)establishes the pairing secret right now. Requires the other
+     * device to opt in too — pairing completes when both randoms cross.
+     */
+    async enableAutoReconnect(deviceId) {
+        const known = readKnownPeers();
+        if (!known[deviceId]) return false;
+        known[deviceId].autoReconnect = true;
+        writeKnownPeers(known);
+        const peerId = identityLinks.get(deviceId);
+        if (rdv && peerId) {
+            await rdv.enablePair(peerId, deviceId).catch(() => {});
+            stampLiveSession();
+        }
+        return true;
+    },
+
+    /** Turns auto-reconnect OFF and deletes the pairing secret. */
+    async disableAutoReconnect(deviceId) {
+        const known = readKnownPeers();
+        if (known[deviceId]) {
+            known[deviceId].autoReconnect = false;
+            writeKnownPeers(known);
+        }
+        if (rdv) await rdv.disablePair(deviceId).catch(() => {});
+    },
+
+    /** true | false | undefined (never asked). */
+    autoReconnectState(deviceId) {
+        const rec = readKnownPeers()[deviceId];
+        return rec ? rec.autoReconnect : undefined;
+    },
+
+    /**
+     * Fires when a peer requests auto-reconnect pairing and this device has
+     * no stored decision: fn({deviceId, name}). Answer by calling
+     * enableAutoReconnect / disableAutoReconnect.
+     */
+    onPairRequest(fn) {
+        pairRequestListeners.push(fn);
+        return () => {
+            const i = pairRequestListeners.indexOf(fn);
+            if (i >= 0) pairRequestListeners.splice(i, 1);
+        };
+    },
+
+    /**
+     * Call at launcher startup: if a paired session was live recently, boot
+     * the transport and let the rendezvous layer reconnect it — this is what
+     * resumes a game after the browser was killed on both ends.
+     */
+    async resumeRendezvous() {
+        let ts = 0;
+        try { ts = parseInt(localStorage.getItem(LAST_LIVE_SESSION_KEY) || '0', 10); } catch (e) {}
+        if (!ts || Date.now() - ts > RESUME_WINDOW_MS) return false;
+        await ensureAddon();
+        await rdv.resumeAll();
+        return true;
+    },
+
     /** Test hook — the underlying P2PAddon (null until first use). */
     _addon() { return addon; },
+
+    /** Test hook — the RendezvousManager (null until first use). */
+    _rdv() { return rdv; },
 
     /** Test hook — identity/pinning policy, exercised directly by acceptance. */
     _recordPeerIdentity: recordPeerIdentity

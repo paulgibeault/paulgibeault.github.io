@@ -11,7 +11,7 @@ if [ ! -f "$SRC/p2p-core.js" ]; then
   exit 1
 fi
 
-FILES=(sdp-codec.js p2p-core.js p2p-ui.js p2p-addon.js p2p-addon.css)
+FILES=(sdp-codec.js p2p-core.js p2p-ui.js p2p-addon.js p2p-addon.css rendezvous-crypto.js rendezvous-carriers.js rendezvous.js)
 for f in "${FILES[@]}"; do
   cp "$SRC/$f" "$DIR/p2p/$f"
 done

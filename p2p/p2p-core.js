@@ -258,6 +258,11 @@ export class PeerManager extends EventTarget {
         this._certificate = null;
         this._certPromise = null;
 
+        // Sessions of terminally-dead links, kept so a later reconnect (e.g.
+        // the rendezvous layer) can resume seq counters and replay the outbox
+        // as if the link had merely been interrupted. Bounded LRU.
+        this.sessionStash = new Map(); // peerId → {type, outSeq, lastInSeq, outbox, outboxOverflowed, stashedAt}
+
         this._onVisibility = () => {
             if (!document.hidden) this._onWake();
         };
@@ -323,19 +328,45 @@ export class PeerManager extends EventTarget {
         return desc ? PeerManager.extractFingerprint(desc.sdp) : null;
     }
 
-    initPeer(peerId, type) {
+    _buildRtcConfig() {
+        const rtcConfig = this.options.iceMode === 'local' ? { iceServers: [] } : { ...STUN_SERVERS };
+        if (this._certificate) rtcConfig.certificates = [this._certificate];
+        return rtcConfig;
+    }
+
+    _sessionSnapshot(peerData) {
+        return {
+            type: peerData.type,
+            outSeq: peerData.outSeq,
+            lastInSeq: peerData.lastInSeq,
+            outbox: peerData.outbox,
+            outboxOverflowed: peerData.outboxOverflowed,
+            stashedAt: Date.now()
+        };
+    }
+
+    initPeer(peerId, type, opts = {}) {
+        // With preserveSession, the reliability state (seq counters + unacked
+        // outbox) carries over from a live entry or the stash, so the resync
+        // exchange on channel-open replays anything the peer missed.
+        let inherited = null;
         if(this.peers.has(peerId)) {
             const existing = this.peers.get(peerId);
+            if (opts.preserveSession) inherited = this._sessionSnapshot(existing);
             this._clearPeerTimers(existing);
             existing._tearingDown = true;
             existing.connection.onicecandidate = null;
             existing.connection.close();
             this.peers.delete(peerId);
+        } else if (opts.preserveSession && this.sessionStash.has(peerId)) {
+            inherited = this.sessionStash.get(peerId);
+            this.sessionStash.delete(peerId);
         }
 
-        const rtcConfig = this.options.iceMode === 'local' ? { iceServers: [] } : { ...STUN_SERVERS };
-        if (this._certificate) rtcConfig.certificates = [this._certificate];
-        const peerConnection = new RTCPeerConnection(rtcConfig);
+        // opts.adoptConnection: install an externally-prepared connection
+        // (rendezvous shadow) instead of minting one — all handlers below
+        // attach to it exactly as they would to a fresh connection.
+        const peerConnection = opts.adoptConnection || new RTCPeerConnection(this._buildRtcConfig());
         const peerData = {
             connection: peerConnection,
             dataChannel: null,
@@ -352,12 +383,20 @@ export class PeerManager extends EventTarget {
             lastInSeq: 0,              // last app seq we delivered from this link
             outbox: [],                // unacked {seq, wire} awaiting replay
             outboxOverflowed: false,
+            resyncFlushed: false,      // sends transmit only after the peer's resync is processed
+            resyncTimer: null,
             heartbeatTimer: null,
             graceTimer: null,
             restartTimer: null,
             wakeProbeTimer: null,
             _tearingDown: false
         };
+        if (inherited) {
+            peerData.outSeq = inherited.outSeq;
+            peerData.lastInSeq = inherited.lastInSeq;
+            peerData.outbox = inherited.outbox;
+            peerData.outboxOverflowed = !!inherited.outboxOverflowed;
+        }
         this.peers.set(peerId, peerData);
 
         peerConnection.oniceconnectionstatechange = () => {
@@ -461,7 +500,13 @@ export class PeerManager extends EventTarget {
             this._startHeartbeat(peerId);
             // Tell the peer the last app seq we delivered so it can replay
             // anything we missed while the link was down (no-op on first open).
+            // Until THEIR resync arrives, our new sends only queue — a fresh
+            // frame transmitted ahead of the replay would advance the peer's
+            // cumulative dedup counter past the gap and the replayed frames
+            // would be dropped as duplicates. Strict per-link order or nothing.
+            peerData.resyncFlushed = false;
             this._sendControl(peerId, { __p2pc: 'resync', have: peerData.lastInSeq });
+            peerData.resyncTimer = setTimeout(() => this._flushOutbox(peerId), 2500); // pre-v1.7 peers never send one
             this._markConnected(peerId);
             this.dispatchEvent(new CustomEvent('chatState', { detail: { peerId, ready: true } }));
             this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'success', msg: `Data channel OPEN with ${peerId}!` }}));
@@ -541,18 +586,19 @@ export class PeerManager extends EventTarget {
             case 'resync': {
                 if (typeof msg.have !== 'number') break;
                 peerData.outbox = peerData.outbox.filter(e => e.seq > msg.have);
-                if (peerData.outbox.length && peerData.dataChannel && peerData.dataChannel.readyState === 'open') {
-                    this.dispatchEvent(new CustomEvent('diagnostic', { detail: {
-                        type: 'sys', msg: `Replaying ${peerData.outbox.length} buffered message(s) to ${peerId}.`
-                    }}));
-                    for (const entry of peerData.outbox) {
-                        try { peerData.dataChannel.send(entry.wire); } catch(e) { break; }
-                    }
-                }
+                this._flushOutbox(peerId);
                 break;
             }
             case 'signal':
                 this._handleSignal(peerId, msg);
+                break;
+            case 'ext':
+                // Namespaced extension frames for optional layers (rendezvous
+                // pairing, future capabilities). Same trust as all control
+                // frames: direct link only, never relayed.
+                if (typeof msg.ns === 'string') {
+                    this.dispatchEvent(new CustomEvent('control-ext', { detail: { peerId, ns: msg.ns, data: msg.data } }));
+                }
                 break;
         }
     }
@@ -644,10 +690,33 @@ export class PeerManager extends EventTarget {
                 }}));
             }
         }
-        if (open) {
+        if (open && peerData.resyncFlushed) {
             try { peerData.dataChannel.send(wire); } catch(e) { /* stays queued for resync */ }
         }
+        // Not yet flushed: the frame waits in the outbox so the post-resync
+        // flush transmits everything in strict seq order.
         return true;
+    }
+
+    /**
+     * Transmits the (pruned) outbox in seq order and opens the gate for
+     * immediate sends. Runs when the peer's resync arrives, or after a grace
+     * for pre-v1.7 peers that will never send one.
+     */
+    _flushOutbox(peerId) {
+        const peerData = this.peers.get(peerId);
+        if (!peerData) return;
+        if (peerData.resyncTimer) { clearTimeout(peerData.resyncTimer); peerData.resyncTimer = null; }
+        peerData.resyncFlushed = true;
+        if (!peerData.dataChannel || peerData.dataChannel.readyState !== 'open') return;
+        if (peerData.outbox.length) {
+            this.dispatchEvent(new CustomEvent('diagnostic', { detail: {
+                type: 'sys', msg: `Replaying ${peerData.outbox.length} buffered message(s) to ${peerId}.`
+            }}));
+            for (const entry of peerData.outbox) {
+                try { peerData.dataChannel.send(entry.wire); } catch(e) { break; }
+            }
+        }
     }
 
     broadcast(message, excludePeerId = null) {
@@ -660,6 +729,21 @@ export class PeerManager extends EventTarget {
         let sent = false;
         this.peers.forEach((peerData, pId) => {
             if (pId !== excludePeerId && this._sendAppTo(pId, msg)) sent = true;
+        });
+        // Terminally-dead sessions awaiting adoption (rendezvous repair) keep
+        // accepting sends into their stashed outbox — the resync on the
+        // reconnected channel replays them, so a repair-in-progress loses
+        // nothing. Bounded by the same outbox cap.
+        this.sessionStash.forEach((stash, pId) => {
+            if (pId === excludePeerId) return;
+            const seq = ++stash.outSeq;
+            stash.outbox.push({ seq, wire: JSON.stringify(msg.relayed
+                ? { text: msg.text, from: msg.from, seq, relayed: true }
+                : { text: msg.text, from: msg.from, seq }) });
+            if (stash.outbox.length > this.options.outboxLimit) {
+                stash.outbox.splice(0, stash.outbox.length - this.options.outboxLimit);
+            }
+            sent = true;
         });
         return sent;
     }
@@ -812,6 +896,7 @@ export class PeerManager extends EventTarget {
     _clearPeerTimers(peerData) {
         this._clearRecoveryTimers(peerData);
         if (peerData.heartbeatTimer) { clearInterval(peerData.heartbeatTimer); peerData.heartbeatTimer = null; }
+        if (peerData.resyncTimer) { clearTimeout(peerData.resyncTimer); peerData.resyncTimer = null; }
     }
 
     _teardownPeer(peerId, finalStatus) {
@@ -819,6 +904,14 @@ export class PeerManager extends EventTarget {
         if (!peerData) return;
         peerData._tearingDown = true;
         this._clearPeerTimers(peerData);
+        // Keep the session so a reconnect (rendezvous or otherwise) can resume
+        // it seamlessly. Bounded: drop the oldest beyond 8 entries.
+        if (peerData.everConnected) {
+            this.sessionStash.set(peerId, this._sessionSnapshot(peerData));
+            while (this.sessionStash.size > 8) {
+                this.sessionStash.delete(this.sessionStash.keys().next().value);
+            }
+        }
         try { peerData.dataChannel?.close(); } catch(_) {}
         try {
             peerData.connection.onicecandidate = null;
@@ -832,6 +925,49 @@ export class PeerManager extends EventTarget {
     /** Deliberately drops one link (e.g. a UI "leave game" action). */
     disconnectPeer(peerId) {
         this._teardownPeer(peerId, 'disconnected');
+    }
+
+    /**
+     * Installs an externally-negotiated connection under a peerId, resuming
+     * that link's session (seq counters + outbox) from the live entry or the
+     * stash. This is how the rendezvous layer swaps a freshly re-signaled
+     * connection in WITHOUT the apps above noticing anything beyond
+     * interrupted → connected: on channel-open the standard resync exchange
+     * replays whatever was queued when the old link died.
+     *
+     * @param {string} peerId - The link identity both sides key the session by.
+     * @param {RTCPeerConnection} connection - Prepared connection (offer/answer already set).
+     * @param {RTCDataChannel} [channel] - The caller side passes the channel it
+     *        created; the answerer side omits it (ondatachannel delivers it).
+     * @param {object} [opts] - {fallbackType} when no prior session exists
+     *        (e.g. after a full browser restart): 'client' → impolite, 'host' → polite.
+     */
+    adoptConnection(peerId, connection, channel, opts = {}) {
+        const prior = this.peers.get(peerId) || this.sessionStash.get(peerId);
+        const type = (prior && prior.type) || opts.fallbackType || 'client';
+        const peerData = this.initPeer(peerId, type, { preserveSession: true, adoptConnection: connection });
+        if (channel) this.setupDataChannel(peerId, channel);
+        this.dispatchEvent(new CustomEvent('diagnostic', { detail: {
+            type: 'sys', msg: `Adopted a reconnected link for ${peerId}${prior ? ' (session resumed)' : ' (fresh session)'}.`
+        }}));
+        return peerData;
+    }
+
+    /** This side's DTLS fingerprint on one link (from its local description). */
+    getOwnFingerprint(peerId) {
+        const peerData = this.peers.get(peerId);
+        const desc = peerData && peerData.connection.localDescription;
+        return desc ? PeerManager.extractFingerprint(desc.sdp) : null;
+    }
+
+    /**
+     * Sends a namespaced extension frame to one peer over the control channel
+     * (e.g. the rendezvous pairing handshake). Extension frames inherit every
+     * control-frame guarantee: DTLS-authenticated, direct-link only, never
+     * relayed, unforgeable by apps.
+     */
+    sendExt(peerId, ns, data) {
+        return this._sendControl(peerId, { __p2pc: 'ext', ns, data });
     }
 
     /**

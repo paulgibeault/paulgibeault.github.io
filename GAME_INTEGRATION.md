@@ -312,7 +312,10 @@ Rules of the road:
       still returns `true`: messages queue and replay with exactly-once
       delivery, so turn-based games can simply keep playing. The episode ends
       with either `'connected'` (resume, nothing was lost) or `'idle'` (the
-      grace window — minutes — expired; NOW treat the player as gone).
+      grace window — minutes — expired; NOW treat the player as gone). With
+      auto-reconnect enabled (transport v1.9), even a TOTAL connection loss
+      (both devices offline, browsers killed) surfaces as `'interrupted'`
+      while the rendezvous layer repairs it — same rule: wait, don't reset.
 - [ ] High-rate realtime games (30+ msgs/sec) should pause their send loop
       while `'interrupted'` and resync authoritative state on `'connected'` —
       the replay queue is capped at 1000 messages.

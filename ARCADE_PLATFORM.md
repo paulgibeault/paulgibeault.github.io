@@ -154,7 +154,17 @@ WebRTC can't skip the offer/answer ceremony — DTLS fingerprints must flow both
 
 - **One-tap reconnect:** tapping a Known Peers row opens the Multiplayer modal in `{mode:'host'}` — no Host/Join choice screen, a *fresh* invite code is on screen immediately (show it or send it as a link; link-tennis automates the other device's half). Signaling stays one-time-use by design — that's what keeps a leaked old invite link harmless — so "reconnect" means *fresh code, zero navigation*, not replay.
 - **Persistent identity:** the transport now keeps one ECDSA `RTCCertificate` per browser profile (IndexedDB), so a device's DTLS fingerprint is stable across sessions. Each known peer records the fingerprint of its DIRECT link (`knownPeers[deviceId].fingerprint`); identities arriving via the host's relay never bind a fingerprint (the transport stamps relayed frames).
-- **Pinning policy is TOFU-with-notice, not hard-fail:** every connection today is a manual in-person ceremony — that exchange IS the authentication — and browsers rotate certificates ~monthly, so a changed fingerprint surfaces a warning toast (`fingerprintChanged` on `onPeerIdentity`) telling the user to re-verify in person if unexpected. Hard cryptographic pair-binding is the rendezvous follow-up's job (`QRCodeP2P/RECONNECT_RENDEZVOUS.md`, ratcheting pair secret).
+- **Pinning policy is TOFU-with-notice, not hard-fail:** every connection today is a manual in-person ceremony — that exchange IS the authentication — and browsers rotate certificates ~monthly, so a changed fingerprint surfaces a warning toast (`fingerprintChanged` on `onPeerIdentity`) telling the user to re-verify in person if unexpected. Hard cryptographic pair-binding lives in the rendezvous pair secret below.
+
+### Auto-reconnect — rendezvous (IMPLEMENTED, transport v1.9)
+
+The full protocol spec lives in `QRCodeP2P/PROTOCOL.md` (§7). Launcher wiring:
+
+- **Opt-in per pair, both sides:** at first contact (after the naming prompt) the launcher asks whether to reconnect automatically; the flag lives in `knownPeers[deviceId].autoReconnect` and is toggleable per peer in the Known Peers panel (🔁/🚫). When both sides opt in, a pairing secret is derived over the live DTLS channel — and **re-derived on every later manual ceremony** (each physical meeting is a fresh trust event).
+- **What it does:** if the connection dies completely (grace expired, channel closed, both networks changed, browsers restarted), the transport re-signals through a public MQTT-over-WSS broker (`wss://test.mosquitto.org:8081/mqtt`). Everything published is end-to-end AEAD-sealed with per-pair keys; topics are unlinkable daily HMACs; epochs kill replays; keys ratchet on every successful reconnect. The broker can only delay or drop — worst case is falling back to the one-tap manual re-pair.
+- **What games see:** `interrupted` for the whole repair (the launcher holds the `idle` transition for a beat so a terminal teardown claimed by rendezvous never flashes `idle`), then `connected` with the SAME session — sends made while the link was dead queue into the stashed session and replay on adoption, exactly-once.
+- **Resume-on-launch:** `arcade.v1._meta.lastLiveSession` timestamps live paired sessions; if the launcher opens within 6 h of one, it boots the transport and calls `resumeRendezvous()` — two devices whose browsers were both killed re-establish the session with zero interaction.
+- **Presence discipline:** relays are contacted only during active repair episodes (10-min cap, backoff) and the resume check — no standing "I'm online" beacon, ever.
 
 ---
 
