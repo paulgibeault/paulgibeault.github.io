@@ -932,14 +932,22 @@
             if (p2pBridge) return Promise.resolve(p2pBridge);
             if (p2pLoadPromise) return p2pLoadPromise;
             p2pLoadPromise = import('./arcade-p2p.js').then(({ ArcadeP2P }) => {
+                let prevPeerStatus = 'idle';
                 ArcadeP2P.onStatus((status) => {
                     broadcast({ type: 'arcade:peer.status', status });
                     const tag = document.getElementById('menu-multiplayer-status');
                     if (tag) {
                         tag.hidden = status === 'idle';
-                        tag.textContent = status === 'connected' ? 'Connected' : 'Connecting…';
+                        tag.textContent = status === 'connected' ? 'Connected'
+                            : status === 'interrupted' ? 'Reconnecting…'
+                            : 'Connecting…';
                     }
-                    if (status === 'connected') showToast('Multiplayer connected!');
+                    if (status === 'connected') {
+                        showToast(prevPeerStatus === 'interrupted' ? 'Multiplayer reconnected!' : 'Multiplayer connected!');
+                    } else if (status === 'interrupted') {
+                        showToast('Multiplayer connection interrupted — reconnecting…');
+                    }
+                    prevPeerStatus = status;
                 });
                 ArcadeP2P.onPeerIdentity(({ deviceId, name, remoteName, isNew }) => {
                     // Arrives a beat after 'connected' (one more data-channel

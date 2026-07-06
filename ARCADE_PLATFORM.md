@@ -32,7 +32,9 @@ Arcade.global.set(key, value)
 Arcade.onStateReplaced(fn)            // fires after a launcher import — re-read state
 
 // MULTIPLAYER — async, gracefully no-ops when standalone
-Arcade.peer.status()                  // 'unavailable' | 'idle' | 'connecting' | 'connected'
+Arcade.peer.status()                  // 'unavailable' | 'idle' | 'connecting' | 'connected' | 'interrupted'
+                                      // 'interrupted' = live session self-repairing (v1.7):
+                                      // sends queue + replay; don't reset game state
 Arcade.peer.onStatus(fn)
 Arcade.peer.send(payload)
 Arcade.peer.onMessage(fn)

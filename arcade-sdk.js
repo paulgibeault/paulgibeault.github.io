@@ -548,7 +548,10 @@
         status: function () { return peerStatus; },
         onStatus: makeSubscriber(listeners.peerStatus),
         send: function (payload) {
-            if (!framed || peerStatus !== 'connected') return false;
+            // 'interrupted' = live session being repaired by the transport —
+            // sends are queued and replayed on recovery (exactly-once), so
+            // games can keep playing straight through a connection blip.
+            if (!framed || (peerStatus !== 'connected' && peerStatus !== 'interrupted')) return false;
             postToParent({ type: 'arcade:peer.send', payload: payload });
             return true;
         },

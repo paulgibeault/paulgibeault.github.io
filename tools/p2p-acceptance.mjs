@@ -136,6 +136,33 @@ try {
         window.__got.some(p => p && (p.arcade !== undefined || p.gameId !== undefined)));
     check('games never see the launcher envelope', !sawEnvelope);
 
+    // 7. Resilience (transport v1.7): a link blip must surface to games as
+    //    'interrupted' — never 'idle' — sends must keep working (queued), and
+    //    the link must heal itself without any ceremony.
+    await H.evaluate(() => {
+        const pm = window.__arcade.p2p._addon().peerNode;
+        const peerId = Array.from(pm.peers.keys())[0];
+        pm._onLinkTrouble(peerId, 'disconnected'); // what a real ICE blip reports
+    });
+    await fH.waitForFunction(`window.__statuses.includes('interrupted')`, null, { timeout: 10000 });
+    check('game sees SDK status interrupted during a link blip', true);
+
+    const sentDuring = await fH.evaluate(() => window.__send({ hello: 'sent-during-blip' }));
+    check('game send during interruption is accepted', sentDuring === true);
+
+    await fJ.waitForFunction(
+        `window.__got.some(p => p && p.hello === 'sent-during-blip')`,
+        null, { timeout: 10000 }
+    );
+    check('message sent during interruption is delivered', true);
+
+    // Heartbeat/ack traffic proves the path — the link must recover on its own.
+    await fH.waitForFunction(`window.__peerStatus() === 'connected'`, null, { timeout: 15000 });
+    check('link self-heals back to connected without a new ceremony', true);
+
+    const sawIdle = await fH.evaluate(() => window.__statuses.includes('idle'));
+    check("game never saw 'idle' during the blip", !sawIdle);
+
     await H.close(); await J.close();
 } catch (e) {
     console.error('\nFATAL:', e.message);

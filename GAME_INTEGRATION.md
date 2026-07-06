@@ -285,9 +285,9 @@ Players pair through the launcher's **Multiplayer** menu — QR codes and chat
 links, no signaling server. Games never touch any of that; the whole surface is:
 
 ```js
-Arcade.peer.status();              // 'unavailable' | 'idle' | 'connecting' | 'connected'
+Arcade.peer.status();              // 'unavailable' | 'idle' | 'connecting' | 'connected' | 'interrupted'
 Arcade.peer.onStatus(s => ...);    // gate multiplayer UI on this
-Arcade.peer.send({ move: 'e4' });  // JSON-safe payload; false unless connected
+Arcade.peer.send({ move: 'e4' });  // JSON-safe payload; false unless connected/interrupted
 Arcade.peer.onMessage(payload => ...);  // exactly what the other game sent
 ```
 
@@ -305,6 +305,17 @@ Rules of the road:
       yet": announce with a hello payload and wait for the echo.
 - [ ] `'connected'` means the data channel is genuinely open (transport
       v1.5.1 semantics) — safe to send immediately on the transition.
+- [ ] **Ride out `'interrupted'`** (transport v1.7): the peer's device blipped
+      (notification, app switch, network wobble) and the transport is repairing
+      the SAME session — do NOT reset game state or show a "player left"
+      screen. Show a lightweight "reconnecting…" indicator instead. `send()`
+      still returns `true`: messages queue and replay with exactly-once
+      delivery, so turn-based games can simply keep playing. The episode ends
+      with either `'connected'` (resume, nothing was lost) or `'idle'` (the
+      grace window — minutes — expired; NOW treat the player as gone).
+- [ ] High-rate realtime games (30+ msgs/sec) should pause their send loop
+      while `'interrupted'` and resync authoritative state on `'connected'` —
+      the replay queue is capped at 1000 messages.
 - [ ] Don't cache `status()` at init: a game mounted mid-session receives
       `'connected'` in its welcome, and live transitions arrive via `onStatus`.
 

@@ -16,11 +16,19 @@
  *   { arcade: 1, kind: 'identity', deviceId, name } — this device announcing
  *     itself once its data channel opens (see "known peers" below)
  *
- * Status vocabulary mapping (transport → SDK):
- *   connected                    → 'connected'   (data channel OPEN — the
+ * Status vocabulary mapping (transport → SDK), aggregated across ALL peer
+ * links so one wobbling link never flaps the global status:
+ *   any link connected           → 'connected'   (data channel OPEN — the
  *                                                 transport's v1.5.1 meaning)
- *   finalizing/checking/new/...  → 'connecting'
- *   disconnected/failed/closed   → 'idle'
+ *   else any link interrupted    → 'interrupted' (v1.7: session alive, the
+ *                                                 transport is repairing it —
+ *                                                 sends still work, they queue
+ *                                                 and replay on recovery)
+ *   else any link pending        → 'connecting'
+ *   none                         → 'idle'
+ *
+ * While 'connected' or 'interrupted' the bridge holds a screen Wake Lock —
+ * screen dimming is the #1 cause of the long suspends that kill sessions.
  *
  * Known peers — naming/reconnect-recognition (no server, still one ceremony
  * per connection; WebRTC can't skip the offer/answer round trip):
@@ -36,15 +44,19 @@
  *     arcade.v1._meta.deviceId, .deviceName, .knownPeers
  */
 
-const SDK_STATUS = {
-    connected: 'connected',
-    disconnected: 'idle',
-    failed: 'idle',
-    closed: 'idle'
-};
-
-function mapStatus(transportStatus) {
-    return SDK_STATUS[transportStatus] || 'connecting';
+// Terminal link statuses have already been removed from the transport's peers
+// map by the time their event fires, so aggregation only ever sees live links.
+function aggregateStatus(mp) {
+    let connected = false, interrupted = false, pending = false;
+    mp.peerNode.peers.forEach((p) => {
+        if (p.status === 'connected') connected = true;
+        else if (p.status === 'interrupted') interrupted = true;
+        else pending = true;
+    });
+    if (connected) return 'connected';
+    if (interrupted) return 'interrupted';
+    if (pending) return 'connecting';
+    return 'idle';
 }
 
 const META_PREFIX = 'arcade.v1._meta.';
@@ -130,10 +142,40 @@ const messageListeners = []; // fn(gameId, payload)
 function setStatus(next) {
     if (next === sdkStatus) return;
     sdkStatus = next;
+    syncWakeLock();
     for (const fn of statusListeners) {
         try { fn(sdkStatus); } catch (e) {}
     }
 }
+
+// ---- screen wake lock -------------------------------------------------
+// Held while a session is live ('connected' or 'interrupted'): a dimmed
+// screen suspends the tab, and suspends are what break multiplayer. The
+// browser auto-releases the lock when the tab hides; we re-request on
+// return. Best-effort — denial (e.g. battery saver) is not an error.
+let wakeLock = null;
+
+async function requestWakeLock() {
+    if (!('wakeLock' in navigator)) return;
+    try {
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } catch (e) { wakeLock = null; }
+}
+
+function syncWakeLock() {
+    const want = sdkStatus === 'connected' || sdkStatus === 'interrupted';
+    if (want && !wakeLock && document.visibilityState === 'visible') {
+        requestWakeLock();
+    } else if (!want && wakeLock) {
+        try { wakeLock.release(); } catch (e) {}
+        wakeLock = null;
+    }
+}
+
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') syncWakeLock();
+});
 
 async function ensureAddon() {
     if (addon) return addon;
@@ -157,7 +199,7 @@ async function ensureAddon() {
         const announcedTo = new Set();
         mp.addEventListener('status', (e) => {
             const { peerId, status } = e.detail || {};
-            setStatus(mapStatus(status));
+            setStatus(aggregateStatus(mp));
             if (status === 'connected') {
                 if (peerId && !announcedTo.has(peerId)) {
                     announcedTo.add(peerId);
@@ -197,7 +239,7 @@ async function ensureAddon() {
 }
 
 export const ArcadeP2P = {
-    /** Current SDK-vocabulary status: 'idle' | 'connecting' | 'connected'. */
+    /** Current SDK-vocabulary status: 'idle' | 'connecting' | 'connected' | 'interrupted'. */
     status() { return sdkStatus; },
 
     /** Subscribe to status changes (SDK vocabulary). Returns unsubscribe. */
@@ -240,10 +282,12 @@ export const ArcadeP2P = {
 
     /**
      * Send a game's payload to the remote peer, wrapped in the launcher
-     * envelope. Returns false when not connected (mirrors SDK semantics).
+     * envelope. Returns false when there is no live session. During an
+     * 'interrupted' session the transport queues the message and replays it
+     * on recovery (exactly-once), so games can keep sending through a blip.
      */
     send(gameId, payload) {
-        if (!addon || sdkStatus !== 'connected') return false;
+        if (!addon || (sdkStatus !== 'connected' && sdkStatus !== 'interrupted')) return false;
         addon.send({ arcade: 1, gameId, payload });
         return true;
     },

@@ -328,8 +328,10 @@ export class P2PUIManager {
      */
     _restoreUIState() {
         const peers = Array.from(this.peerNode.peers.values());
-        const connected = peers.some(p => p.status === 'connected');
-        const pending = peers.some(p => p.status !== 'connected');
+        // 'interrupted' is a live session being repaired — treat it like
+        // connected here, never like a pending ceremony.
+        const connected = peers.some(p => p.status === 'connected' || p.status === 'interrupted');
+        const pending = peers.some(p => p.status !== 'connected' && p.status !== 'interrupted');
 
         if (connected) {
             this.cleanupUI();
@@ -357,7 +359,9 @@ export class P2PUIManager {
     /** Abandon any unfinished attempt and return to the first screen. */
     _startOver(log = true) {
         this.peerNode.peers.forEach((p, id) => {
-            if (p.status !== 'connected') {
+            // Abandon unfinished ceremonies only — an 'interrupted' peer is an
+            // established session mid-repair, not a failed attempt.
+            if (p.status !== 'connected' && p.status !== 'interrupted') {
                 try { p.connection.close(); } catch(_) {}
                 this.peerNode.peers.delete(id);
             }
@@ -374,14 +378,25 @@ export class P2PUIManager {
         this.ui.btnShareSdp.style.display = '';
         this.ui.btnCopySdp.style.display = '';
 
-        const anyConnected = Array.from(this.peerNode.peers.values()).some(p => p.status === 'connected');
+        const statuses = Array.from(this.peerNode.peers.values()).map(p => p.status);
+        const anyConnected = statuses.includes('connected');
+        const anyInterrupted = statuses.includes('interrupted');
+        const anyLive = anyConnected || anyInterrupted;
         this.ui.choice.style.display = 'block';
-        this.ui.btnHost.style.display = anyConnected ? 'none' : 'block';
-        this.ui.btnJoin.style.display = anyConnected ? 'none' : 'block';
-        this.ui.btnAddPlayer.style.display = anyConnected ? 'block' : 'none';
+        this.ui.btnHost.style.display = anyLive ? 'none' : 'block';
+        this.ui.btnJoin.style.display = anyLive ? 'none' : 'block';
+        this.ui.btnAddPlayer.style.display = anyLive ? 'block' : 'none';
 
-        this.ui.statusBadge.textContent = anyConnected ? '🎉 Connected!' : 'Not connected yet';
-        this.ui.statusBadge.className = anyConnected ? 'p2p-status-connected' : 'p2p-status-disconnected';
+        if (anyConnected) {
+            this.ui.statusBadge.textContent = '🎉 Connected!';
+            this.ui.statusBadge.className = 'p2p-status-connected';
+        } else if (anyInterrupted) {
+            this.ui.statusBadge.textContent = 'Connection hiccup — reconnecting…';
+            this.ui.statusBadge.className = 'p2p-status-connecting';
+        } else {
+            this.ui.statusBadge.textContent = 'Not connected yet';
+            this.ui.statusBadge.className = 'p2p-status-disconnected';
+        }
 
         if (log) this.logDiag('info', 'Starting over — previous attempt discarded.');
     }
@@ -640,8 +655,11 @@ export class P2PUIManager {
             const { peerId, status } = e.detail;
             
             if (this.peerNode.isHost) {
-                let connectedCount = 0;
-                this.peerNode.peers.forEach(p => { if (p.status === 'connected') connectedCount++; });
+                let connectedCount = 0, interruptedCount = 0;
+                this.peerNode.peers.forEach(p => {
+                    if (p.status === 'connected') connectedCount++;
+                    else if (p.status === 'interrupted') interruptedCount++;
+                });
 
                 if (connectedCount > 0) {
                     this.ui.statusBadge.textContent = connectedCount > 1
@@ -657,6 +675,9 @@ export class P2PUIManager {
                     this.ui.btnScanAns.style.display = 'none';
                     this.ui.btnAddPlayer.style.display = 'block';
                     setTimeout(() => this.hide(), 1800);
+                } else if (interruptedCount > 0) {
+                    this.ui.statusBadge.textContent = 'Connection hiccup — reconnecting…';
+                    this.ui.statusBadge.className = 'p2p-status-connecting';
                 } else if (status === 'disconnected') {
                     this.ui.statusBadge.textContent = 'Not connected yet';
                     this.ui.statusBadge.className = 'p2p-status-disconnected';
@@ -677,6 +698,10 @@ export class P2PUIManager {
                     // Network path is up but they haven't scanned our code yet.
                     // Keep our code fully visible — the job isn't done.
                     this.ui.statusBadge.textContent = 'Waiting for them to scan your code…';
+                    this.ui.statusBadge.classList.add('p2p-status-connecting');
+                }
+                else if (status === 'interrupted') {
+                    this.ui.statusBadge.textContent = 'Connection hiccup — reconnecting…';
                     this.ui.statusBadge.classList.add('p2p-status-connecting');
                 }
                 else if (status === 'disconnected' || status === 'failed') {
