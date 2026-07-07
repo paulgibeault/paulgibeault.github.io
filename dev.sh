@@ -52,6 +52,18 @@ sed_inplace() {
   mv "$tmp" "$file"
 }
 
+# Echo the gameId a game declares via Arcade.init({ gameId: '...' }) in its
+# index.html, or nothing if none is found. The checkout's directory name is
+# NOT authoritative — a repo cloned as ../sow-duku must still mount at the
+# /sowduku/ slug the launcher buttons and acceptance runner use.
+detect_game_id() {
+  local html="$1/index.html"
+  [ -f "$html" ] || return 0
+  grep -oE "Arcade[.]init[(][[:space:]]*[{][[:space:]]*gameId[[:space:]]*:[[:space:]]*['\"][A-Za-z0-9_-]+['\"]" "$html" 2>/dev/null \
+    | head -1 \
+    | sed -E "s/.*['\"]([A-Za-z0-9_-]+)['\"]\$/\1/"
+}
+
 # Returns 0 if $1/package.json declares a "build" script.
 has_build_script() {
   python3 - "$1" <<'PY' 2>/dev/null
@@ -78,14 +90,19 @@ fi
 # ─── usage ─────────────────────────────────────────────────────────────
 if [ "$#" -eq 0 ]; then
   cat <<EOF >&2
-Usage: ./dev.sh <game-dir>... | stop
+Usage: ./dev.sh <game-dir>[:<gameId>]... | stop
 
 Stages the launcher and one or more sibling game repos under a single
 same-origin HTTP server so the SDK handshake works end-to-end locally.
 
+Each game mounts at /<gameId>/, where <gameId> is (in priority order) the
+explicit :<gameId> suffix, the id declared by Arcade.init({ gameId }) in the
+game's index.html, or the directory basename.
+
 Examples:
   ./dev.sh ../si-syn
   ./dev.sh ../si-syn ../pi-game
+  ./dev.sh ../sow-duku-checkout:sowduku
   ./dev.sh stop
 
 Env:
@@ -97,9 +114,27 @@ fi
 # ─── preflight ─────────────────────────────────────────────────────────
 command -v python3 >/dev/null 2>&1 || { echo "dev: python3 required" >&2; exit 1; }
 
+# Split an argument of the form <dir>[:<gameId>] — override lands in
+# ARG_OVERRIDE, directory in ARG_DIR. A ':' only counts as an override
+# separator when the whole argument isn't itself a directory (paths with
+# colons are legal, if exotic).
+split_game_arg() {
+  ARG_DIR="$1"
+  ARG_OVERRIDE=""
+  if [ ! -d "$1" ]; then
+    case "$1" in
+      *:*)
+        ARG_DIR="${1%:*}"
+        ARG_OVERRIDE="${1##*:}"
+        ;;
+    esac
+  fi
+}
+
 for arg in "$@"; do
-  if [ ! -d "$arg" ]; then
-    echo "dev: not a directory: $arg" >&2
+  split_game_arg "$arg"
+  if [ ! -d "$ARG_DIR" ]; then
+    echo "dev: not a directory: $ARG_DIR" >&2
     exit 1
   fi
 done
@@ -116,7 +151,7 @@ mkdir -p "$STAGE_DIR"
 # Rewrite https://paulgibeault.github.io → local origin in HTML/JS/JSON.
 # Skip sw.js — the launcher itself opts out on loopback, and we don't want
 # stale launcher assets cached during dev.
-for f in index.html profile.html manifest.json arcade-sdk.js styles.css arcade-p2p.js; do
+for f in index.html profile.html manifest.json arcade-sdk.js styles.css arcade-p2p.js arcade-known-peers.js; do
   src="$LAUNCHER_DIR/$f"
   if [ -f "$src" ]; then
     sed "s|https://paulgibeault.github.io|$LOCAL_ORIGIN|g" "$src" > "$STAGE_DIR/$f"
@@ -128,28 +163,42 @@ ln -snf "$LAUNCHER_DIR/images" "$STAGE_DIR/images"
 ln -snf "$LAUNCHER_DIR/p2p" "$STAGE_DIR/p2p"
 
 # ─── stage each game ───────────────────────────────────────────────────
+STAGED_IDS=""
 for arg in "$@"; do
-  game_dir="$(cd "$arg" && pwd)"
-  game_id="$(basename "$game_dir")"
-  echo "→ Game: $game_id  ($game_dir)"
+  split_game_arg "$arg"
+  game_dir="$(cd "$ARG_DIR" && pwd)"
+  dir_name="$(basename "$game_dir")"
 
   build_root="$game_dir"
   if has_build_script "$game_dir"; then
     if [ ! -d "$game_dir/node_modules" ]; then
-      echo "dev: $game_id has a build script but no node_modules — run 'npm install' there first" >&2
+      echo "dev: $dir_name has a build script but no node_modules — run 'npm install' there first" >&2
       exit 1
     fi
-    echo "  → npm run build"
+    echo "→ $dir_name: npm run build"
     (cd "$game_dir" && npm run build > /dev/null)
     if [ -d "$game_dir/dist" ]; then
       build_root="$game_dir/dist"
     elif [ -d "$game_dir/build" ]; then
       build_root="$game_dir/build"
     else
-      echo "dev: $game_id built but no dist/ or build/ output found" >&2
+      echo "dev: $dir_name built but no dist/ or build/ output found" >&2
       exit 1
     fi
   fi
+
+  # Mount point: explicit override > Arcade.init gameId > directory basename.
+  if [ -n "$ARG_OVERRIDE" ]; then
+    game_id="$ARG_OVERRIDE"
+  else
+    game_id="$(detect_game_id "$build_root")"
+    if [ -z "$game_id" ]; then
+      game_id="$dir_name"
+    elif [ "$game_id" != "$dir_name" ]; then
+      echo "  → mounting at /$game_id/ (Arcade.init gameId; dir is '$dir_name')"
+    fi
+  fi
+  echo "→ Game: $game_id  ($game_dir)"
 
   cp -R "$build_root" "$STAGE_DIR/$game_id"
   # Older games may still hard-code the absolute SDK URL; rewrite for parity
@@ -157,6 +206,7 @@ for arg in "$@"; do
   if [ -f "$STAGE_DIR/$game_id/index.html" ]; then
     sed_inplace "s|https://paulgibeault.github.io|$LOCAL_ORIGIN|g" "$STAGE_DIR/$game_id/index.html"
   fi
+  STAGED_IDS="$STAGED_IDS $game_id"
 done
 
 # ─── start server ──────────────────────────────────────────────────────
@@ -172,8 +222,7 @@ fi
 
 echo
 echo "  Launcher:  $LOCAL_ORIGIN/"
-for arg in "$@"; do
-  game_id="$(basename "$(cd "$arg" && pwd)")"
+for game_id in $STAGED_IDS; do
   echo "  Game:      $LOCAL_ORIGIN/$game_id/   (standalone)"
 done
 echo "  SDK:       $LOCAL_ORIGIN/arcade-sdk.js"

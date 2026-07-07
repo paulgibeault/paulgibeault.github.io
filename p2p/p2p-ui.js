@@ -1,5 +1,10 @@
 import { ConnectionUtils } from './p2p-core.js';
 
+// Shown in the modal header. Users are told to compare this across devices
+// when a connection fails, so it must track the vendored transport version
+// (see VENDORED.md / upstream PROTOCOL.md) — single constant, no other copies.
+const UI_VERSION_LABEL = 'v1.9';
+
 export class P2PUIManager {
     constructor(peerNode) {
         this.peerNode = peerNode;
@@ -201,6 +206,19 @@ export class P2PUIManager {
                 this.ui.choice.style.display = 'none';
                 this._initStages('joiner');
                 this._setStage(0, 'done'); // their invite arrived (via link)
+
+                // Consent gate: answering an offer starts ICE/STUN toward the
+                // link author's endpoints and broadcasts our answer — enough
+                // to reveal this device's public IP. A crafted link must not
+                // trigger that silently just by being opened.
+                if (!window.confirm(
+                    'Accept this game invite and connect?\n\n' +
+                    'Connecting shares your network address with the person who sent the link. ' +
+                    'If you weren\'t expecting an invite, choose Cancel.')) {
+                    this.logDiag('info', 'Invite declined by user. No connection attempted.');
+                    this.hide();
+                    return;
+                }
 
                 this.logDiag('info', 'Invite link received. Preparing your reply code...');
                 const answerData = await this.peerNode.createAnswer(data);
@@ -458,7 +476,7 @@ export class P2PUIManager {
         <div id="p2p-modal-overlay" class="p2p-modal-overlay" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="p2p-modal-title">
             <div class="p2p-modal">
                 <header class="p2p-header">
-                    <h2 id="p2p-modal-title">Play Together <span style="font-size: 0.5em; color: #888; vertical-align: middle; font-weight: normal; margin-left: 10px;">v1.6.1</span></h2>
+                    <h2 id="p2p-modal-title">Play Together <span style="font-size: 0.5em; color: #888; vertical-align: middle; font-weight: normal; margin-left: 10px;">${UI_VERSION_LABEL}</span></h2>
                     <button id="p2p-btn-close" class="p2p-btn-danger" style="border:none; border-radius:4px; padding:4px 8px; cursor:pointer;" aria-label="Close">X</button>
                 </header>
                 <div id="p2p-status-badge" class="p2p-status-disconnected">Not connected yet</div>

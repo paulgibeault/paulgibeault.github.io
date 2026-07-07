@@ -76,12 +76,47 @@ silently dropped on import, so old keys won't survive a cross-device save.
   Arcade.onStateReplaced(() => { /* re-hydrate UI from Arcade.state.get(...) */ });
   ```
 
+  Treat `onStateReplaced` like a fresh boot: recompute your start screen /
+  current level / unlocks from storage. Do **not** assume the screen the user
+  is on is still valid in the imported save — e.g. an imported file may not
+  have the level the player was just on unlocked at all.
+
+- [ ] Bulky local-only data (telemetry, replay buffers, caches) should not
+  inflate every save file: write it with
+  `Arcade.state.set('telemetry', data, { exportable: false })`. The flag is
+  sticky per key until you set `{ exportable: true }`.
+
 ### One-shot migration of legacy keys
 
 `Arcade.state.migrate(version, fn)` runs `fn` exactly once per `(gameId, version)`
 — the SDK records a sentinel at `arcade.v1.<gameId>._migrated.<version>` so
-subsequent loads skip. Use it to copy legacy keys into the namespaced layout
-and delete the originals:
+subsequent loads skip.
+
+For the common "move one legacy key into the namespace" case,
+`Arcade.state.adopt(legacyKey, newKey?)` is a one-liner: it reads the legacy
+key, writes it under `arcade.v1.<gameId>.<newKey>` (JSON-parsing the old raw
+string unless you pass `{ json: false }`), and deletes the original — without
+clobbering an already-namespaced value:
+
+```js
+Arcade.state.migrate('v1', () => {
+    Arcade.state.adopt('hecknsic_settings', 'settings');
+    Arcade.state.adopt('hecknsic_save', 'savedGame');
+});
+```
+
+Version bumps *within* the namespace need no new machinery — use a fresh
+migrate sentinel and rewrite in place:
+
+```js
+Arcade.state.migrate('v2-board-shape', () => {
+    const s = Arcade.state.get('savedGame');
+    if (s && !Array.isArray(s.board)) Arcade.state.set('savedGame', upgradeBoard(s));
+});
+```
+
+For anything more involved (renamed score categories, per-mode splits), use
+the full form:
 
 ```js
 Arcade.state.migrate('v1', () => {
@@ -117,7 +152,8 @@ Arcade.state.migrate('v1', () => {
 ## 4. Player profile, scores, and stats
 
 - [ ] Use `Arcade.player.name()` / `Arcade.player.setName(s)` for the sticky display name. It lives at `arcade.v1.global.playerName` so every game shares it.
-- [ ] If your game has a leaderboard, use `Arcade.scores.add(category, { score, name?, meta? })` and `Arcade.scores.list(category, { limit })`. The SDK keeps the top 100 sorted descending and stamps `name` (from `Arcade.player.name()`) and `ts` automatically.
+- [ ] If your game has a leaderboard, use `Arcade.scores.add(category, { score, name?, key?, meta? }, opts?)` and `Arcade.scores.list(category, { limit })`. The SDK keeps the top 100 sorted and stamps `name` (from `Arcade.player.name()`) and `ts` automatically. Higher-is-better is the default; time/move-count games pass `{ order: 'asc' }` on every add so lower scores rank first.
+- [ ] For best-per-thing records (best time per board code, best score per level), stamp each entry with `key` and read back with `Arcade.scores.best(category, key)`. If you need a full keyed map rather than a ranked list, `Arcade.stats` is the blessed home — `Arcade.stats.update(category, prev => ({ ...prev, [boardCode]: bestMs }))`.
 - [ ] If your game tracks counters (games played / won / streak / best time), use `Arcade.stats.update(category, prev => next)` for atomic-style updates and `Arcade.stats.get(category)` to read. When adding a new field to an existing stats category, use `Arcade.stats.getOrInit(category, DEFAULTS)` instead of `get` — it deep-merges defaults under the stored value so saves from older versions pick up newly-added fields without a migration.
 
 ---
@@ -131,9 +167,19 @@ every change. The SDK applies the visual ones to the game's `<html>` for free:
 | ---------------- | ----------------------------------- | -------------------------------------------------- |
 | `fontScale`      | `Arcade.settings.fontScale()`       | `style="--font-scale: <n>"`                        |
 | `theme`          | `Arcade.settings.theme()`           | `data-theme="light"` or `data-theme="dark"`        |
-| `reducedMotion`  | `Arcade.settings.reducedMotion()`   | `style="--motion-scale: 0"` (1 otherwise)          |
+| `reducedMotion`  | `Arcade.settings.reducedMotion()`   | `data-reduced-motion="true|false"` + `style="--motion-scale: 0"` (1 otherwise) |
 | `audioVolume`    | `Arcade.settings.audioVolume()`     | `style="--audio-volume: <0..1>"` (read in JS)      |
 | `handedness`     | `Arcade.settings.handedness()`      | `data-handedness="left"` or `data-handedness="right"` |
+
+**Reduced motion is handled for you by default:** the SDK's injected base
+style includes a kill-switch rule — when `data-reduced-motion="true"`, every
+CSS animation and transition collapses to a single instant frame
+(`animation-duration: .001ms !important`, etc.). No `calc(var(--motion-scale))`
+rewrites needed for the common case. A game that wants to manage motion
+itself (e.g. keep some animations, slow others) opts out of the kill rule by
+setting `data-arcade-keep-motion` on `<html>` and keying its own CSS/JS off
+`[data-reduced-motion="true"]` or `--motion-scale`. Canvas/JS-driven motion
+still needs the JS checks below either way.
 
 To benefit:
 
@@ -186,13 +232,31 @@ out of the cache sooner. The SDK delivers explicit hints:
 
 - [ ] Subscribe to `Arcade.onSuspend(fn)` to pause your game loop / mute audio.
 - [ ] Subscribe to `Arcade.onResume(fn)` to unpause and reset any `lastTime` accumulators.
-- [ ] You no longer need a separate `visibilitychange` handler — the SDK fires `onSuspend` whenever the launcher hides the iframe (which encompasses both quitting to launcher and tab/window hide).
+- [ ] You no longer need a separate `visibilitychange` handler — the SDK merges the launcher's iframe-pool hints with the page's own visibility (`visibilitychange`/`pagehide`) into one deduplicated suspend/resume stream. That includes **standalone**: a game opened at its GitHub Pages URL gets the same `onSuspend` when its tab hides, so flush/pause logic in `onSuspend` works identically in both modes (and `Arcade.session.start({ persistKey })` persists standalone too).
+- [ ] Code that mounts mid-session (or CSS) can read the current state at any time: `Arcade.context.suspended`, or the `data-arcade-suspended="true|false"` attribute the SDK maintains on `<html>`. A hidden iframe's own `document.visibilityState` stays `"visible"`, so poll-style time trackers must check `Arcade.context.suspended`, not visibility.
 
 ```js
 let paused = false;
 Arcade.onSuspend(() => { paused = true; audio.suspend(); });
 Arcade.onResume(() => { paused = false; lastFrame = performance.now(); audio.resume(); });
 ```
+
+For a canvas render loop, skip the hand-rolled rAF bookkeeping entirely —
+`Arcade.loop(fn)` cancels on suspend, re-requests on resume **only if it was
+running**, and never lets suspended time leak into a delta (the first frame
+after resume gets `delta = 0`):
+
+```js
+const loop = Arcade.loop((deltaMs) => { update(deltaMs); draw(); });
+loop.start();            // begin
+loop.stop();             // in-game pause menu
+loop.kick();             // one frame on demand (dirty-flag renderers)
+```
+
+For timers, `Arcade.session.setTimeout(fn, ms)` / `Arcade.session.setInterval(fn, ms)`
+freeze while suspended (remaining time is preserved and re-armed on resume)
+and cancel themselves when a save import replaces state. Both return
+`{ cancel() }`.
 
 For wall-time tracking (best-time stats, an elapsed-time UI), use
 `Arcade.session.start()` instead of hand-rolling `performance.now()` math —
@@ -288,7 +352,17 @@ links, no signaling server. Games never touch any of that; the whole surface is:
 Arcade.peer.status();              // 'unavailable' | 'idle' | 'connecting' | 'connected' | 'interrupted'
 Arcade.peer.onStatus(s => ...);    // gate multiplayer UI on this
 Arcade.peer.send({ move: 'e4' });  // JSON-safe payload; false unless connected/interrupted
-Arcade.peer.onMessage(payload => ...);  // exactly what the other game sent
+Arcade.peer.onMessage((payload, fromPeer) => ...);  // fromPeer = sender's stable deviceId
+
+Arcade.peer.self();                // { deviceId, name } for THIS device (null before first pairing)
+Arcade.peer.remote();              // most recently seen remote device, or null
+Arcade.peer.onReady(({ deviceId }) => ...);  // remote has THIS game mounted & listening
+
+Arcade.peer.sendBlob(file, { onProgress });  // chunked large payloads; Promise
+Arcade.peer.onBlob((blob, { name, size, fromPeer }) => ...);
+
+Arcade.peer.queue();               // { depth, limit, overflowed } — replay-queue visibility
+Arcade.peer.onQueue(q => ...);     // pushed while 'interrupted'; overflowed ⇒ resync after recovery
 ```
 
 Rules of the road:
@@ -301,8 +375,12 @@ Rules of the road:
       big (the channel is ordered + reliable).
 - [ ] Both devices run the same game for a session. Messages are routed by
       `gameId` — a message sent while the other device has a different game
-      mounted is dropped silently. Design for "my peer might not be listening
-      yet": announce with a hello payload and wait for the echo.
+      mounted is dropped silently. You no longer need a hand-rolled
+      hello/echo handshake for "is my peer listening yet?": subscribe to
+      `Arcade.peer.onReady(...)` — the launchers exchange presence
+      announcements whenever a game mounts (and on every reconnect), so it
+      fires as soon as the same game is listening on both ends. It may fire
+      more than once per session; treat it as an idempotent signal.
 - [ ] `'connected'` means the data channel is genuinely open (transport
       v1.5.1 semantics) — safe to send immediately on the transition.
 - [ ] **Ride out `'interrupted'`** (transport v1.7): the peer's device blipped
@@ -318,7 +396,16 @@ Rules of the road:
       while the rendezvous layer repairs it — same rule: wait, don't reset.
 - [ ] High-rate realtime games (30+ msgs/sec) should pause their send loop
       while `'interrupted'` and resync authoritative state on `'connected'` —
-      the replay queue is capped at 1000 messages.
+      the replay queue is capped at 1000 messages. The cap is visible:
+      `Arcade.peer.queue()` returns `{ depth, limit, overflowed }` (pushed to
+      `onQueue` subscribers during an episode), and `overflowed === true`
+      means the oldest unacknowledged messages were already dropped, so
+      resync rather than trusting replay.
+- [ ] Files and other large payloads: don't hand-roll base64 chunking —
+      `Arcade.peer.sendBlob(blob, { onProgress })` chunks over the ordered
+      channel and the receiver's `Arcade.peer.onBlob` fires with a
+      reassembled `Blob`. Mind the replay cap when sending large files while
+      `'interrupted'`.
 - [ ] Don't cache `status()` at init: a game mounted mid-session receives
       `'connected'` in its welcome, and live transitions arrive via `onStatus`.
 
@@ -358,11 +445,37 @@ anchor-triggered downloads from a sandboxed iframe.
 Several games already ship a `manifest.json` and `sw.js`. Because every game
 and the launcher live on the same origin, sloppy scopes will collide.
 
+Start from the reference worker at
+[`tools/templates/game-sw.js`](tools/templates/game-sw.js) — it encodes every
+rule below (scope-filtered fetch handler, version-keyed cache, own-caches-only
+cleanup).
+
 - [ ] `manifest.json` `"scope"` and `"start_url"` are scoped to `/<gameId>/`, not `/`.
 - [ ] If the game registers a service worker, register it with `{ scope: '/<gameId>/' }` and place `sw.js` inside that path.
-- [ ] The service worker only caches assets under `/<gameId>/`. **Never** cache `/arcade-sdk.js` or anything at the launcher root — the SDK will `console.warn` if it detects this at load.
+- [ ] The service worker only caches assets under `/<gameId>/`. **Never** cache `/arcade-sdk.js` or anything at the launcher root — the SDK inspects the origin's caches at load and reports a `console.error` (plus a visible toast in `?dev=1` mode) when a game cache holds launcher files.
+- [ ] The fetch handler must ignore out-of-scope URLs. A controlled page routes **every** request through its SW — including `/arcade-sdk.js` — so the guard is mandatory, not optional:
 
-> The launcher's own service worker lives at `/sw.js` (root scope) and intentionally caches only launcher-owned files (`index.html`, `arcade-sdk.js`, `styles.css`, launcher images). It does not intercept game URLs. The launcher SW is also skipped on loopback hosts (`localhost`, `127.x`, `::1`) so local-dev edits to launcher or SDK are never masked by stale cache.
+  ```js
+  self.addEventListener('fetch', (event) => {
+    const url = new URL(event.request.url);
+    if (url.origin !== self.location.origin) return;
+    if (!url.pathname.startsWith('/<gameId>/')) return;  // ← the load-bearing line
+    event.respondWith(
+      caches.match(event.request).then((hit) => hit || fetch(event.request))
+    );
+  });
+  ```
+
+- [ ] **Never clean up origin-wide.** `caches.keys()` and
+  `navigator.serviceWorker.getRegistrations()` see every game's caches and
+  workers *plus the launcher's* — one game shipping
+  `caches.keys().then(names => names.map(n => caches.delete(n)))` or a blanket
+  `getRegistrations().then(rs => rs.forEach(r => r.unregister()))` wipes the
+  whole arcade's offline support. Filter cache deletions to your own
+  version-keyed prefix (`<gameId>-*`) and never unregister workers you didn't
+  register.
+
+> The launcher's own service worker lives at `/sw.js` (root scope), caches only launcher-owned files (`index.html`, `arcade-sdk.js`, `styles.css`, `p2p/`, launcher images), and its fetch handler path-filters to those same trees — requests for `/<gameId>/...` fall through untouched. The launcher SW is also skipped on loopback hosts (`localhost`, `127.x`, `::1`) so local-dev edits to launcher or SDK are never masked by stale cache.
 
 ---
 
@@ -473,13 +586,16 @@ acts on messages from iframes it mounted via the pool.
 
 ```
 child  → parent: arcade:hello              { gameId, version }
-parent → child:  arcade:welcome            { version, peerStatus, settings }
+parent → child:  arcade:welcome            { version, peerStatus, peers, settings }
 parent → child:  arcade:settings.changed   { settings }
 parent → child:  arcade:state.replaced     { }                      // after file import
 parent → child:  arcade:lifecycle.suspend  { }                      // iframe hidden, or about to be evicted
 parent → child:  arcade:lifecycle.resume   { }                      // iframe shown
 parent → child:  arcade:peer.status        { status }
-parent → child:  arcade:peer.message       { payload, fromPeer }
+parent → child:  arcade:peer.message       { payload, fromPeer }    // fromPeer = sender deviceId
+parent → child:  arcade:peer.identity      { deviceId, name }       // roster update
+parent → child:  arcade:peer.ready         { deviceId, name }       // remote same-game listening
+parent → child:  arcade:peer.queue         { depth, limit, overflowed }
 child  → parent: arcade:peer.send          { payload }
 child  → parent: arcade:ui.toast           { message, kind, duration }
 ```

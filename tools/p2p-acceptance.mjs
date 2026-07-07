@@ -248,10 +248,10 @@ try {
         const rec = window.__arcade.p2p._recordPeerIdentity;
         const fpA = 'AA:' + Array(31).fill('11').join(':');
         const fpB = 'BB:' + Array(31).fill('22').join(':');
-        const first = rec('policy-test-device', 'Pin Tester', fpA);
-        const same = rec('policy-test-device', 'Pin Tester', fpA);
-        const changed = rec('policy-test-device', 'Pin Tester', fpB);
-        const stored = JSON.parse(localStorage.getItem('arcade.v1._meta.knownPeers'))['policy-test-device'];
+        const first = rec('dev-policytest01', 'Pin Tester', fpA);
+        const same = rec('dev-policytest01', 'Pin Tester', fpA);
+        const changed = rec('dev-policytest01', 'Pin Tester', fpB);
+        const stored = JSON.parse(localStorage.getItem('arcade.v1._meta.knownPeers'))['dev-policytest01'];
         return { first: first.fingerprintChanged, same: same.fingerprintChanged,
                  changed: changed.fingerprintChanged, storedFp: stored.fingerprint, changedAt: stored.fingerprintChangedAt };
     });
@@ -259,6 +259,25 @@ try {
     check('re-announce with the same fingerprint stays quiet', policy.same === false);
     check('changed fingerprint is flagged and re-recorded (TOFU-with-notice)',
         policy.changed === true && policy.storedFp.startsWith('BB:') && !!policy.changedAt);
+
+    // 9b. Malformed deviceIds must be rejected before touching knownPeers —
+    //     ids are peer-chosen, so only machine-generated shapes are trusted.
+    const malformed = await H.evaluate(() => {
+        const rec = window.__arcade.p2p._recordPeerIdentity;
+        const fp = 'CC:' + Array(31).fill('33').join(':');
+        const results = [
+            rec('<img src=x onerror=alert(1)>', 'Evil', fp),
+            rec('not a uuid at all', 'Evil', fp),
+            rec('x'.repeat(200), 'Evil', fp),
+            rec(12345, 'Evil', fp)
+        ];
+        const known = JSON.parse(localStorage.getItem('arcade.v1._meta.knownPeers') || '{}');
+        const leaked = Object.keys(known).some(id =>
+            id.includes('<') || id.includes(' ') || id.length > 64);
+        return { allRejected: results.every(r => r === null), leaked };
+    });
+    check('malformed deviceIds are rejected (validation gate)',
+        malformed.allRejected && !malformed.leaked);
 
     // 10. Rendezvous auto-reconnect (PROTOCOL.md §7): both sides opt in,
     //     the connection is killed COMPLETELY, and the session must come
@@ -274,7 +293,7 @@ try {
         });
         await page.evaluate(() => {
             const known = JSON.parse(localStorage.getItem('arcade.v1._meta.knownPeers'));
-            const peerDeviceId = Object.keys(known).find(id => id !== 'policy-test-device');
+            const peerDeviceId = Object.keys(known).find(id => id !== 'dev-policytest01');
             return window.__arcade.p2p.enableAutoReconnect(peerDeviceId);
         });
     }

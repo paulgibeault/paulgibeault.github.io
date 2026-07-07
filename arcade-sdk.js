@@ -15,12 +15,14 @@
  * API
  *   Arcade.init({ gameId })        identity + handshake (sync)
  *   Arcade.ready                   Promise resolved on welcome / standalone
- *   Arcade.context                 { framed, version, gameId }
+ *   Arcade.context                 { framed, version, gameId, suspended }
  *
  *   // Storage — sync, JSON-encoded under arcade.v1.<gameId>.<key>
  *   Arcade.state.get / set / remove
+ *   Arcade.state.set(key, v, { exportable: false })  keep out of save files
  *   Arcade.state.getOrInit(key, defaults)         deep-merge load
  *   Arcade.state.migrate(version, fn)             run-once bootstrap
+ *   Arcade.state.adopt(legacyKey, newKey?, opts?) one-line legacy-key move
  *   Arcade.state.onChange(key, fn)                storage events + replace
  *
  *   // Cross-game keys under arcade.v1.global.<key>
@@ -29,8 +31,20 @@
  *   // Sticky display name (lives in arcade.v1.global.playerName)
  *   Arcade.player.name() / setName(s) / onChange(fn)
  *
- *   // Lifecycle (driven by launcher iframe pool)
+ *   // Lifecycle — launcher iframe pool when framed, page visibility
+ *   // standalone; both sources are merged into one deduplicated stream.
  *   Arcade.onSuspend(fn) / onResume(fn) / onStateReplaced(fn)
+ *   Arcade.context.suspended                      current effective state
+ *   (<html data-arcade-suspended="true|false"> mirrors it for CSS/late code)
+ *
+ *   // Managed rAF loop — cancels on suspend, resumes if it was running,
+ *   // suspended time never appears in a delta
+ *   const loop = Arcade.loop((deltaMs, ts) => { ... });
+ *   loop.start() / stop() / kick() / running() / dispose()
+ *
+ *   // Suspend-aware timers — freeze on suspend (remaining time preserved),
+ *   // cancel on stateReplaced; both return { cancel() }
+ *   Arcade.session.setTimeout(fn, ms) / Arcade.session.setInterval(fn, ms)
  *
  *   // Settings — pushed by launcher; SDK auto-applies CSS hooks
  *   Arcade.settings.fontScale | theme | reducedMotion | audioVolume | handedness
@@ -39,14 +53,19 @@
  *
  *   // Multiplayer (no-ops standalone)
  *   Arcade.peer.status / onStatus / send / onMessage
+ *   Arcade.peer.self() / remote()                 stable device identities
+ *   Arcade.peer.onReady(fn)                       remote same-game listening
+ *   Arcade.peer.sendBlob(blob, { onProgress }) / onBlob(fn)
+ *   Arcade.peer.queue() / onQueue(fn)             replay-queue visibility
  *
  *   // Launcher-mediated UI
  *   Arcade.ui.toast(message, { kind, duration })
  *
  *   // Top-N leaderboard per category
- *   Arcade.scores.add(category, { score, name?, meta? })
+ *   Arcade.scores.add(category, { score, name?, key?, meta? }, { order? })
+ *                                  order: 'desc' (default) | 'asc' (times)
  *   Arcade.scores.list(category, { limit }?)
- *   Arcade.scores.best(category)
+ *   Arcade.scores.best(category) / best(category, key)   keyed bests
  *   Arcade.scores.clear(category)
  *
  *   // Mutable per-category counter / blob
@@ -99,16 +118,84 @@
     var listeners = {
         peerStatus: [],
         peerMessage: [],
+        peerReady: [],
+        peerQueue: [],
+        peerBlob: [],
         stateReplaced: [],
         settingsChange: [],
         suspend: [],
         resume: []
     };
+
+    // Remote peer roster — seeded from the launcher's welcome, kept fresh by
+    // arcade:peer.identity / arcade:peer.ready broadcasts.
+    var remotePeers = {}; // deviceId -> { deviceId, name, at }
+    function noteRemotePeer(deviceId, name) {
+        if (typeof deviceId !== 'string' || !deviceId || deviceId.length > 64) return null;
+        var prev = remotePeers[deviceId];
+        var rec = {
+            deviceId: deviceId,
+            name: (typeof name === 'string' && name) ? name.slice(0, 60)
+                : (prev ? prev.name : 'Unnamed device'),
+            at: Date.now()
+        };
+        remotePeers[deviceId] = rec;
+        return rec;
+    }
+    // Last-known transport replay-queue snapshot (pushed by the launcher —
+    // meaningful during 'interrupted' episodes).
+    var peerQueueSnapshot = { depth: 0, limit: 0, overflowed: false };
     var keyChangeListeners = new Map(); // fullKey -> [fn, fn, ...]
 
     var readyResolved = false;
     var readyResolve;
     var readyPromise = new Promise(function (r) { readyResolve = r; });
+
+    // ─── Suspend state ────────────────────────────────────────────
+    // Two independent suspend sources, OR'd into one effective state:
+    //   - launcherSuspended: the launcher hid/evicted this iframe
+    //     (arcade:lifecycle.* messages — framed only)
+    //   - pageSuspended: this document itself is hidden (visibilitychange /
+    //     pagehide — the only signal that exists standalone, and the one the
+    //     launcher does NOT deliver for tab/window hide)
+    // Games see a single deduplicated suspend/resume stream; the current
+    // state is readable at any time via Arcade.context.suspended and the
+    // data-arcade-suspended attribute on <html> (a hidden iframe's own
+    // document.visibilityState stays 'visible', so code mounted mid-session
+    // has no other way to know).
+    var launcherSuspended = false;
+    var pageSuspended = false;
+    var suspendedNow = false;
+
+    function applySuspendedToDOM() {
+        try {
+            document.documentElement.setAttribute(
+                'data-arcade-suspended', suspendedNow ? 'true' : 'false');
+        } catch (e) {}
+    }
+    function recomputeSuspended() {
+        var next = launcherSuspended || pageSuspended;
+        if (next === suspendedNow) return;
+        suspendedNow = next;
+        applySuspendedToDOM();
+        fire(next ? listeners.suspend : listeners.resume);
+    }
+    function installPageLifecycle() {
+        try {
+            document.addEventListener('visibilitychange', function () {
+                pageSuspended = document.visibilityState === 'hidden';
+                recomputeSuspended();
+            });
+            window.addEventListener('pagehide', function () {
+                pageSuspended = true;
+                recomputeSuspended();
+            });
+            window.addEventListener('pageshow', function () {
+                pageSuspended = document.visibilityState === 'hidden';
+                recomputeSuspended();
+            });
+        } catch (e) {}
+    }
 
     // ─── Helpers ──────────────────────────────────────────────────
     function inIframe() {
@@ -138,11 +225,26 @@
     function isPlainObject(o) {
         return o !== null && typeof o === 'object' && !Array.isArray(o);
     }
+    // Merge helper hardened against prototype pollution: stored values come
+    // from JSON.parse, which creates '__proto__' as an own enumerable key —
+    // naive `out[k] = v` on that key fires the prototype setter. Own keys
+    // only, dunder keys skipped.
+    function isDunderKey(k) {
+        return k === '__proto__' || k === 'constructor' || k === 'prototype';
+    }
     function deepMerge(base, override) {
         if (!isPlainObject(base) || !isPlainObject(override)) return override;
         var out = {};
-        for (var k in base) out[k] = base[k];
-        for (var k2 in override) {
+        var baseKeys = Object.keys(base);
+        for (var i = 0; i < baseKeys.length; i++) {
+            var k = baseKeys[i];
+            if (isDunderKey(k)) continue;
+            out[k] = base[k];
+        }
+        var overrideKeys = Object.keys(override);
+        for (var j = 0; j < overrideKeys.length; j++) {
+            var k2 = overrideKeys[j];
+            if (isDunderKey(k2)) continue;
             var ov = override[k2], bv = base[k2];
             out[k2] = (isPlainObject(bv) && isPlainObject(ov)) ? deepMerge(bv, ov) : ov;
         }
@@ -234,6 +336,7 @@
             d.style.setProperty('--audio-volume', settings.audioVolume);
             d.setAttribute('data-theme', settings.theme);
             d.setAttribute('data-handedness', settings.handedness);
+            d.setAttribute('data-reduced-motion', settings.reducedMotion ? 'true' : 'false');
         } catch (e) {}
     }
     // Inject a default rem-scaling rule before any game CSS so games that don't
@@ -248,7 +351,19 @@
             style.id = 'arcade-sdk-base-style';
             style.textContent =
                 ':root{font-size:calc(100% * var(--font-scale, 1));' +
-                '--motion-scale:1;--audio-volume:1;}';
+                '--motion-scale:1;--audio-volume:1;}\n' +
+                // Reduced-motion kill switch: when the launcher (or OS)
+                // requests reduced motion, CSS animations/transitions
+                // collapse to a single instant frame — no per-game calc()
+                // rewrites needed. A game that manages motion itself opts
+                // out by setting data-arcade-keep-motion on <html>.
+                ':root[data-reduced-motion="true"]:not([data-arcade-keep-motion]) *,' +
+                ':root[data-reduced-motion="true"]:not([data-arcade-keep-motion]) *::before,' +
+                ':root[data-reduced-motion="true"]:not([data-arcade-keep-motion]) *::after{' +
+                'animation-duration:.001ms!important;' +
+                'animation-iteration-count:1!important;' +
+                'transition-duration:.001ms!important;' +
+                'scroll-behavior:auto!important;}';
             head.insertBefore(style, head.firstChild);
         } catch (e) {}
     }
@@ -300,6 +415,60 @@
         } catch (e) {}
     }
 
+    // ─── Blob transfer (over Arcade.peer.send) ────────────────────
+    // Large payloads ride the ordered/reliable data channel as a sequence of
+    // base64 chunks wrapped in { __arcadeBlob: {...} } envelopes. Chunk
+    // payloads are intercepted before onMessage listeners, so games only see
+    // whole blobs via onBlob.
+    var BLOB_CHUNK_BYTES = 48 * 1024;
+    var BLOB_MAX_CHUNKS = 2048; // ~96 MB — reject anything claiming more
+    var blobSendCounter = 0;
+    var blobRx = {}; // id -> { chunks, received, total, mime, name }
+
+    function bytesToBase64(bytes) {
+        var bin = '';
+        for (var i = 0; i < bytes.length; i += 0x8000) {
+            bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+        }
+        return btoa(bin);
+    }
+    function base64ToBytes(b64) {
+        var bin = atob(b64);
+        var out = new Uint8Array(bin.length);
+        for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+        return out;
+    }
+    function handleBlobChunk(meta, fromPeer) {
+        if (!meta || typeof meta.id !== 'string' || meta.id.length > 64) return;
+        if (typeof meta.seq !== 'number' || typeof meta.total !== 'number') return;
+        if (meta.total < 1 || meta.total > BLOB_MAX_CHUNKS
+                || meta.seq < 0 || meta.seq >= meta.total || meta.seq !== Math.floor(meta.seq)) return;
+        var st = blobRx[meta.id];
+        if (!st) {
+            st = blobRx[meta.id] = {
+                chunks: new Array(meta.total),
+                received: 0,
+                total: meta.total,
+                mime: typeof meta.mime === 'string' ? meta.mime.slice(0, 128) : '',
+                name: typeof meta.name === 'string' ? meta.name.slice(0, 128) : ''
+            };
+        }
+        if (st.total !== meta.total || st.chunks[meta.seq] !== undefined) return;
+        var bytes;
+        try { bytes = base64ToBytes(String(meta.bytes || '')); }
+        catch (e) { delete blobRx[meta.id]; return; }
+        st.chunks[meta.seq] = bytes;
+        st.received++;
+        if (st.received === st.total) {
+            delete blobRx[meta.id];
+            var blob;
+            try { blob = new Blob(st.chunks, { type: st.mime }); } catch (e) { return; }
+            fire(listeners.peerBlob, blob, {
+                name: st.name, size: blob.size, mime: st.mime, fromPeer: fromPeer, id: meta.id
+            });
+        }
+    }
+
     // ─── postMessage protocol ─────────────────────────────────────
     function postToParent(msg) {
         if (!framed) return;
@@ -332,14 +501,43 @@
                 framed = true;
                 parentOrigin = e.origin;
                 setPeerStatus(typeof data.peerStatus === 'string' ? data.peerStatus : 'idle');
+                if (Array.isArray(data.peers)) {
+                    for (var pi = 0; pi < data.peers.length; pi++) {
+                        var p = data.peers[pi];
+                        if (p && typeof p === 'object') noteRemotePeer(p.deviceId, p.name);
+                    }
+                }
                 if (applySettings(data.settings)) fire(listeners.settingsChange, snapshotSettings());
                 resolveReady();
                 break;
             case 'arcade:peer.message':
+                if (data.payload && typeof data.payload === 'object' && data.payload.__arcadeBlob) {
+                    handleBlobChunk(data.payload.__arcadeBlob, data.fromPeer);
+                    break;
+                }
                 fire(listeners.peerMessage, data.payload, data.fromPeer);
                 break;
             case 'arcade:peer.status':
                 if (typeof data.status === 'string') setPeerStatus(data.status);
+                break;
+            case 'arcade:peer.identity':
+                noteRemotePeer(data.deviceId, data.name);
+                break;
+            case 'arcade:peer.ready': {
+                var readyRec = noteRemotePeer(data.deviceId, data.name);
+                fire(listeners.peerReady,
+                    readyRec ? { deviceId: readyRec.deviceId, name: readyRec.name } : {});
+                break;
+            }
+            case 'arcade:peer.queue':
+                if (typeof data.depth === 'number' && data.depth >= 0) {
+                    peerQueueSnapshot = {
+                        depth: data.depth,
+                        limit: typeof data.limit === 'number' ? data.limit : 0,
+                        overflowed: data.overflowed === true
+                    };
+                    fire(listeners.peerQueue, peerApi.queue());
+                }
                 break;
             case 'arcade:state.replaced':
                 fire(listeners.stateReplaced);
@@ -356,10 +554,12 @@
                 if (applySettings(data.settings)) fire(listeners.settingsChange, snapshotSettings());
                 break;
             case 'arcade:lifecycle.suspend':
-                fire(listeners.suspend);
+                launcherSuspended = true;
+                recomputeSuspended();
                 break;
             case 'arcade:lifecycle.resume':
-                fire(listeners.resume);
+                launcherSuspended = false;
+                recomputeSuspended();
                 break;
         }
     }
@@ -376,20 +576,43 @@
         }
     }
 
-    // ─── Service-worker collision warning ─────────────────────────
+    // ─── Service-worker collision check ───────────────────────────
+    // Inspects the origin's shared CacheStorage for launcher-root assets
+    // sitting in a NON-launcher cache — the definitive symptom of a game SW
+    // caching files outside its own /<gameId>/ scope. (A workerStart-based
+    // probe can't tell a scope-filtered pass-through from actual caching:
+    // every request from a controlled page routes through the SW.)
+    // The launcher's own cache names start with 'paul-arcade-'.
+    var LAUNCHER_CACHE_PREFIX = 'paul-arcade-';
+    var LAUNCHER_ROOT_ASSETS = ['/', '/index.html', '/arcade-sdk.js', '/arcade-p2p.js', '/styles.css'];
     function checkSWCollision() {
         try {
-            if (!navigator.serviceWorker || !navigator.serviceWorker.controller) return;
-            var script = document.currentScript;
-            var url = script ? script.src : null;
-            if (!url || url.indexOf('arcade-sdk.js') === -1) return;
-            var entries = (performance.getEntriesByName ? performance.getEntriesByName(url) : []);
-            if (entries && entries.length > 0 && entries[0].workerStart > 0) {
-                console.warn(
-                    '[Arcade SDK] arcade-sdk.js was served from a service worker. ' +
-                    'Games must NOT cache the SDK in their own SW — see GAME_INTEGRATION.md §7.'
-                );
-            }
+            if (typeof caches === 'undefined' || !caches.keys) return;
+            caches.keys().then(function (names) {
+                var offenders = [];
+                var work = [];
+                names.forEach(function (name) {
+                    if (name.indexOf(LAUNCHER_CACHE_PREFIX) === 0) return;
+                    work.push(caches.open(name).then(function (cache) {
+                        return Promise.all(LAUNCHER_ROOT_ASSETS.map(function (path) {
+                            return cache.match(path).then(function (hit) {
+                                if (hit) offenders.push('"' + name + '" caches ' + path);
+                            }, function () {});
+                        }));
+                    }, function () {}));
+                });
+                return Promise.all(work).then(function () {
+                    if (!offenders.length) return;
+                    var msg = '[Arcade SDK] A game service worker cached launcher-root assets: '
+                        + offenders.join('; ')
+                        + '. Scope your SW to /<gameId>/ and never cache the SDK or other '
+                        + 'launcher files — see GAME_INTEGRATION.md §10.';
+                    console.error(msg);
+                    if (devModeOn()) {
+                        showFallbackToast('SW scope violation — this game\'s service worker caches launcher files (see console)', 'error', 8000);
+                    }
+                });
+            }).catch(function () {});
         } catch (e) {}
     }
 
@@ -406,6 +629,8 @@
         honorDevQueryParam();
         injectBaseStyle();
         hydrateSettingsFromStorage();
+        applySuspendedToDOM();
+        installPageLifecycle();
         try { window.addEventListener('storage', onStorage); } catch (e) {}
         // Keep the cached settings + DOM hooks in sync when global keys change
         // in another iframe (same-origin storage events fire automatically).
@@ -445,17 +670,42 @@
     }
 
     // ─── State (per-game) ─────────────────────────────────────────
+    // Save-export governance: keys written with { exportable: false } are
+    // listed (by full localStorage key) in arcade.v1.<gameId>._noExport; the
+    // launcher's export skips them. For bulky local-only data (telemetry,
+    // caches) that should never inflate every save file.
+    function noExportListKey() { return gameKey('_noExport'); }
+    function setKeyExportable(fullKey, exportable) {
+        var list = readJSON(noExportListKey());
+        if (!Array.isArray(list)) list = [];
+        var i = list.indexOf(fullKey);
+        if (!exportable && i === -1) {
+            list.push(fullKey);
+            writeJSON(noExportListKey(), list);
+        } else if (exportable && i !== -1) {
+            list.splice(i, 1);
+            writeJSON(noExportListKey(), list.length ? list : undefined);
+        }
+    }
     var stateApi = {
         get: function (key) { ensureGameId(); return readJSON(gameKey(key)); },
-        set: function (key, value) {
+        // opts.exportable (boolean, sticky): false excludes this key from
+        // launcher save files until a later set passes { exportable: true }.
+        set: function (key, value, opts) {
             ensureGameId();
             var k = gameKey(key);
-            if (writeJSON(k, value)) fireKeyChange(k, value);
+            if (writeJSON(k, value)) {
+                if (opts && typeof opts.exportable === 'boolean') {
+                    setKeyExportable(k, opts.exportable);
+                }
+                fireKeyChange(k, value);
+            }
         },
         remove: function (key) {
             ensureGameId();
             var k = gameKey(key);
             removeKey(k);
+            setKeyExportable(k, true); // drop any stale no-export entry
             fireKeyChange(k, null);
         },
         // Read with defaults. If nothing is stored, write defaults. If a value
@@ -495,6 +745,36 @@
                 return false;
             }
             writeJSON(sentinel, true);
+            return true;
+        },
+        // Adopt a legacy (non-namespaced) localStorage key into the game's
+        // namespace: read → namespaced write → delete original. Error-safe:
+        // the original is only deleted after a successful write, and an
+        // existing namespaced value is never clobbered (the legacy key is
+        // just cleaned up). With { json: false } the raw string is stored
+        // as a string value instead of being JSON.parsed first.
+        // Returns true if a legacy value was found and handled.
+        adopt: function (legacyKey, newKey, opts) {
+            ensureGameId();
+            if (typeof legacyKey !== 'string' || !legacyKey) {
+                throw new Error('Arcade.state.adopt: legacyKey must be a non-empty string');
+            }
+            var targetKey = (typeof newKey === 'string' && newKey) ? newKey : legacyKey;
+            var raw;
+            try { raw = localStorage.getItem(legacyKey); } catch (e) { return false; }
+            if (raw === null) return false;
+            var k = gameKey(targetKey);
+            var existing;
+            try { existing = localStorage.getItem(k); } catch (e) { existing = null; }
+            if (existing === null) {
+                var value = raw;
+                if (!opts || opts.json !== false) {
+                    try { value = JSON.parse(raw); } catch (e) { /* keep raw string */ }
+                }
+                if (!writeJSON(k, value)) return false; // quota — keep the original
+                fireKeyChange(k, value);
+            }
+            removeKey(legacyKey);
             return true;
         },
         onChange: function (key, fn) {
@@ -555,7 +835,84 @@
             postToParent({ type: 'arcade:peer.send', payload: payload });
             return true;
         },
-        onMessage: makeSubscriber(listeners.peerMessage)
+        onMessage: makeSubscriber(listeners.peerMessage),
+
+        // This device's stable identity — the same deviceId the launcher
+        // uses for known peers / auto-reconnect. null until the launcher's
+        // P2P layer has generated one (i.e. before the first ever pairing).
+        self: function () {
+            try {
+                var id = localStorage.getItem(KEY_PREFIX + '_meta.deviceId');
+                if (!id) return null;
+                var name = localStorage.getItem(KEY_PREFIX + '_meta.deviceName');
+                return { deviceId: id, name: name || 'My device' };
+            } catch (e) { return null; }
+        },
+        // Most recently seen remote device ({ deviceId, name }) or null.
+        remote: function () {
+            var best = null;
+            for (var k in remotePeers) {
+                if (!best || remotePeers[k].at > best.at) best = remotePeers[k];
+            }
+            return best ? { deviceId: best.deviceId, name: best.name } : null;
+        },
+        // Fires when the remote device has THIS game mounted and listening —
+        // fn({ deviceId, name }). May fire more than once per session (both
+        // sides announce); treat it as an idempotent "peer is ready" signal.
+        // Replaces the hand-rolled hello/echo handshake games used to need.
+        onReady: makeSubscriber(listeners.peerReady),
+
+        // Send a Blob/File to the peer, chunked over the ordered channel.
+        // Resolves { id, chunks, size } after the last chunk is handed to
+        // the transport; opts.onProgress(fraction, sent, total) per chunk.
+        sendBlob: function (blob, opts) {
+            if (!blob || typeof blob.arrayBuffer !== 'function') {
+                return Promise.reject(new Error('Arcade.peer.sendBlob: pass a Blob or File'));
+            }
+            var onProgress = (opts && typeof opts.onProgress === 'function') ? opts.onProgress : null;
+            var name = (opts && typeof opts.name === 'string' && opts.name) ? opts.name
+                : (typeof blob.name === 'string' ? blob.name : '');
+            return blob.arrayBuffer().then(function (buf) {
+                var bytes = new Uint8Array(buf);
+                var total = Math.max(1, Math.ceil(bytes.length / BLOB_CHUNK_BYTES));
+                if (total > BLOB_MAX_CHUNKS) {
+                    throw new Error('Arcade.peer.sendBlob: blob too large ('
+                        + bytes.length + ' bytes; max ' + (BLOB_MAX_CHUNKS * BLOB_CHUNK_BYTES) + ')');
+                }
+                var id = 'b' + (++blobSendCounter) + '-' + Date.now().toString(36);
+                for (var seq = 0; seq < total; seq++) {
+                    var chunk = bytes.subarray(seq * BLOB_CHUNK_BYTES, (seq + 1) * BLOB_CHUNK_BYTES);
+                    var ok = peerApi.send({
+                        __arcadeBlob: {
+                            id: id, seq: seq, total: total, size: bytes.length,
+                            mime: blob.type || '', name: name.slice(0, 128),
+                            bytes: bytesToBase64(chunk)
+                        }
+                    });
+                    if (!ok) throw new Error('Arcade.peer.sendBlob: no live connection');
+                    if (onProgress) {
+                        try { onProgress((seq + 1) / total, seq + 1, total); } catch (e) {}
+                    }
+                }
+                return { id: id, chunks: total, size: bytes.length };
+            });
+        },
+        // fn(blob, { name, size, mime, fromPeer, id }) once a full blob has
+        // been reassembled.
+        onBlob: makeSubscriber(listeners.peerBlob),
+
+        // Transport replay-queue visibility: { depth, limit, overflowed }.
+        // depth grows while 'interrupted' (sends queue for replay); when
+        // overflowed is true the oldest unacknowledged messages were dropped
+        // and the game should resync authoritative state after recovery.
+        queue: function () {
+            return {
+                depth: peerQueueSnapshot.depth,
+                limit: peerQueueSnapshot.limit,
+                overflowed: peerQueueSnapshot.overflowed
+            };
+        },
+        onQueue: makeSubscriber(listeners.peerQueue)
     };
 
     // ─── UI ───────────────────────────────────────────────────────
@@ -606,7 +963,12 @@
     // ─── Scores (per category) ────────────────────────────────────
     function scoresKey(category) { return gameKey('scores.' + category); }
     var scoresApi = {
-        add: function (category, entry) {
+        // opts.order: 'desc' (default — higher is better) or 'asc' (lower is
+        // better: times, move counts). Pass the same order on every add for a
+        // category; the whole list is re-sorted with the order given here.
+        // entry.key (optional string): a label for keyed bests — e.g. a board
+        // code — queried via scores.best(category, key).
+        add: function (category, entry, opts) {
             ensureGameId();
             if (typeof category !== 'string' || !category) {
                 throw new Error('Arcade.scores.add: category required');
@@ -615,6 +977,7 @@
                     || typeof entry.score !== 'number' || !isFinite(entry.score)) {
                 throw new Error('Arcade.scores.add: entry.score must be a finite number');
             }
+            var order = (opts && opts.order === 'asc') ? 'asc' : 'desc';
             var record = {
                 score: entry.score,
                 ts: typeof entry.ts === 'number' ? entry.ts : Date.now()
@@ -625,6 +988,9 @@
                 var pn = playerApi.name();
                 if (pn) record.name = pn;
             }
+            if (typeof entry.key === 'string' && entry.key) {
+                record.key = entry.key.slice(0, 64);
+            }
             if (entry.meta && typeof entry.meta === 'object') {
                 record.meta = entry.meta;
             }
@@ -632,7 +998,9 @@
             var list = readJSON(k);
             if (!Array.isArray(list)) list = [];
             list.push(record);
-            list.sort(function (a, b) { return b.score - a.score; });
+            list.sort(function (a, b) {
+                return order === 'asc' ? a.score - b.score : b.score - a.score;
+            });
             if (list.length > SCORES_CAP) list.length = SCORES_CAP;
             writeJSON(k, list);
             fireKeyChange(k, list);
@@ -646,9 +1014,21 @@
             var limit = (opts && typeof opts.limit === 'number') ? opts.limit : SCORES_DEFAULT_LIMIT;
             return list.slice(0, Math.max(0, limit));
         },
-        best: function (category) {
-            var l = scoresApi.list(category, { limit: 1 });
-            return l.length ? l[0] : null;
+        // best(category) → top entry. best(category, key) → best entry whose
+        // record.key matches (the list is stored best-first, so the first
+        // match wins under either sort order).
+        best: function (category, key) {
+            if (key === undefined) {
+                var l = scoresApi.list(category, { limit: 1 });
+                return l.length ? l[0] : null;
+            }
+            ensureGameId();
+            var list = readJSON(scoresKey(category));
+            if (!Array.isArray(list)) return null;
+            for (var i = 0; i < list.length; i++) {
+                if (list[i] && list[i].key === key) return list[i];
+            }
+            return null;
         },
         clear: function (category) {
             ensureGameId();
@@ -809,19 +1189,167 @@
         };
         return tracker;
     }
+    // ─── Suspend-aware scheduling ─────────────────────────────────
+    // setTimeout/setInterval variants that freeze while the game is
+    // suspended (remaining time is preserved and re-armed on resume) and
+    // cancel themselves when the launcher imports a save (stateReplaced) —
+    // a callback armed against pre-import state must not fire against
+    // post-import state.
+    function nowMs() {
+        return (typeof performance !== 'undefined' && performance.now)
+            ? performance.now() : Date.now();
+    }
+    function createManagedTimer(fn, ms, repeat) {
+        if (typeof fn !== 'function') {
+            throw new Error('Arcade.session.' + (repeat ? 'setInterval' : 'setTimeout') + ': fn must be a function');
+        }
+        var interval = Math.max(0, Number(ms) || 0);
+        var remaining = interval;
+        var id = null;
+        var armedAt = null;
+        var done = false;
+
+        function arm() {
+            armedAt = nowMs();
+            id = setTimeout(fireIt, remaining);
+        }
+        function disarm() {
+            if (id === null) return;
+            clearTimeout(id);
+            id = null;
+            remaining = Math.max(0, remaining - (nowMs() - armedAt));
+        }
+        function fireIt() {
+            id = null;
+            if (repeat) {
+                remaining = interval;
+                try { fn(); } catch (e) {}
+                if (!done && !suspendedNow) arm();
+            } else {
+                done = true;
+                detach();
+                try { fn(); } catch (e) {}
+            }
+        }
+        function detach() {
+            unsubSuspend();
+            unsubResume();
+            unsubReplaced();
+        }
+        var unsubSuspend = makeSubscriber(listeners.suspend)(function () {
+            if (!done) disarm();
+        });
+        var unsubResume = makeSubscriber(listeners.resume)(function () {
+            if (!done && id === null) arm();
+        });
+        var unsubReplaced = makeSubscriber(listeners.stateReplaced)(function () {
+            if (done) return;
+            done = true;
+            if (id !== null) { clearTimeout(id); id = null; }
+            detach();
+        });
+
+        if (!suspendedNow) arm(); // created while suspended → starts frozen
+
+        return {
+            cancel: function () {
+                if (done) return;
+                done = true;
+                if (id !== null) { clearTimeout(id); id = null; }
+                detach();
+            }
+        };
+    }
+
     var sessionApi = {
         start: function (options) {
             ensureGameId();
             return createSessionTimer(options);
+        },
+        setTimeout: function (fn, ms) {
+            ensureGameId();
+            return createManagedTimer(fn, ms, false);
+        },
+        setInterval: function (fn, ms) {
+            ensureGameId();
+            return createManagedTimer(fn, ms, true);
         }
     };
+
+    // ─── Managed rAF loop ─────────────────────────────────────────
+    // Every canvas game re-implements "cancel rAF on suspend, re-request on
+    // resume" and someone always gets one leg wrong. Arcade.loop(fn) owns
+    // that: fn(deltaMs, ts) runs once per animation frame while started and
+    // not suspended; suspended time never appears in a delta (the first
+    // frame after resume gets delta 0).
+    function createLoop(fn) {
+        if (typeof fn !== 'function') {
+            throw new Error('Arcade.loop: fn must be a function');
+        }
+        var rafId = null;
+        var running = false;   // caller intent — survives suspend/resume
+        var lastTs = null;
+
+        function schedule() {
+            if (rafId === null && running && !suspendedNow) {
+                rafId = requestAnimationFrame(frame);
+            }
+        }
+        function frame(ts) {
+            rafId = null;
+            if (!running || suspendedNow) return;
+            var delta = lastTs === null ? 0 : ts - lastTs;
+            lastTs = ts;
+            schedule(); // before fn, so a throwing frame doesn't kill the loop
+            fn(delta, ts);
+        }
+        var unsubSuspend = makeSubscriber(listeners.suspend)(function () {
+            if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+            lastTs = null;
+        });
+        var unsubResume = makeSubscriber(listeners.resume)(function () {
+            lastTs = null;
+            schedule(); // no-op unless start() was called and stop() wasn't
+        });
+
+        var loop = {
+            start: function () { running = true; lastTs = null; schedule(); return loop; },
+            stop: function () {
+                running = false;
+                lastTs = null;
+                if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+                return loop;
+            },
+            // One frame on demand — for dirty-flag renderers that are
+            // normally stopped. If the loop is started, this is just an
+            // immediate extra scheduling opportunity.
+            kick: function () {
+                if (rafId !== null || suspendedNow) return loop;
+                rafId = requestAnimationFrame(function (ts) {
+                    rafId = null;
+                    if (suspendedNow) return;
+                    if (running) { frame(ts); return; }
+                    fn(0, ts);
+                });
+                return loop;
+            },
+            running: function () { return running; },
+            dispose: function () {
+                loop.stop();
+                unsubSuspend();
+                unsubResume();
+                return null;
+            }
+        };
+        return loop;
+    }
 
     // ─── Public surface ───────────────────────────────────────────
     var api = {
         init: init,
         get ready() { return readyPromise; },
         get context() {
-            return { framed: framed, version: VERSION, gameId: gameId };
+            return { framed: framed, version: VERSION, gameId: gameId, suspended: suspendedNow };
         },
         state: stateApi,
         global: globalApi,
@@ -832,6 +1360,7 @@
         scores: scoresApi,
         stats: statsApi,
         session: sessionApi,
+        loop: function (fn) { ensureGameId(); return createLoop(fn); },
         onSuspend: makeSubscriber(listeners.suspend),
         onResume: makeSubscriber(listeners.resume),
         onStateReplaced: makeSubscriber(listeners.stateReplaced),

@@ -383,14 +383,6 @@
                     <p class="launcher-btn__subtitle">Cozy Logic Puzzle</p>
                 </div>
             </a>
-            <!-- TEMP local-dev only — not yet a real release, remove before pushing -->
-            <a href="https://paulgibeault.github.io/p2p-chat/" class="launcher-btn" data-game-id="p2p-chat" style="animation-delay: 0.6s">
-                <div class="launcher-btn__image-wrap"><img class="launcher-btn__image" src="images/p2p-chat.png" alt="P2P Chat"></div>
-                <div class="launcher-btn__body">
-                    <h3 class="launcher-btn__name">P2P Chat</h3>
-                    <p class="launcher-btn__subtitle">Multiplayer Demo</p>
-                </div>
-            </a>
         </div>
     </div>
 
@@ -419,6 +411,36 @@
 </div>
 
 <script>
+    // ==========================================
+    // window.__arcade — the one cross-controller surface.
+    // Constructed exactly once, here, with every slot listed so the shape is
+    // greppable in one place. The controller IIFEs below (and the Known
+    // Peers module script at the bottom of the page) fill in their slots as
+    // they run; consumers null-check because some slots (p2p) stay empty
+    // until the lazy bridge loads.
+    // ==========================================
+    window.__arcade = {
+        // fontControl
+        getFontScale: null,
+        // knownPeers module (bottom of page)
+        renderKnownPeers: null,
+        renamePeer: null,
+        // appMenu
+        launcherMenu: null,
+        closeLauncherMenu: null,
+        // gameViewController
+        viewGame: null,
+        viewLauncher: null,
+        // platformController
+        hideGameView: null,
+        applyPoolCap: null,
+        showGame: null,
+        openMultiplayerPanel: null,
+        loadP2P: null,
+        broadcastSettings: null,
+        p2p: null
+    };
+
     // ==========================================
     // STARFIELD — Dense animated twinkling stars
     // ==========================================
@@ -503,7 +525,6 @@
         }
         bind('menu-font-decrease', 'menu-font-increase', 'menu-font-reset');
 
-        window.__arcade = window.__arcade || {};
         window.__arcade.getFontScale = function () { return scale; };
     })();
 
@@ -552,172 +573,6 @@
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
         });
-    })();
-
-    // ==========================================
-    // KNOWN PEERS — name, rename, delete previously-connected devices.
-    // Pure localStorage CRUD (arcade.v1._meta.deviceName / .knownPeers) so
-    // the panel is instant and doesn't force-load the P2P bridge module. The
-    // bridge (arcade-p2p.js) is the only writer of NEW entries — it records
-    // one on every identity handshake once a real connection opens — and
-    // pushes a live refresh here via ArcadeP2P.onPeerIdentity (wired in the
-    // platformController's loadP2P(), since that's the only place the bridge
-    // is ever imported).
-    // ==========================================
-    (function knownPeersController() {
-        const DEVICE_NAME_KEY = 'arcade.v1._meta.deviceName';
-        const KNOWN_PEERS_KEY = 'arcade.v1._meta.knownPeers';
-
-        const nameInput = document.getElementById('menu-device-name-input');
-        const heading = document.getElementById('menu-known-peers-heading');
-        const list = document.getElementById('menu-known-peers-list');
-        if (!nameInput || !heading || !list) return;
-
-        function readKnownPeers() {
-            try {
-                const raw = localStorage.getItem(KNOWN_PEERS_KEY);
-                const obj = raw ? JSON.parse(raw) : null;
-                return (obj && typeof obj === 'object') ? obj : {};
-            } catch (e) { return {}; }
-        }
-        function writeKnownPeers(map) {
-            try { localStorage.setItem(KNOWN_PEERS_KEY, JSON.stringify(map)); } catch (e) {}
-        }
-        function renamePeer(id, name) {
-            const trimmed = String(name || '').trim().slice(0, 60);
-            if (!trimmed) return false;
-            const map = readKnownPeers();
-            if (!map[id]) return false;
-            map[id].name = trimmed;
-            writeKnownPeers(map);
-            render();
-            return true;
-        }
-        function relativeTime(iso) {
-            const then = Date.parse(iso);
-            if (!isFinite(then)) return 'a while ago';
-            const mins = Math.round((Date.now() - then) / 60000);
-            if (mins < 1) return 'just now';
-            if (mins < 60) return mins + 'm ago';
-            const hours = Math.round(mins / 60);
-            if (hours < 24) return hours + 'h ago';
-            return Math.round(hours / 24) + 'd ago';
-        }
-
-        function render() {
-            const known = readKnownPeers();
-            const ids = Object.keys(known).sort((a, b) =>
-                Date.parse(known[b].lastConnectedAt || 0) - Date.parse(known[a].lastConnectedAt || 0));
-            list.innerHTML = '';
-            heading.hidden = ids.length === 0;
-            if (ids.length === 0) {
-                const empty = document.createElement('div');
-                empty.className = 'launcher-menu__peer-empty';
-                empty.textContent = 'Connect to a device to remember it here.';
-                list.appendChild(empty);
-                return;
-            }
-            for (const id of ids) {
-                const peer = known[id];
-                const displayName = peer.name || 'Unnamed device';
-
-                const row = document.createElement('div');
-                row.className = 'launcher-menu__peer-row';
-                row.tabIndex = 0;
-                row.setAttribute('role', 'button');
-                row.setAttribute('aria-label', 'Reconnect to ' + displayName);
-                row.title = 'Reconnect — get a fresh invite code to show or send';
-                row.addEventListener('click', () => {
-                    // One-tap reconnect: skip the Host/Join choice and put a
-                    // fresh invite code on screen immediately. The other
-                    // device joins by scanning it or tapping the sent link.
-                    if (window.__arcade.openMultiplayerPanel) window.__arcade.openMultiplayerPanel({ mode: 'host' });
-                });
-                row.addEventListener('keydown', (e) => {
-                    if (e.key !== 'Enter' && e.key !== ' ') return;
-                    e.preventDefault();
-                    row.click();
-                });
-
-                const info = document.createElement('div');
-                info.className = 'launcher-menu__peer-info';
-                const nameEl = document.createElement('span');
-                nameEl.className = 'launcher-menu__peer-name';
-                nameEl.textContent = displayName;
-                const metaEl = document.createElement('span');
-                metaEl.className = 'launcher-menu__peer-meta';
-                metaEl.textContent = 'Last connected ' + relativeTime(peer.lastConnectedAt);
-                info.appendChild(nameEl);
-                info.appendChild(metaEl);
-
-                const autoBtn = document.createElement('button');
-                autoBtn.type = 'button';
-                autoBtn.className = 'launcher-menu__peer-btn';
-                const autoOn = peer.autoReconnect === true;
-                autoBtn.textContent = autoOn ? '🔁' : '🚫';
-                autoBtn.title = autoOn
-                    ? 'Auto-reconnect is ON — tap to turn off'
-                    : 'Auto-reconnect is OFF — tap to turn on (takes effect next time you connect)';
-                autoBtn.setAttribute('aria-label', (autoOn ? 'Disable' : 'Enable') + ' auto-reconnect for ' + displayName);
-                autoBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    loadP2P().then((b) => autoOn ? b.disableAutoReconnect(id) : b.enableAutoReconnect(id))
-                        .then(() => render()).catch(() => {});
-                });
-
-                const renameBtn = document.createElement('button');
-                renameBtn.type = 'button';
-                renameBtn.className = 'launcher-menu__peer-btn';
-                renameBtn.title = 'Rename';
-                renameBtn.setAttribute('aria-label', 'Rename ' + displayName);
-                renameBtn.textContent = '✎';
-                renameBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    const next = window.prompt('Rename this connection:', displayName);
-                    if (next === null) return;
-                    renamePeer(id, next);
-                });
-
-                const deleteBtn = document.createElement('button');
-                deleteBtn.type = 'button';
-                deleteBtn.className = 'launcher-menu__peer-btn';
-                deleteBtn.title = 'Delete';
-                deleteBtn.setAttribute('aria-label', 'Delete ' + displayName);
-                deleteBtn.textContent = '✕';
-                deleteBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    if (!window.confirm('Forget "' + displayName + '"?')) return;
-                    const map = readKnownPeers();
-                    delete map[id];
-                    writeKnownPeers(map);
-                    render();
-                });
-
-                row.appendChild(info);
-                row.appendChild(autoBtn);
-                row.appendChild(renameBtn);
-                row.appendChild(deleteBtn);
-                list.appendChild(row);
-            }
-        }
-
-        try { nameInput.value = localStorage.getItem(DEVICE_NAME_KEY) || ''; } catch (e) {}
-        nameInput.addEventListener('change', () => {
-            const trimmed = nameInput.value.trim().slice(0, 60);
-            try {
-                if (trimmed) localStorage.setItem(DEVICE_NAME_KEY, trimmed);
-                else localStorage.removeItem(DEVICE_NAME_KEY);
-            } catch (e) {}
-            nameInput.value = trimmed;
-        });
-        nameInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') { e.preventDefault(); nameInput.blur(); }
-        });
-
-        render();
-        window.__arcade = window.__arcade || {};
-        window.__arcade.renderKnownPeers = render; // live-refresh hook for the P2P bridge
-        window.__arcade.renamePeer = renamePeer;    // used to accept/edit a new-connection's suggested name
     })();
 
     // ==========================================
@@ -773,7 +628,6 @@
             if (item && !item.disabled) close();
         });
 
-        window.__arcade = window.__arcade || {};
         window.__arcade.launcherMenu = menu;
         window.__arcade.closeLauncherMenu = close;
     })();
@@ -781,7 +635,6 @@
     // ==========================================
     // GAME VIEW CONTROLLER — Show/hide fullscreen game iframe
     // ==========================================
-    window.__arcade = window.__arcade || {};
     (function gameViewController() {
         const viewLauncher = document.getElementById('view-launcher');
         const viewGame = document.getElementById('view-game');
@@ -805,6 +658,18 @@
         // Anything outside this namespace is rejected on import, so an imported
         // file can never poison non-arcade keys on the origin's localStorage.
         const KEY_RE = /^arcade\.v1\.[a-z0-9_-]+(\.[a-zA-Z0-9_.-]+)+$/;
+        // Dunder path segments are rejected outright: keys are inert in
+        // localStorage, but game code walks key paths and merges stored
+        // values, so a save file must never smuggle prototype-polluting
+        // segments past the allowlist.
+        const DUNDER_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
+        function isSafeArcadeKey(k) {
+            if (!KEY_RE.test(k)) return false;
+            for (const seg of k.split('.')) {
+                if (DUNDER_SEGMENTS.has(seg)) return false;
+            }
+            return true;
+        }
         const SAVE_FORMAT = 'pauls-arcade-save';
         const SAVE_SCHEMA = 1;
         const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
@@ -845,6 +710,10 @@
         // context, and WebGL context. Persistent state lives in
         // arcade.v1.<gameId>.* localStorage and survives.
         const pool = new Map(); // gameId -> { iframe, name }
+        // Games that completed the arcade:hello handshake — i.e. games whose
+        // SDK is actually listening. Presence announcements to the remote
+        // launcher are made only for these.
+        const helloedGames = new Set();
         let activeGameId = null;
         const POOL_CAP_DEFAULT = 2;
 
@@ -878,6 +747,7 @@
                 try { entry.iframe.src = 'about:blank'; } catch (e) {}
                 entry.iframe.remove();
                 pool.delete(lruId);
+                helloedGames.delete(lruId);
             }
         }
 
@@ -961,6 +831,12 @@
                 let prevPeerStatus = 'idle';
                 ArcadeP2P.onStatus((status) => {
                     broadcast({ type: 'arcade:peer.status', status });
+                    // Queue visibility rides along with status transitions —
+                    // games mostly care as an 'interrupted' episode starts
+                    // (depth begins growing) and ends (did it overflow?).
+                    if (status === 'connected' || status === 'interrupted') {
+                        broadcast({ type: 'arcade:peer.queue', ...ArcadeP2P.queueSnapshot() });
+                    }
                     const tag = document.getElementById('menu-multiplayer-status');
                     if (tag) {
                         tag.hidden = status === 'idle';
@@ -970,10 +846,24 @@
                     }
                     if (status === 'connected') {
                         showToast(prevPeerStatus === 'interrupted' ? 'Multiplayer reconnected!' : 'Multiplayer connected!');
+                        // Tell the other launcher which handshaken games are
+                        // mounted here, so its games get a ready signal.
+                        for (const gid of pool.keys()) {
+                            if (helloedGames.has(gid)) ArcadeP2P.announceGame(gid);
+                        }
                     } else if (status === 'interrupted') {
                         showToast('Multiplayer connection interrupted — reconnecting…');
                     }
                     prevPeerStatus = status;
+                });
+                ArcadeP2P.onPresence(({ gameId, deviceId, name, kind }) => {
+                    // The remote launcher has <gameId> mounted and listening.
+                    // If we do too, hand that game a ready event — and answer
+                    // a first announcement with an ack so the remote's game
+                    // learns about us without another round.
+                    if (!pool.has(gameId) || !helloedGames.has(gameId)) return;
+                    postToIframe(gameId, { type: 'arcade:peer.ready', deviceId, name });
+                    if (kind === 'presence') ArcadeP2P.announceGame(gameId, true);
                 });
                 ArcadeP2P.onPeerIdentity(({ deviceId, name, remoteName, isNew, fingerprintChanged }) => {
                     // Identity-pinning notice (TOFU): a changed device
@@ -982,6 +872,18 @@
                     // neither applies, the user should re-verify in person.
                     if (fingerprintChanged) {
                         showToast('⚠️ ' + name + "'s device identity changed since last time. Normal after ~a month or a browser reset — if unexpected, verify in person.", { error: true });
+                        // The bridge refuses to silently rebind the pairing
+                        // secret on a changed fingerprint — auto-reconnect for
+                        // this peer stays parked until the user re-trusts.
+                        if (ArcadeP2P.autoReconnectState(deviceId) === true) {
+                            const keep = window.confirm(
+                                '"' + name + '" reconnected with a changed device identity.\n\n' +
+                                'This is normal after ~a month (browser certificate renewal) or a browser ' +
+                                'reset. If neither applies, someone could be impersonating their device.\n\n' +
+                                'Keep reconnecting to this device automatically?');
+                            if (keep) ArcadeP2P.enableAutoReconnect(deviceId);
+                            else ArcadeP2P.disableAutoReconnect(deviceId);
+                        }
                     }
                     // Arrives a beat after 'connected' (one more data-channel
                     // round trip) — swap the generic tag for the peer's
@@ -991,6 +893,9 @@
                         tag.textContent = name;
                     }
                     if (window.__arcade.renderKnownPeers) window.__arcade.renderKnownPeers();
+                    // Let mounted games update their peer roster
+                    // (Arcade.peer.remote() and friends).
+                    broadcast({ type: 'arcade:peer.identity', deviceId, name });
                     // First time pairing with this device: ask what to call it,
                     // suggesting the name it reported about itself. Declining
                     // (Cancel) just keeps that suggested name as-is.
@@ -1017,14 +922,17 @@
                     // The other device opted in and ours has no stored answer.
                     askAutoReconnect(deviceId, name);
                 });
-                ArcadeP2P.onMessage((targetGameId, payload) => {
+                ArcadeP2P.onMessage((targetGameId, payload, fromDeviceId) => {
                     // Route by the sender's gameId — both devices run the same
                     // game for a session, so target == sender's id. Messages
                     // for unmounted games are dropped (game not running here).
+                    // fromPeer carries the sending device's stable id once its
+                    // identity handshake completed ('peer' for the brief
+                    // window before it, and for older peers that never send one).
                     postToIframe(targetGameId, {
                         type: 'arcade:peer.message',
                         payload: payload,
-                        fromPeer: 'peer'
+                        fromPeer: fromDeviceId || 'peer'
                     });
                 });
                 p2pBridge = ArcadeP2P;
@@ -1043,6 +951,7 @@
             loadP2P().then((b) => b.openUI(options)).catch(() => {});
         }
         window.__arcade.openMultiplayerPanel = openMultiplayerPanel; // shared by the menu item + known-peer rows
+        window.__arcade.loadP2P = loadP2P; // Known Peers auto-reconnect toggle lives in a sibling IIFE
 
         const menuMultiplayer = document.getElementById('menu-multiplayer');
         if (menuMultiplayer) {
@@ -1077,11 +986,11 @@
         });
 
         // ---- postMessage protocol ----
-        function findGameIdForSource(src) {
+        function findPoolEntryForSource(src) {
             for (const [gid, entry] of pool) {
-                if (entry.iframe.contentWindow === src) return gid;
+                if (entry.iframe.contentWindow === src) return [gid, entry];
             }
-            return null;
+            return [null, null];
         }
 
         function postToIframe(gameId, msg) {
@@ -1149,11 +1058,17 @@
         }
 
         window.addEventListener('message', (e) => {
-            // Source check is the load-bearing guard: only iframes we mounted
-            // via ensureIframe can match. Origin may be cross-origin in local
-            // dev (parent on localhost, game on github.io) so we don't gate on it.
-            const gameId = findGameIdForSource(e.source);
+            // Two guards, both load-bearing. Source: only iframes we mounted
+            // via ensureIframe can match. Origin: the sandbox doesn't stop a
+            // frame from navigating ITSELF cross-origin (a stray <a href>
+            // suffices), and afterwards e.source still matches the pool entry
+            // — so we also require the message's origin to equal the origin
+            // captured at mount. Local dev stages games same-origin, and a
+            // cross-origin-mounted game's real origin is what ensureIframe
+            // recorded, so both setups pass without special-casing.
+            const [gameId, entry] = findPoolEntryForSource(e.source);
             if (!gameId) return;
+            if (e.origin !== entry.origin) return;
             const data = e.data;
             if (!data || typeof data !== 'object') return;
             const t = data.type;
@@ -1171,11 +1086,14 @@
                     // Announce ourselves. peerStatus reflects the live bridge
                     // when loaded (a game mounted mid-session must see
                     // 'connected' immediately). Settings ride along so the
-                    // game can apply them before first paint.
+                    // game can apply them before first paint; `peers` seeds
+                    // the game's roster with already-connected devices.
+                    helloedGames.add(gameId);
                     postToIframe(gameId, {
                         type: 'arcade:welcome',
                         version: 2,
                         peerStatus: p2pBridge ? p2pBridge.status() : 'idle',
+                        peers: p2pBridge ? p2pBridge.connectedPeers() : [],
                         settings: currentSettings()
                     });
                     // If this game is the active one, also send a resume hint
@@ -1184,12 +1102,23 @@
                     if (gameId === activeGameId) {
                         postToIframe(gameId, { type: 'arcade:lifecycle.resume' });
                     }
+                    // Presence: tell the remote launcher this game is now
+                    // listening (no-op unless a session is live).
+                    if (p2pBridge) p2pBridge.announceGame(gameId);
                     break;
                 case 'arcade:peer.send':
                     // Wrap in the launcher envelope and ship over the data
                     // channel. The SDK already gates on status==='connected',
                     // so a null bridge here just means a stray message — drop.
-                    if (p2pBridge) p2pBridge.send(gameId, data.payload);
+                    if (p2pBridge) {
+                        p2pBridge.send(gameId, data.payload);
+                        // While a repair episode runs, every queued send comes
+                        // back with a fresh queue-depth reading so the game
+                        // can see how close it is to the replay cap.
+                        if (p2pBridge.status() === 'interrupted') {
+                            postToIframe(gameId, { type: 'arcade:peer.queue', ...p2pBridge.queueSnapshot() });
+                        }
+                    }
                     break;
                 case 'arcade:ui.toast':
                     // Game asked the launcher to display a toast.
@@ -1250,6 +1179,17 @@
         window.__arcade.broadcastSettings = function () {
             broadcast({ type: 'arcade:settings.changed', settings: currentSettings() });
         };
+        // OS-level theme / reduced-motion flips mid-session must reach
+        // mounted games: currentSettings() falls back to matchMedia when the
+        // user has no explicit override, so a change event just re-broadcasts.
+        try {
+            for (const q of ['(prefers-color-scheme: light)', '(prefers-reduced-motion: reduce)']) {
+                const mq = window.matchMedia(q);
+                const rebroadcast = () => window.__arcade.broadcastSettings();
+                if (mq.addEventListener) mq.addEventListener('change', rebroadcast);
+                else if (mq.addListener) mq.addListener(rebroadcast); // older Safari
+            }
+        } catch (e) {}
 
         // ---- toast helper ----
         let toastTimer = null;
@@ -1281,10 +1221,26 @@
         }
 
         function collectArcadeKeys() {
+            // Save-export governance: the SDK's state.set(key, v,
+            // {exportable:false}) lists local-only keys (telemetry, caches)
+            // in arcade.v1.<gameId>._noExport — those never inflate a save.
+            const noExport = new Set();
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                if (!k || !/^arcade\.v1\.[a-z0-9_-]+\._noExport$/.test(k)) continue;
+                try {
+                    const list = JSON.parse(localStorage.getItem(k));
+                    if (Array.isArray(list)) {
+                        for (const item of list) {
+                            if (typeof item === 'string') noExport.add(item);
+                        }
+                    }
+                } catch (e) {}
+            }
             const out = {};
             for (let i = 0; i < localStorage.length; i++) {
                 const k = localStorage.key(i);
-                if (!k || !KEY_RE.test(k)) continue;
+                if (!k || !isSafeArcadeKey(k) || noExport.has(k)) continue;
                 const v = localStorage.getItem(k);
                 if (typeof v === 'string') out[k] = v;
             }
@@ -1415,7 +1371,7 @@
             const cleanData = {};
             const droppedKeys = [];
             for (const k of Object.keys(parsed.data)) {
-                if (!KEY_RE.test(k) || typeof parsed.data[k] !== 'string') {
+                if (!isSafeArcadeKey(k) || typeof parsed.data[k] !== 'string') {
                     droppedKeys.push(k);
                     continue;
                 }
@@ -1435,8 +1391,11 @@
                 showToast('Checksum mismatch — file may be corrupt.', { error: true });
                 return;
             }
-            // Gate 7: confirm with user
-            const summary = 'This will replace ' + cleanKeys.length + ' arcade keys.\n'
+            // Gate 7: confirm with user. Import merges: keys in the file
+            // overwrite their current values, keys NOT in the file are kept
+            // — the copy must say so.
+            const summary = 'This will import ' + cleanKeys.length + ' arcade keys from the file, '
+                + 'overwriting their current values. Saved data not in the file is kept as-is.\n'
                 + (droppedKeys.length ? droppedKeys.length + ' invalid keys will be ignored.\n' : '')
                 + '\nYour current state will be auto-saved to your Downloads folder first.\nContinue?';
             if (!window.confirm(summary)) return;
@@ -1535,6 +1494,158 @@
             deferredPrompt = null;
             hideInstallUI();
         });
+    })();
+</script>
+
+<script type="module">
+    // ==========================================
+    // KNOWN PEERS — name, rename, delete previously-connected devices.
+    // A module so the CRUD comes from arcade-known-peers.js — the single
+    // owner of arcade.v1._meta.knownPeers, shared with the lazy P2P bridge
+    // (which records NEW entries on every identity handshake and pushes a
+    // live refresh here via ArcadeP2P.onPeerIdentity, wired in the
+    // platformController's loadP2P()). The panel itself never force-loads
+    // the bridge just to view/rename/delete.
+    // ==========================================
+    import { readKnownPeers, renameKnownPeer, deleteKnownPeer } from './arcade-known-peers.js';
+
+    (function knownPeersController() {
+        const DEVICE_NAME_KEY = 'arcade.v1._meta.deviceName';
+
+        const nameInput = document.getElementById('menu-device-name-input');
+        const heading = document.getElementById('menu-known-peers-heading');
+        const list = document.getElementById('menu-known-peers-list');
+        if (!nameInput || !heading || !list) return;
+
+        function renamePeer(id, name) {
+            const ok = renameKnownPeer(id, name);
+            if (ok) render();
+            return ok;
+        }
+        function relativeTime(iso) {
+            const then = Date.parse(iso);
+            if (!isFinite(then)) return 'a while ago';
+            const mins = Math.round((Date.now() - then) / 60000);
+            if (mins < 1) return 'just now';
+            if (mins < 60) return mins + 'm ago';
+            const hours = Math.round(mins / 60);
+            if (hours < 24) return hours + 'h ago';
+            return Math.round(hours / 24) + 'd ago';
+        }
+
+        function render() {
+            const known = readKnownPeers();
+            const ids = Object.keys(known).sort((a, b) =>
+                Date.parse(known[b].lastConnectedAt || 0) - Date.parse(known[a].lastConnectedAt || 0));
+            list.innerHTML = '';
+            heading.hidden = ids.length === 0;
+            if (ids.length === 0) {
+                const empty = document.createElement('div');
+                empty.className = 'launcher-menu__peer-empty';
+                empty.textContent = 'Connect to a device to remember it here.';
+                list.appendChild(empty);
+                return;
+            }
+            for (const id of ids) {
+                const peer = known[id];
+                const displayName = peer.name || 'Unnamed device';
+
+                const row = document.createElement('div');
+                row.className = 'launcher-menu__peer-row';
+                row.tabIndex = 0;
+                row.setAttribute('role', 'button');
+                row.setAttribute('aria-label', 'Reconnect to ' + displayName);
+                row.title = 'Reconnect — get a fresh invite code to show or send';
+                row.addEventListener('click', () => {
+                    // One-tap reconnect: skip the Host/Join choice and put a
+                    // fresh invite code on screen immediately. The other
+                    // device joins by scanning it or tapping the sent link.
+                    if (window.__arcade.openMultiplayerPanel) window.__arcade.openMultiplayerPanel({ mode: 'host' });
+                });
+                row.addEventListener('keydown', (e) => {
+                    if (e.key !== 'Enter' && e.key !== ' ') return;
+                    e.preventDefault();
+                    row.click();
+                });
+
+                const info = document.createElement('div');
+                info.className = 'launcher-menu__peer-info';
+                const nameEl = document.createElement('span');
+                nameEl.className = 'launcher-menu__peer-name';
+                nameEl.textContent = displayName;
+                const metaEl = document.createElement('span');
+                metaEl.className = 'launcher-menu__peer-meta';
+                metaEl.textContent = 'Last connected ' + relativeTime(peer.lastConnectedAt);
+                info.appendChild(nameEl);
+                info.appendChild(metaEl);
+
+                const autoBtn = document.createElement('button');
+                autoBtn.type = 'button';
+                autoBtn.className = 'launcher-menu__peer-btn';
+                const autoOn = peer.autoReconnect === true;
+                autoBtn.textContent = autoOn ? '🔁' : '🚫';
+                autoBtn.title = autoOn
+                    ? 'Auto-reconnect is ON — tap to turn off'
+                    : 'Auto-reconnect is OFF — tap to turn on (takes effect next time you connect)';
+                autoBtn.setAttribute('aria-label', (autoOn ? 'Disable' : 'Enable') + ' auto-reconnect for ' + displayName);
+                autoBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    if (!window.__arcade.loadP2P) return;
+                    window.__arcade.loadP2P()
+                        .then((b) => autoOn ? b.disableAutoReconnect(id) : b.enableAutoReconnect(id))
+                        .then(() => render()).catch(() => {});
+                });
+
+                const renameBtn = document.createElement('button');
+                renameBtn.type = 'button';
+                renameBtn.className = 'launcher-menu__peer-btn';
+                renameBtn.title = 'Rename';
+                renameBtn.setAttribute('aria-label', 'Rename ' + displayName);
+                renameBtn.textContent = '✎';
+                renameBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const next = window.prompt('Rename this connection:', displayName);
+                    if (next === null) return;
+                    renamePeer(id, next);
+                });
+
+                const deleteBtn = document.createElement('button');
+                deleteBtn.type = 'button';
+                deleteBtn.className = 'launcher-menu__peer-btn';
+                deleteBtn.title = 'Delete';
+                deleteBtn.setAttribute('aria-label', 'Delete ' + displayName);
+                deleteBtn.textContent = '✕';
+                deleteBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    if (!window.confirm('Forget "' + displayName + '"?')) return;
+                    deleteKnownPeer(id);
+                    render();
+                });
+
+                row.appendChild(info);
+                row.appendChild(autoBtn);
+                row.appendChild(renameBtn);
+                row.appendChild(deleteBtn);
+                list.appendChild(row);
+            }
+        }
+
+        try { nameInput.value = localStorage.getItem(DEVICE_NAME_KEY) || ''; } catch (e) {}
+        nameInput.addEventListener('change', () => {
+            const trimmed = nameInput.value.trim().slice(0, 60);
+            try {
+                if (trimmed) localStorage.setItem(DEVICE_NAME_KEY, trimmed);
+                else localStorage.removeItem(DEVICE_NAME_KEY);
+            } catch (e) {}
+            nameInput.value = trimmed;
+        });
+        nameInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); nameInput.blur(); }
+        });
+
+        render();
+        window.__arcade.renderKnownPeers = render; // live-refresh hook for the P2P bridge
+        window.__arcade.renamePeer = renamePeer;    // used to accept/edit a new-connection's suggested name
     })();
 </script>
 
