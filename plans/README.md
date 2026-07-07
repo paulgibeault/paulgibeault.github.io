@@ -7,16 +7,16 @@ GitHub issue in the corresponding repository.
 
 ## Plans
 
-| Repo | Plan | Theme |
-| ---- | ---- | ----- |
-| `paulgibeault/paulgibeault.github.io` | [framework-launcher.md](framework-launcher.md) | Security fixes + SDK/launcher enhancements the whole fleet needs |
-| `paulgibeault/moon-lit` | [moon-lit.md](moon-lit.md) | Origin-wide SW/cache nuke (critical), suspend containment, stats-delta bug |
-| `paulgibeault/p2p-chat` | [p2p-chat.md](p2p-chat.md) | Stored XSS via peer ids (critical), interrupted-send cap, reduced-motion |
-| `paulgibeault/pi-game` | [pi-game.md](pi-game.md) | Resume rAF freeze, hand-rolled timer, offline SW asset list |
-| `paulgibeault/hecknsic` | [hecknsic.md](hecknsic.md) | SW caches the SDK, orphaned `.ls.*` keys, canvas font-scale |
-| `paulgibeault/si-syn` | [si-syn.md](si-syn.md) | Cinematic timers run while hidden, locked-level rehydrate |
-| `paulgibeault/cozy-solitaire` | [cozy-solitaire.md](cozy-solitaire.md) | Idle clock freeze, standalone flush, dead code |
-| `paulgibeault/sowduku` | [sowduku.md](sowduku.md) | SW caches the SDK, no suspend handling, non-square art, dir/slug |
+| Repo | Plan | Issue | Theme |
+| ---- | ---- | ----- | ----- |
+| `paulgibeault/paulgibeault.github.io` | [framework-launcher.md](framework-launcher.md) | [#17](https://github.com/paulgibeault/paulgibeault.github.io/issues/17) | Security fixes + SDK/launcher enhancements the whole fleet needs |
+| `paulgibeault/moon-lit` | [moon-lit.md](moon-lit.md) | [#20](https://github.com/paulgibeault/moon-lit/issues/20) | Origin-wide SW/cache nuke (critical), suspend containment, stats-delta bug |
+| `paulgibeault/p2p-chat` | [p2p-chat.md](p2p-chat.md) | [#1](https://github.com/paulgibeault/p2p-chat/issues/1) | Stored XSS via peer ids (critical), interrupted-send cap, reduced-motion |
+| `paulgibeault/pi-game` | [pi-game.md](pi-game.md) | [#14](https://github.com/paulgibeault/pi-game/issues/14) | Resume rAF freeze, hand-rolled timer, offline SW asset list |
+| `paulgibeault/hecknsic` | [hecknsic.md](hecknsic.md) | [#38](https://github.com/paulgibeault/hecknsic/issues/38) | SW caches the SDK, orphaned `.ls.*` keys, canvas font-scale |
+| `paulgibeault/si-syn` | [si-syn.md](si-syn.md) | [#17](https://github.com/paulgibeault/si-syn/issues/17) | Cinematic timers run while hidden, locked-level rehydrate |
+| `paulgibeault/cozy-solitaire` | [cozy-solitaire.md](cozy-solitaire.md) | [#7](https://github.com/paulgibeault/cozy-solitaire/issues/7) | Idle clock freeze, standalone flush, dead code |
+| `paulgibeault/sowduku` | [sowduku.md](sowduku.md) | [#1](https://github.com/paulgibeault/sowduku/issues/1) | SW caches the SDK, no suspend handling, non-square art, dir/slug |
 
 ## Two systemic themes (fix once in the framework)
 
