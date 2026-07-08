@@ -28,24 +28,36 @@ await Arcade.ready;                    // resolves on welcome (or immediately st
 // STORAGE — sync, identical standalone or framed
 Arcade.state.get(key)                 // localStorage 'arcade.v1.<gameId>.<key>'
 Arcade.state.set(key, value)
+Arcade.state.set(key, value, { exportable: false })  // local-only: excluded from save files
 Arcade.state.remove(key)
 Arcade.state.getOrInit(key, defaults) // deep-merges defaults under any stored value
 Arcade.state.onChange(key, fn)
 Arcade.state.migrate(version, fn)     // runs fn exactly once per (gameId, version)
+Arcade.state.adopt(legacyKey, newKey?, { json? })  // read → namespaced write → delete original
 Arcade.global.get(key)                // localStorage 'arcade.v1.global.<key>'
 Arcade.global.set(key, value)
 Arcade.onStateReplaced(fn)            // fires after a launcher import — re-read state
 
 // PLAYER, SCORES, STATS — shared identity + leaderboard/stat helpers
 Arcade.player.name() / setName(s)     // sticky display name, arcade.v1.global.playerName
-Arcade.scores.add(category, entry)    // top-100 sorted list, stamps name + ts
-Arcade.scores.list(category, opts) / best(category) / clear(category)
+Arcade.scores.add(category, entry, opts)  // top-100 sorted list, stamps name + ts;
+                                      // opts.order 'desc' (default) | 'asc' (times);
+                                      // entry.key labels an entry for keyed bests
+Arcade.scores.list(category, opts) / best(category) / best(category, key) / clear(category)
 Arcade.stats.get(category) / getOrInit(category, defaults) / update(category, fn)
 
-// LIFECYCLE — pause cleanly when the launcher hides/evicts this iframe
-Arcade.onSuspend(fn)                  // iframe hidden or about to be evicted
-Arcade.onResume(fn)                   // iframe shown again
+// LIFECYCLE — launcher iframe-pool hints when framed, page visibility
+// standalone; both sources merge into one deduplicated stream
+Arcade.onSuspend(fn)                  // iframe hidden / about to be evicted / page hidden
+Arcade.onResume(fn)                   // shown again
+Arcade.context.suspended              // current effective state (also mirrored as
+                                      // <html data-arcade-suspended="true|false">)
 Arcade.session.start(opts)            // wall-clock tracker wired to suspend/resume
+Arcade.session.setTimeout(fn, ms)     // freeze while suspended; cancel on stateReplaced
+Arcade.session.setInterval(fn, ms)    // both return { cancel() }
+Arcade.loop(fn)                       // managed rAF loop: { start, stop, kick, running,
+                                      // dispose } — auto-cancels on suspend, resumes only
+                                      // if it was running, deltas exclude suspended time
 
 // MULTIPLAYER — async, gracefully no-ops when standalone
 Arcade.peer.status()                  // 'unavailable' | 'idle' | 'connecting' | 'connected' | 'interrupted'
@@ -53,7 +65,12 @@ Arcade.peer.status()                  // 'unavailable' | 'idle' | 'connecting' |
                                       // sends queue + replay; don't reset game state
 Arcade.peer.onStatus(fn)
 Arcade.peer.send(payload)
-Arcade.peer.onMessage(fn)
+Arcade.peer.onMessage(fn)             // fn(payload, fromPeer) — fromPeer is the sending
+                                      // device's stable deviceId once identity completes
+Arcade.peer.self() / remote()         // stable device identities ({ deviceId, name } | null)
+Arcade.peer.onReady(fn)               // remote device has THIS game mounted and listening
+Arcade.peer.sendBlob(blob, { onProgress }) / onBlob(fn)  // chunked large payloads
+Arcade.peer.queue() / onQueue(fn)     // replay-queue { depth, limit, overflowed }
 
 // SETTINGS — launcher pushes its current values, SDK auto-applies CSS vars/attrs
 Arcade.settings.fontScale()           // current launcher font scale (1 = default)
@@ -96,6 +113,7 @@ All messages namespaced `arcade:` to avoid collision.
 ```
 child → parent:  { type: 'arcade:hello',   gameId, version: 2 }
 parent → child:  { type: 'arcade:welcome', version: 2, peerStatus: 'idle',
+                   peers: [{ deviceId, name }, ...],   // live remote devices (roster seed)
                    settings: { fontScale, theme, reducedMotion, audioVolume, handedness } }
 ```
 
@@ -105,8 +123,11 @@ If no `welcome` arrives within ~300ms, SDK locks into standalone mode.
 
 ```
 child  → parent: { type: 'arcade:peer.send',         payload }
-parent → child:  { type: 'arcade:peer.message',      payload, fromPeer }
+parent → child:  { type: 'arcade:peer.message',      payload, fromPeer }   // fromPeer = sender deviceId
 parent → child:  { type: 'arcade:peer.status',       status }
+parent → child:  { type: 'arcade:peer.identity',     deviceId, name }      // roster update
+parent → child:  { type: 'arcade:peer.ready',        deviceId, name }      // remote same-game listening
+parent → child:  { type: 'arcade:peer.queue',        depth, limit, overflowed } // replay-queue visibility
 parent → child:  { type: 'arcade:state.replaced' }               // after file import
 parent → child:  { type: 'arcade:settings.changed',  settings }  // launcher setting updated
 parent → child:  { type: 'arcade:lifecycle.suspend' }             // iframe hidden, or about to be evicted
@@ -114,7 +135,7 @@ parent → child:  { type: 'arcade:lifecycle.resume' }              // iframe sh
 child  → parent: { type: 'arcade:ui.toast',          message, kind, duration }
 ```
 
-Ten message types total (see GAME_INTEGRATION.md §14 for the full summary table). The launcher routes peer messages by `gameId` so multiple games could in principle multiplex one connection, though the current design assumes one foreground game at a time.
+Thirteen message types total (see GAME_INTEGRATION.md §14 for the full summary table). The launcher routes peer messages by `gameId` so multiple games could in principle multiplex one connection, though the current design assumes one foreground game at a time. Between launchers, presence frames (`{arcade:1, kind:'presence'|'presence-ack', gameId}`) announce that a game is mounted and listening; the receiving launcher surfaces them to the matching game as `arcade:peer.ready`.
 
 **Legacy compatibility shim:** a small number of older games (e.g. hecknsic) shipped their own postMessage-backed `localStorage` override before the SDK existed. The launcher still answers that game's `'ls-proxy-request'`/`'ls-proxy-response'` protocol (namespaced into `arcade.v1.<gameId>.ls.<key>`) purely so those games don't hang — this is launcher-side legacy support, not part of the `arcade:` protocol, and new games should use `Arcade.state.*` directly rather than rolling a shim of their own.
 
@@ -191,7 +212,7 @@ WebRTC can't skip the offer/answer ceremony — DTLS fingerprints must flow both
 The full protocol spec lives in `QRCodeP2P/PROTOCOL.md` (§7). Launcher wiring:
 
 - **Opt-in per pair, both sides:** at first contact (after the naming prompt) the launcher asks whether to reconnect automatically; the flag lives in `knownPeers[deviceId].autoReconnect` and is toggleable per peer in the Known Peers panel (🔁/🚫). When both sides opt in, a pairing secret is derived over the live DTLS channel — and **re-derived on every later manual ceremony** (each physical meeting is a fresh trust event).
-- **What it does:** if the connection dies completely (grace expired, channel closed, both networks changed, browsers restarted), the transport re-signals through a public MQTT-over-WSS broker (`wss://test.mosquitto.org:8081/mqtt`). Everything published is end-to-end AEAD-sealed with per-pair keys; topics are unlinkable daily HMACs; epochs kill replays; keys ratchet on every successful reconnect. The broker can only delay or drop — worst case is falling back to the one-tap manual re-pair.
+- **What it does:** if the connection dies completely (grace expired, channel closed, both networks changed, browsers restarted), the transport re-signals through a public MQTT-over-WSS broker (`wss://test.mosquitto.org:8081/mqtt`). Everything published is end-to-end AEAD-sealed with per-pair keys; topics are unlinkable daily HMACs; epochs kill replays; keys ratchet on every successful reconnect. **Content** is therefore safe from the broker: it can only delay or drop, and the worst case is falling back to the one-tap manual re-pair. **Metadata** is not: the broker — and anyone subscribed to the public relay's topic space — learns both devices' IP addresses, the fact that some pair is rendezvousing, and when. If that linkage matters to you, don't opt in to auto-reconnect; manual QR/link pairing never touches a relay.
 - **What games see:** `interrupted` for the whole repair (the launcher holds the `idle` transition for a beat so a terminal teardown claimed by rendezvous never flashes `idle`), then `connected` with the SAME session — sends made while the link was dead queue into the stashed session and replay on adoption, exactly-once.
 - **Resume-on-launch:** `arcade.v1._meta.lastLiveSession` timestamps live paired sessions; if the launcher opens within 6 h of one, it boots the transport and calls `resumeRendezvous()` — two devices whose browsers were both killed re-establish the session with zero interaction.
 - **Presence discipline:** relays are contacted only during active repair episodes (10-min cap, backoff) and the resume check — no standing "I'm online" beacon, ever.

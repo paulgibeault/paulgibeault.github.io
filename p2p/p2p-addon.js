@@ -48,9 +48,12 @@ export class P2PAddon extends EventTarget {
             });
         };
 
+        // Vendored copies only (p2p/vendor/) — the launcher must never reach
+        // for a CDN at runtime. loadScript still skips any global that a host
+        // page pre-loaded itself.
         await Promise.all([
-            loadScript("https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js", "QRCode"),
-            loadScript("https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js", "Html5Qrcode")
+            loadScript(new URL('./vendor/qrcode.min.js', import.meta.url).href, "QRCode"),
+            loadScript(new URL('./vendor/html5-qrcode.min.js', import.meta.url).href, "Html5Qrcode")
         ]);
     }
 

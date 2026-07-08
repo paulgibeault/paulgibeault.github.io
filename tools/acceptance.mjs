@@ -230,6 +230,45 @@ async function runPerGame() {
 
         await ctx.close();
     }
+
+    // ─── Offline phase (game's own SW, if it registers one) ─────────
+    // GAME_INTEGRATION §10: a game that ships a service worker must cache its
+    // own assets so an offline reload still boots. Games without a SW (or
+    // that skip SW registration on loopback, like the launcher does) are
+    // recorded as skipped, not failed.
+    {
+        const ctx = await browser.newContext();
+        const page = await ctx.newPage();
+        try {
+            await page.goto(gameUrl, { waitUntil: 'load', timeout: 10_000 });
+            // Give install/activate + precache time to settle.
+            await page.waitForTimeout(1500);
+            const regCount = await page.evaluate(async () => {
+                if (!('serviceWorker' in navigator)) return 0;
+                const regs = await navigator.serviceWorker.getRegistrations();
+                return regs.length;
+            });
+            if (regCount === 0) {
+                record(10, 'offline reload via game SW', true, 'no SW registered — skipped');
+            } else {
+                await ctx.setOffline(true);
+                let ok = false, detail = '';
+                try {
+                    await page.reload({ waitUntil: 'load', timeout: 10_000 });
+                    ok = await page.evaluate(() =>
+                        !!(document.body && document.body.children.length > 0));
+                    detail = ok ? '' : 'offline page loaded but rendered nothing';
+                } catch (e) {
+                    detail = `offline reload failed: ${e.message.split('\n')[0]}`;
+                }
+                record(10, 'offline reload via game SW serves cached assets', ok, detail);
+                await ctx.setOffline(false);
+            }
+        } catch (e) {
+            record(10, 'offline reload via game SW', false, `setup failed: ${e.message}`);
+        }
+        await ctx.close();
+    }
 }
 
 // ─── Pool-mode (issue #7): bounded LRU iframe pool ───────────────────

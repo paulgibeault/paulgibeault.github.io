@@ -55,6 +55,7 @@
 
 import { RendezvousManager } from './p2p/rendezvous.js';
 import { MqttCarrier } from './p2p/rendezvous-carriers.js';
+import { readKnownPeers, writeKnownPeers } from './arcade-known-peers.js';
 
 // Free public MQTT-over-WSS broker used as the untrusted dead-drop. It sees
 // only ciphertext on unlinkable rotating topics, and only during repair.
@@ -109,7 +110,6 @@ function applyStatus(mp) {
 const META_PREFIX = 'arcade.v1._meta.';
 const DEVICE_ID_KEY = META_PREFIX + 'deviceId';
 const DEVICE_NAME_KEY = META_PREFIX + 'deviceName';
-const KNOWN_PEERS_KEY = META_PREFIX + 'knownPeers';
 const LAST_LIVE_SESSION_KEY = META_PREFIX + 'lastLiveSession';
 const DEFAULT_DEVICE_NAME = 'My device';
 const RESUME_WINDOW_MS = 6 * 3600 * 1000; // resumeRendezvous freshness window
@@ -139,21 +139,29 @@ function getMyDeviceName() {
     catch (e) { return DEFAULT_DEVICE_NAME; }
 }
 
-function readKnownPeers() {
-    try {
-        const raw = localStorage.getItem(KNOWN_PEERS_KEY);
-        const obj = raw ? JSON.parse(raw) : null;
-        return (obj && typeof obj === 'object') ? obj : {};
-    } catch (e) { return {}; }
-}
-
-function writeKnownPeers(map) {
-    try { localStorage.setItem(KNOWN_PEERS_KEY, JSON.stringify(map)); } catch (e) {}
-}
-
 const peerIdentityListeners = []; // fn({deviceId, name, remoteName, isNew, fingerprintChanged})
 const pairRequestListeners = [];  // fn({deviceId, name}) — peer wants auto-reconnect, user undecided
+const presenceListeners = [];     // fn({gameId, deviceId, name, kind}) — remote game mounted/listening
 const identityLinks = new Map();  // deviceId → transport peerId of its DIRECT link
+
+function deviceIdForPeerId(peerId) {
+    for (const [devId, pid] of identityLinks) {
+        if (pid === peerId) return devId;
+    }
+    return null;
+}
+
+// deviceIds whose direct-link fingerprint changed this session. A peer-chosen
+// deviceId must never silently capture another device's auto-reconnect slot:
+// while a deviceId is suspect, the pairing secret is NOT re-derived and
+// stored-flag pair requests fall back to asking the user. Cleared only by an
+// explicit user decision (enableAutoReconnect).
+const fingerprintSuspects = new Set();
+
+// deviceIds are machine-generated on the honest path: either a UUID
+// (crypto.randomUUID) or the 'dev-' fallback. Anything else is a peer making
+// ids up — reject before it can touch knownPeers or the reconnect machinery.
+const DEVICE_ID_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|dev-[a-z0-9]{6,50})$/i;
 
 function stampLiveSession() {
     try { localStorage.setItem(LAST_LIVE_SESSION_KEY, String(Date.now())); } catch (e) {}
@@ -169,7 +177,7 @@ function stampLiveSession() {
  * "tell the user", never "silently trust" and never "silently block".
  */
 function recordPeerIdentity(deviceId, remoteName, fingerprint) {
-    if (typeof deviceId !== 'string' || !deviceId) return null;
+    if (typeof deviceId !== 'string' || deviceId.length > 64 || !DEVICE_ID_RE.test(deviceId)) return null;
     const safeRemoteName = (typeof remoteName === 'string' && remoteName.trim())
         ? remoteName.trim().slice(0, 60) : 'Unnamed device';
     const safeFp = (typeof fingerprint === 'string' && /^[0-9A-F]{2}(:[0-9A-F]{2}){19,63}$/.test(fingerprint)) ? fingerprint : null;
@@ -283,24 +291,57 @@ async function ensureAddon() {
             }
         });
 
-        // Identity frames are handled at the TRANSPORT level, where the
-        // sending link's peerId — and therefore its DTLS fingerprint — is
-        // available. Only a direct (non-relayed) identity may bind a
+        // ALL arcade envelopes are handled at the TRANSPORT level, where the
+        // sending link's peerId is available — identity frames need it for
+        // the DTLS fingerprint, and game/presence frames need it to name the
+        // sending device. Only a direct (non-relayed) identity may bind a
         // fingerprint; a relayed one still records the name.
         mp.peerNode.addEventListener('message', (e) => {
             const d = e.detail || {};
             if (!d.incoming) return;
             let env = null;
             try { env = JSON.parse(d.text); } catch (err) { return; }
-            if (!env || env.arcade !== 1 || env.kind !== 'identity') return;
+            if (!env || env.arcade !== 1) return;
+            if (env.kind === 'presence' || env.kind === 'presence-ack') {
+                // The remote launcher says a game with this gameId is mounted
+                // and listening over there.
+                if (typeof env.gameId !== 'string') return;
+                const presDeviceId = deviceIdForPeerId(d.peerId);
+                const knownNow = readKnownPeers();
+                const presName = (presDeviceId && knownNow[presDeviceId] && knownNow[presDeviceId].name)
+                    || 'Unnamed device';
+                for (const fn of presenceListeners) {
+                    try { fn({ gameId: env.gameId, deviceId: presDeviceId, name: presName, kind: env.kind }); }
+                    catch (err) {}
+                }
+                return;
+            }
+            if (env.kind !== 'identity') {
+                // A game's message. Route by gameId, attributing the sending
+                // device when its identity handshake has completed.
+                if (typeof env.gameId !== 'string') return;
+                const fromDeviceId = deviceIdForPeerId(d.peerId);
+                for (const fn of messageListeners) {
+                    try { fn(env.gameId, env.payload, fromDeviceId); } catch (err) {}
+                }
+                return;
+            }
             const fp = d.relayed ? null : mp.peerNode.getPeerFingerprint(d.peerId);
-            recordPeerIdentity(env.deviceId, env.name, fp);
+            const detail = recordPeerIdentity(env.deviceId, env.name, fp);
+            if (!detail) return; // malformed deviceId — bind nothing
             if (!d.relayed) {
                 identityLinks.set(env.deviceId, d.peerId);
+                if (detail.fingerprintChanged) fingerprintSuspects.add(env.deviceId);
                 // A manual ceremony with an auto-reconnect peer is a fresh
-                // trust event: re-establish the pairing secret every time.
+                // trust event: re-establish the pairing secret every time —
+                // UNLESS this link's fingerprint mismatches the pinned one.
+                // A changed fingerprint on a known deviceId is exactly what a
+                // peer claiming another device's id looks like, so the rebind
+                // waits for an explicit user decision (the launcher confirms
+                // via onPeerIdentity's fingerprintChanged flag).
                 const known = readKnownPeers();
-                if (known[env.deviceId] && known[env.deviceId].autoReconnect && rdv) {
+                if (known[env.deviceId] && known[env.deviceId].autoReconnect && rdv
+                        && !fingerprintSuspects.has(env.deviceId)) {
                     rdv.enablePair(d.peerId, env.deviceId).catch(() => {});
                     stampLiveSession();
                 }
@@ -331,25 +372,20 @@ async function ensureAddon() {
             if (!deviceId) return;
             const known = readKnownPeers();
             const flag = known[deviceId] && known[deviceId].autoReconnect;
-            if (flag === true) {
+            if (flag === true && !fingerprintSuspects.has(deviceId)) {
                 rdv.enablePair(peerId, deviceId).catch(() => {});
-            } else if (flag === undefined) {
+            } else if (flag === undefined || (flag === true && fingerprintSuspects.has(deviceId))) {
+                // Undecided — or decided, but this link's fingerprint changed
+                // since the flag was stored. Either way the user re-confirms.
                 for (const fn of pairRequestListeners) {
                     try { fn({ deviceId, name: (known[deviceId] && known[deviceId].name) || 'Unnamed device' }); } catch (err) {}
                 }
             } // flag === false → user declined; stay silent
         });
 
-        // 'data' fires with JSON already parsed when possible.
-        mp.addEventListener('data', (e) => {
-            const env = e.detail;
-            if (!env || typeof env !== 'object' || env.arcade !== 1) return;
-            if (env.kind === 'identity') return; // handled on the transport listener above
-            if (typeof env.gameId !== 'string') return;
-            for (const fn of messageListeners) {
-                try { fn(env.gameId, env.payload); } catch (err) {}
-            }
-        });
+        // Game messages are routed on the transport 'message' listener above
+        // (the addon's parsed 'data' event has no peerId, so it can't
+        // attribute a sender).
 
         addon = mp;
         return mp;
@@ -376,13 +412,82 @@ export const ArcadeP2P = {
         };
     },
 
-    /** Subscribe to inbound game messages: fn(gameId, payload). */
+    /**
+     * Subscribe to inbound game messages: fn(gameId, payload, fromDeviceId).
+     * fromDeviceId is the sending device's stable id (null until its identity
+     * handshake completes — a beat after 'connected').
+     */
     onMessage(fn) {
         messageListeners.push(fn);
         return () => {
             const i = messageListeners.indexOf(fn);
             if (i >= 0) messageListeners.splice(i, 1);
         };
+    },
+
+    /**
+     * Presence: fires when the remote launcher announces that a game with a
+     * given gameId is mounted and listening — fn({gameId, deviceId, name,
+     * kind}). kind 'presence' expects an ack (announceGame(gameId, true))
+     * when we have the same game mounted; 'presence-ack' is the echo.
+     */
+    onPresence(fn) {
+        presenceListeners.push(fn);
+        return () => {
+            const i = presenceListeners.indexOf(fn);
+            if (i >= 0) presenceListeners.splice(i, 1);
+        };
+    },
+
+    /**
+     * Tell the remote launcher a game with this gameId is mounted and
+     * listening here. isAck answers a received 'presence' (no further reply,
+     * so the two-frame exchange terminates).
+     */
+    announceGame(gameId, isAck) {
+        if (!addon || (sdkStatus !== 'connected' && sdkStatus !== 'interrupted')) return false;
+        if (typeof gameId !== 'string' || !gameId) return false;
+        addon.send({ arcade: 1, kind: isAck ? 'presence-ack' : 'presence', gameId });
+        return true;
+    },
+
+    /**
+     * Live remote devices whose identity handshake completed:
+     * [{deviceId, name}]. Used to seed a freshly-mounted game's roster.
+     */
+    connectedPeers() {
+        if (!addon) return [];
+        const known = readKnownPeers();
+        const out = [];
+        for (const [deviceId, peerId] of identityLinks) {
+            const p = addon.peerNode.peers.get(peerId);
+            if (p && (p.status === 'connected' || p.status === 'interrupted')) {
+                out.push({ deviceId, name: (known[deviceId] && known[deviceId].name) || 'Unnamed device' });
+            }
+        }
+        return out;
+    },
+
+    /**
+     * Replay-queue visibility: { depth, limit, overflowed }. depth is the
+     * deepest per-link outbox (live links and rendezvous-stashed sessions);
+     * overflowed means the transport already dropped the oldest unacked
+     * messages and games should resync state after recovery.
+     */
+    queueSnapshot() {
+        if (!addon) return { depth: 0, limit: 0, overflowed: false };
+        let depth = 0, overflowed = false;
+        addon.peerNode.peers.forEach((p) => {
+            depth = Math.max(depth, (p.outbox || []).length);
+            if (p.outboxOverflowed) overflowed = true;
+        });
+        if (addon.peerNode.sessionStash) {
+            addon.peerNode.sessionStash.forEach((s) => {
+                depth = Math.max(depth, (s.outbox || []).length);
+                if (s.outboxOverflowed) overflowed = true;
+            });
+        }
+        return { depth, limit: (addon.peerNode.options && addon.peerNode.options.outboxLimit) || 1000, overflowed };
     },
 
     /**
@@ -443,6 +548,9 @@ export const ArcadeP2P = {
         if (!known[deviceId]) return false;
         known[deviceId].autoReconnect = true;
         writeKnownPeers(known);
+        // Explicit user decision — re-trust this device even if its
+        // fingerprint changed this session.
+        fingerprintSuspects.delete(deviceId);
         const peerId = identityLinks.get(deviceId);
         if (rdv && peerId) {
             await rdv.enablePair(peerId, deviceId).catch(() => {});
