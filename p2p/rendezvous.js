@@ -215,6 +215,40 @@ export class RendezvousManager extends EventTarget {
         this._emit('pair-removed', { pairId });
     }
 
+    /**
+     * Suspends automatic repair for a pair WITHOUT forgetting its secret —
+     * cancels any in-flight episode and clears `enabled` in storage, so
+     * `_onStatus`/`resumeAll` skip it until resumePair() re-arms it. This is
+     * the "pause a connection" primitive: unlike disablePair(), a later
+     * resumePair() needs no new ceremony.
+     */
+    async pausePair(pairId) {
+        this._cancelEpisode(pairId);
+        const rec = await dbGet(pairId).catch(() => null);
+        if (!rec) return false;
+        rec.enabled = false;
+        await dbPut(pairId, rec);
+        return true;
+    }
+
+    /**
+     * Re-arms a paused pair and immediately attempts one reconnect episode
+     * against its last known peerId — best-effort: it only succeeds if the
+     * other device is reachable on the dead-drop right now, so callers should
+     * keep a manual reconnect path available alongside this.
+     */
+    async resumePair(pairId) {
+        const rec = await dbGet(pairId).catch(() => null);
+        if (!rec) return false;
+        rec.enabled = true;
+        await dbPut(pairId, rec);
+        if (rec.lastPeerId) {
+            this.pairsByPeerId.set(rec.lastPeerId, pairId);
+            this._startEpisode(pairId, rec.lastPeerId);
+        }
+        return true;
+    }
+
     async _onExt({ peerId, ns, data }) {
         if (ns !== 'rdv' || !data || data.t !== 'pair') return;
         const theirRand = typeof data.rand === 'string' ? unb64(data.rand) : null;
