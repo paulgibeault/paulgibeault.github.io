@@ -300,17 +300,11 @@
         </div>
         <div class="launcher-menu__section">
             <div class="launcher-menu__heading">Network</div>
-            <button type="button" class="launcher-menu__item" id="menu-multiplayer" title="Connect to another device — no server, QR codes and links only">
+            <button type="button" class="launcher-menu__item" id="menu-multiplayer" title="Connect to other devices, manage saved connections — no server, QR codes and links only">
                 <span class="launcher-menu__item-icon" aria-hidden="true">⚇</span>
                 <span class="launcher-menu__item-label">Multiplayer</span>
                 <span class="launcher-menu__item-tag" id="menu-multiplayer-status" hidden></span>
             </button>
-            <label class="launcher-menu__inline" for="menu-device-name-input" title="Name shown to other devices when you connect">
-                <span>This device</span>
-                <input type="text" id="menu-device-name-input" class="launcher-menu__peer-input" maxlength="60" placeholder="My device" />
-            </label>
-            <div class="launcher-menu__heading" id="menu-known-peers-heading" hidden>Known Peers</div>
-            <div id="menu-known-peers-list"></div>
         </div>
         <div class="launcher-menu__section" id="menu-install-section" hidden>
             <button type="button" class="launcher-menu__item" id="install-btn" title="Install as PWA">
@@ -326,6 +320,30 @@
             <line x1="4" y1="17" x2="20" y2="17"/>
         </svg>
     </button>
+</div>
+
+<!-- ========== MULTIPLAYER DIALOG ========== -->
+<!-- The one Network menu item: this device's name, starting a new connection,
+     and the full-featured saved-connections manager. Name/rename/delete
+     render instantly from localStorage; live status + call/hang-up/start-over
+     need the P2P bridge, lazy-loaded on first open (see connectionsDialogController). -->
+<div class="connections-dialog" id="connections-dialog" hidden>
+    <div class="connections-dialog__panel" role="dialog" aria-modal="true" aria-labelledby="connections-dialog-title">
+        <header class="connections-dialog__header">
+            <h2 id="connections-dialog-title">Multiplayer</h2>
+            <button type="button" class="connections-dialog__close" id="connections-dialog-close" aria-label="Close">✕</button>
+        </header>
+        <div class="connections-dialog__name-row">
+            <label for="menu-device-name-input">Your device name</label>
+            <input type="text" id="menu-device-name-input" class="connections-dialog__name-input" maxlength="60" placeholder="My device" />
+            <span class="connections-dialog__name-hint">Shown to other devices when you connect</span>
+        </div>
+        <button type="button" class="connections-dialog__new" id="connections-dialog-new">
+            <span aria-hidden="true">⚇</span> New connection
+        </button>
+        <div class="launcher-menu__heading connections-dialog__list-heading" id="connections-dialog-list-heading" hidden>Saved connections</div>
+        <div class="connections-dialog__list" id="connections-dialog-list"></div>
+    </div>
 </div>
 
 <div class="page-wrapper">
@@ -913,7 +931,7 @@
                         'Reconnect with "' + name + '" automatically if the connection breaks?\n\n' +
                         'Uses public relays to find each other again — everything sent through them is ' +
                         'end-to-end encrypted; game data never leaves your devices unencrypted. ' +
-                        'You can change this anytime in Known Peers (🔁).');
+                        'You can change this anytime in Multiplayer (🔁).');
                     if (yes) ArcadeP2P.enableAutoReconnect(deviceId);
                     else ArcadeP2P.disableAutoReconnect(deviceId);
                     if (window.__arcade.renderKnownPeers) window.__arcade.renderKnownPeers();
@@ -948,14 +966,31 @@
 
         function openMultiplayerPanel(options) {
             if (window.__arcade.closeLauncherMenu) window.__arcade.closeLauncherMenu();
+            if (window.__arcade.closeConnectionsDialog) window.__arcade.closeConnectionsDialog();
             loadP2P().then((b) => b.openUI(options)).catch(() => {});
         }
-        window.__arcade.openMultiplayerPanel = openMultiplayerPanel; // shared by the menu item + known-peer rows
-        window.__arcade.loadP2P = loadP2P; // Known Peers auto-reconnect toggle lives in a sibling IIFE
+        window.__arcade.openMultiplayerPanel = openMultiplayerPanel; // the connect ceremony — opened from within the Multiplayer dialog
+        window.__arcade.loadP2P = loadP2P; // Multiplayer dialog (name, call/hang-up/auto-reconnect) lives in a sibling IIFE
 
-        const menuMultiplayer = document.getElementById('menu-multiplayer');
-        if (menuMultiplayer) {
-            menuMultiplayer.addEventListener('click', () => openMultiplayerPanel());
+        // #menu-multiplayer itself opens the Multiplayer dialog (device name +
+        // saved connections + "New connection"), wired in that sibling IIFE —
+        // it owns the button since it also decides the dialog's live content.
+
+        // Resume-on-launch (rendezvous): if an auto-reconnect session was
+        // live recently, boot the transport and let it find the peer — this
+        // is how a game survives BOTH browsers being killed. Runs at initial
+        // script execution AND on a bfcache restore (see the pageshow
+        // listener below) — a page brought back by the browser's Back
+        // button after navigating away doesn't always re-run this script
+        // (bfcache resumes the frozen JS heap instead of reloading it), so
+        // without the second trigger a connection killed by that navigation
+        // would never get a chance to heal until the user reconnects by hand.
+        function tryResumeOnLaunch() {
+            let lastLive = 0;
+            try { lastLive = parseInt(localStorage.getItem('arcade.v1._meta.lastLiveSession') || '0', 10); } catch (e) {}
+            if (lastLive && Date.now() - lastLive < 6 * 3600 * 1000) {
+                loadP2P().then((b) => b.resumeRendezvous()).catch(() => {});
+            }
         }
 
         // Invite/reply links target the LAUNCHER URL — one stable re-entry
@@ -964,15 +999,14 @@
         if (/[#&]p2p-(offer|answer)=/.test(window.location.hash)) {
             loadP2P().then((b) => b.ingestFragmentIfPresent()).catch(() => {});
         } else {
-            // Resume-on-launch (rendezvous): if an auto-reconnect session was
-            // live recently, boot the transport and let it find the peer —
-            // this is how a game survives BOTH browsers being killed.
-            let lastLive = 0;
-            try { lastLive = parseInt(localStorage.getItem('arcade.v1._meta.lastLiveSession') || '0', 10); } catch (e) {}
-            if (lastLive && Date.now() - lastLive < 6 * 3600 * 1000) {
-                loadP2P().then((b) => b.resumeRendezvous()).catch(() => {});
-            }
+            tryResumeOnLaunch();
         }
+        window.addEventListener('pageshow', (e) => {
+            // persisted === true means the browser restored this exact page
+            // from bfcache rather than re-running the script above — redo
+            // the same freshness check now that the page is live again.
+            if (e.persisted) tryResumeOnLaunch();
+        });
 
         launcherBtns.forEach((btn) => {
             btn.addEventListener('click', (e) => {
@@ -1201,6 +1235,7 @@
             if (toastTimer) clearTimeout(toastTimer);
             toastTimer = setTimeout(() => toast.classList.remove('visible'), opts.duration || 3500);
         }
+        window.__arcade.showToast = showToast; // used by the Connections dialog module
 
         // ---- canonical checksum ----
         async function checksumData(data) {
@@ -1499,23 +1534,41 @@
 
 <script type="module">
     // ==========================================
-    // KNOWN PEERS — name, rename, delete previously-connected devices.
-    // A module so the CRUD comes from arcade-known-peers.js — the single
-    // owner of arcade.v1._meta.knownPeers, shared with the lazy P2P bridge
-    // (which records NEW entries on every identity handshake and pushes a
-    // live refresh here via ArcadeP2P.onPeerIdentity, wired in the
-    // platformController's loadP2P()). The panel itself never force-loads
-    // the bridge just to view/rename/delete.
+    // MULTIPLAYER DIALOG — the single Network menu item. Device name, "New
+    // connection", and the full saved-connections manager (rename, delete,
+    // call/hang up, start over) all live behind one "Multiplayer" button so
+    // the menu itself stays uncluttered. Call/Hang Up frame a saved
+    // connection like a phone call: live means Hang Up ends it (keeping the
+    // pairing to call back later), not-live means Call tries to silently
+    // bring it back. A module so the CRUD comes from arcade-known-peers.js —
+    // the single owner of arcade.v1._meta.knownPeers, shared with the lazy
+    // P2P bridge (which records NEW entries on every identity handshake and
+    // pushes a live refresh here via ArcadeP2P.onPeerIdentity, wired in the
+    // platformController's loadP2P()). Device name / rename / delete render
+    // instantly from localStorage; live status and call/hang-up/start-over
+    // force-load the bridge on open — opening this dialog is a deliberate
+    // touch, not something that happens on menu open.
     // ==========================================
     import { readKnownPeers, renameKnownPeer, deleteKnownPeer } from './arcade-known-peers.js';
 
-    (function knownPeersController() {
+    (function connectionsDialogController() {
         const DEVICE_NAME_KEY = 'arcade.v1._meta.deviceName';
 
         const nameInput = document.getElementById('menu-device-name-input');
-        const heading = document.getElementById('menu-known-peers-heading');
-        const list = document.getElementById('menu-known-peers-list');
-        if (!nameInput || !heading || !list) return;
+        const menuBtn = document.getElementById('menu-multiplayer');
+        const dialog = document.getElementById('connections-dialog');
+        const dialogPanel = dialog && dialog.querySelector('.connections-dialog__panel');
+        const dialogClose = document.getElementById('connections-dialog-close');
+        const dialogNew = document.getElementById('connections-dialog-new');
+        const listHeading = document.getElementById('connections-dialog-list-heading');
+        const list = document.getElementById('connections-dialog-list');
+        if (!nameInput || !menuBtn || !dialog || !list) return;
+
+        let unsubStatus = null;
+
+        function toast(msg, opts) {
+            if (window.__arcade.showToast) window.__arcade.showToast(msg, opts);
+        }
 
         function renamePeer(id, name) {
             const ok = renameKnownPeer(id, name);
@@ -1533,101 +1586,242 @@
             return Math.round(hours / 24) + 'd ago';
         }
 
-        function render() {
-            const known = readKnownPeers();
-            const ids = Object.keys(known).sort((a, b) =>
-                Date.parse(known[b].lastConnectedAt || 0) - Date.parse(known[a].lastConnectedAt || 0));
-            list.innerHTML = '';
-            heading.hidden = ids.length === 0;
-            if (ids.length === 0) {
-                const empty = document.createElement('div');
-                empty.className = 'launcher-menu__peer-empty';
-                empty.textContent = 'Connect to a device to remember it here.';
-                list.appendChild(empty);
-                return;
-            }
-            for (const id of ids) {
-                const peer = known[id];
-                const displayName = peer.name || 'Unnamed device';
+        // Bridge may not be loaded yet — in that case nothing could possibly
+        // be live, so fall back to the stored `paused` display flag.
+        function connState(id, peer) {
+            return window.__arcade.p2p ? window.__arcade.p2p.connectionState(id)
+                : (peer.paused ? 'paused' : 'idle');
+        }
+        const STATUS_LABEL = {
+            connected: ['🟢 Connected', 'live'],
+            interrupted: ['🟡 Reconnecting…', 'pending'],
+            connecting: ['🟡 Connecting…', 'pending'],
+            paused: ['📵 Hung up', 'paused'],
+            idle: ['', '']
+        };
 
-                const row = document.createElement('div');
-                row.className = 'launcher-menu__peer-row';
-                row.tabIndex = 0;
-                row.setAttribute('role', 'button');
-                row.setAttribute('aria-label', 'Reconnect to ' + displayName);
-                row.title = 'Reconnect — get a fresh invite code to show or send';
-                row.addEventListener('click', () => {
+        function buildRow(id, peer) {
+            const displayName = peer.name || 'Unnamed device';
+            const state = connState(id, peer);
+            const isLive = state === 'connected' || state === 'interrupted' || state === 'connecting';
+
+            const row = document.createElement('div');
+            row.className = 'connections-row';
+
+            const top = document.createElement('div');
+            top.className = 'connections-row__top';
+            const nameEl = document.createElement('span');
+            nameEl.className = 'connections-row__name';
+            nameEl.textContent = displayName;
+            top.appendChild(nameEl);
+            const [label, cls] = STATUS_LABEL[state] || STATUS_LABEL.idle;
+            if (label) {
+                const statusEl = document.createElement('span');
+                statusEl.className = 'connections-row__status connections-row__status--' + cls;
+                statusEl.textContent = label;
+                top.appendChild(statusEl);
+            }
+            row.appendChild(top);
+
+            const meta = document.createElement('div');
+            meta.className = 'connections-row__meta';
+            meta.textContent = 'Last connected ' + relativeTime(peer.lastConnectedAt)
+                + (state === 'idle' && peer.autoReconnect ? ' · auto-reconnect will retry' : '');
+            row.appendChild(meta);
+
+            const actions = document.createElement('div');
+            actions.className = 'connections-row__actions';
+
+            if (isLive) {
+                const hangUpBtn = document.createElement('button');
+                hangUpBtn.type = 'button';
+                hangUpBtn.className = 'connections-row__btn';
+                hangUpBtn.textContent = '☎️ Hang Up';
+                hangUpBtn.title = 'Hang up now — stays in your list so you can call back later';
+                hangUpBtn.addEventListener('click', async () => {
+                    hangUpBtn.disabled = true;
+                    try {
+                        const b = await window.__arcade.loadP2P();
+                        await b.hangUpKnownPeer(id);
+                        toast('Hung up on ' + displayName + '.');
+                    } catch (e) {} finally { render(); }
+                });
+                actions.appendChild(hangUpBtn);
+            } else {
+                if (peer.autoReconnect) {
+                    const callBtn = document.createElement('button');
+                    callBtn.type = 'button';
+                    callBtn.className = 'connections-row__btn';
+                    callBtn.textContent = '📞 Call';
+                    callBtn.title = 'Call back — tries to reconnect automatically if their device is online too';
+                    callBtn.addEventListener('click', async () => {
+                        callBtn.disabled = true;
+                        try {
+                            const b = await window.__arcade.loadP2P();
+                            const tried = await b.callKnownPeer(id);
+                            toast(tried
+                                ? 'Calling ' + displayName + '…'
+                                : 'No saved pairing to call ' + displayName + ' — use "New invite code" to reconnect.');
+                        } catch (e) {} finally { render(); }
+                    });
+                    actions.appendChild(callBtn);
+                }
+
+                const reconnectBtn = document.createElement('button');
+                reconnectBtn.type = 'button';
+                reconnectBtn.className = 'connections-row__btn';
+                reconnectBtn.textContent = '🔗 New invite code';
+                reconnectBtn.title = 'Get a fresh invite code to show or send';
+                reconnectBtn.addEventListener('click', () => {
                     // One-tap reconnect: skip the Host/Join choice and put a
                     // fresh invite code on screen immediately. The other
                     // device joins by scanning it or tapping the sent link.
                     if (window.__arcade.openMultiplayerPanel) window.__arcade.openMultiplayerPanel({ mode: 'host' });
                 });
-                row.addEventListener('keydown', (e) => {
-                    if (e.key !== 'Enter' && e.key !== ' ') return;
-                    e.preventDefault();
-                    row.click();
-                });
-
-                const info = document.createElement('div');
-                info.className = 'launcher-menu__peer-info';
-                const nameEl = document.createElement('span');
-                nameEl.className = 'launcher-menu__peer-name';
-                nameEl.textContent = displayName;
-                const metaEl = document.createElement('span');
-                metaEl.className = 'launcher-menu__peer-meta';
-                metaEl.textContent = 'Last connected ' + relativeTime(peer.lastConnectedAt);
-                info.appendChild(nameEl);
-                info.appendChild(metaEl);
-
-                const autoBtn = document.createElement('button');
-                autoBtn.type = 'button';
-                autoBtn.className = 'launcher-menu__peer-btn';
-                const autoOn = peer.autoReconnect === true;
-                autoBtn.textContent = autoOn ? '🔁' : '🚫';
-                autoBtn.title = autoOn
-                    ? 'Auto-reconnect is ON — tap to turn off'
-                    : 'Auto-reconnect is OFF — tap to turn on (takes effect next time you connect)';
-                autoBtn.setAttribute('aria-label', (autoOn ? 'Disable' : 'Enable') + ' auto-reconnect for ' + displayName);
-                autoBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    if (!window.__arcade.loadP2P) return;
-                    window.__arcade.loadP2P()
-                        .then((b) => autoOn ? b.disableAutoReconnect(id) : b.enableAutoReconnect(id))
-                        .then(() => render()).catch(() => {});
-                });
-
-                const renameBtn = document.createElement('button');
-                renameBtn.type = 'button';
-                renameBtn.className = 'launcher-menu__peer-btn';
-                renameBtn.title = 'Rename';
-                renameBtn.setAttribute('aria-label', 'Rename ' + displayName);
-                renameBtn.textContent = '✎';
-                renameBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    const next = window.prompt('Rename this connection:', displayName);
-                    if (next === null) return;
-                    renamePeer(id, next);
-                });
-
-                const deleteBtn = document.createElement('button');
-                deleteBtn.type = 'button';
-                deleteBtn.className = 'launcher-menu__peer-btn';
-                deleteBtn.title = 'Delete';
-                deleteBtn.setAttribute('aria-label', 'Delete ' + displayName);
-                deleteBtn.textContent = '✕';
-                deleteBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    if (!window.confirm('Forget "' + displayName + '"?')) return;
-                    deleteKnownPeer(id);
-                    render();
-                });
-
-                row.appendChild(info);
-                row.appendChild(autoBtn);
-                row.appendChild(renameBtn);
-                row.appendChild(deleteBtn);
-                list.appendChild(row);
+                actions.appendChild(reconnectBtn);
             }
+
+            const icons = document.createElement('div');
+            icons.className = 'connections-row__icon-group';
+
+            const autoBtn = document.createElement('button');
+            autoBtn.type = 'button';
+            autoBtn.className = 'connections-row__icon-btn';
+            const autoOn = peer.autoReconnect === true;
+            autoBtn.textContent = autoOn ? '🔁' : '🚫';
+            autoBtn.title = autoOn
+                ? 'Auto-reconnect is ON — tap to turn off'
+                : 'Auto-reconnect is OFF — tap to turn on (takes effect next time you connect)';
+            autoBtn.setAttribute('aria-label', (autoOn ? 'Disable' : 'Enable') + ' auto-reconnect for ' + displayName);
+            autoBtn.addEventListener('click', () => {
+                if (!window.__arcade.loadP2P) return;
+                window.__arcade.loadP2P()
+                    .then((b) => autoOn ? b.disableAutoReconnect(id) : b.enableAutoReconnect(id))
+                    .then((attempted) => {
+                        // Turning it back on re-arms any existing pairing and
+                        // tries a silent reconnect if this peer isn't live —
+                        // give the same honest feedback Call does: only
+                        // claim an attempt when one actually happened.
+                        if (autoOn || isLive) return;
+                        toast(attempted
+                            ? 'Calling ' + displayName + '…'
+                            : 'Auto-reconnect will apply next time you connect to ' + displayName + '.');
+                    })
+                    .then(() => render()).catch(() => {});
+            });
+            icons.appendChild(autoBtn);
+
+            const renameBtn = document.createElement('button');
+            renameBtn.type = 'button';
+            renameBtn.className = 'connections-row__icon-btn';
+            renameBtn.title = 'Rename';
+            renameBtn.setAttribute('aria-label', 'Rename ' + displayName);
+            renameBtn.textContent = '✎';
+            renameBtn.addEventListener('click', () => {
+                const next = window.prompt('Rename this connection:', displayName);
+                if (next === null) return;
+                renamePeer(id, next);
+            });
+            icons.appendChild(renameBtn);
+
+            const startOverBtn = document.createElement('button');
+            startOverBtn.type = 'button';
+            startOverBtn.className = 'connections-row__icon-btn';
+            startOverBtn.title = 'Start over — forget this connection\'s session and auto-reconnect pairing (keeps the name)';
+            startOverBtn.setAttribute('aria-label', 'Start over with ' + displayName);
+            startOverBtn.textContent = '↺';
+            startOverBtn.addEventListener('click', async () => {
+                if (!window.confirm('Start over with "' + displayName + '"?\n\n' +
+                    'This drops the current connection and forgets its auto-reconnect pairing — ' +
+                    'you\'ll need a fresh invite code next time. The saved name stays.')) return;
+                try {
+                    const b = await window.__arcade.loadP2P();
+                    await b.startOverKnownPeer(id);
+                    toast('Reset connection to ' + displayName + '.');
+                } catch (e) {} finally { render(); }
+            });
+            icons.appendChild(startOverBtn);
+
+            const deleteBtn = document.createElement('button');
+            deleteBtn.type = 'button';
+            deleteBtn.className = 'connections-row__icon-btn';
+            deleteBtn.title = 'Delete';
+            deleteBtn.setAttribute('aria-label', 'Delete ' + displayName);
+            deleteBtn.textContent = '✕';
+            deleteBtn.addEventListener('click', () => {
+                if (!window.confirm('Forget "' + displayName + '"?')) return;
+                deleteKnownPeer(id);
+                render();
+            });
+            icons.appendChild(deleteBtn);
+
+            actions.appendChild(icons);
+            row.appendChild(actions);
+            return row;
+        }
+
+        function render() {
+            const known = readKnownPeers();
+            const ids = Object.keys(known).sort((a, b) =>
+                Date.parse(known[b].lastConnectedAt || 0) - Date.parse(known[a].lastConnectedAt || 0));
+
+            if (listHeading) listHeading.hidden = ids.length === 0;
+
+            list.innerHTML = '';
+            if (ids.length === 0) {
+                const empty = document.createElement('div');
+                empty.className = 'connections-dialog__empty';
+                empty.textContent = 'Connect to a device to remember it here.';
+                list.appendChild(empty);
+                return;
+            }
+            for (const id of ids) list.appendChild(buildRow(id, known[id]));
+        }
+
+        function openDialog() {
+            if (window.__arcade.closeLauncherMenu) window.__arcade.closeLauncherMenu();
+            dialog.hidden = false;
+            render();
+            // Live status needs the bridge — load it the same way "Multiplayer"
+            // does, then keep the list live for as long as the dialog is open.
+            if (window.__arcade.loadP2P) {
+                window.__arcade.loadP2P().then((b) => {
+                    if (dialog.hidden) return; // closed before it finished loading
+                    render();
+                    if (!unsubStatus) unsubStatus = b.onStatus(() => render());
+                }).catch(() => {});
+            }
+            setTimeout(() => {
+                const focusable = dialog.querySelectorAll('button, input');
+                if (focusable.length) focusable[0].focus();
+            }, 50);
+        }
+        function closeDialog() {
+            dialog.hidden = true;
+            if (unsubStatus) { unsubStatus(); unsubStatus = null; }
+        }
+        window.__arcade.closeConnectionsDialog = closeDialog;
+
+        menuBtn.addEventListener('click', openDialog);
+        dialogClose.addEventListener('click', closeDialog);
+        dialog.addEventListener('click', (e) => { if (e.target === dialog) closeDialog(); });
+        dialogNew.addEventListener('click', () => {
+            closeDialog();
+            if (window.__arcade.openMultiplayerPanel) window.__arcade.openMultiplayerPanel();
+        });
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && !dialog.hidden) closeDialog();
+        });
+        if (dialogPanel) {
+            dialogPanel.addEventListener('keydown', (e) => {
+                if (e.key !== 'Tab') return;
+                const focusable = Array.from(dialogPanel.querySelectorAll('button, input, [tabindex]:not([tabindex="-1"])'))
+                    .filter((el) => el.offsetWidth > 0 || el.offsetHeight > 0);
+                if (!focusable.length) return;
+                const first = focusable[0], last = focusable[focusable.length - 1];
+                if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+                else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+            });
         }
 
         try { nameInput.value = localStorage.getItem(DEVICE_NAME_KEY) || ''; } catch (e) {}

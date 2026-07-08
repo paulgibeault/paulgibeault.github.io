@@ -50,12 +50,31 @@
  *   transport re-signals through a public dead-drop relay — everything
  *   published is end-to-end sealed; the relay can only delay or drop. While
  *   an episode runs, games see 'interrupted'. resumeRendezvous() at startup
- *   revives a recent session after a full browser restart.
+ *   revives a recent session after a full browser restart — see also the
+ *   pageshow{persisted:true} listener in index.html, which redoes that same
+ *   check for a page the browser restored from bfcache instead of reloading
+ *   (a back-button return from navigating away doesn't always re-run this
+ *   module's startup code). The 🔁/🚫 toggle (enableAutoReconnect/
+ *   disableAutoReconnect) PAUSES rather than forgets an existing secret —
+ *   same primitive as hangUpKnownPeer/callKnownPeer below — so flipping it
+ *   off then back on needs no new ceremony to work again; only a device that
+ *   has NEVER paired needs a live link to mint one.
+ *
+ * Call / Hang up / Start over — the launcher's Multiplayer dialog, framed
+ * like a phone: a saved connection is either live (Hang Up ends it, keeping
+ * the secret for later) or not (Call tries to silently bring it back):
+ *   hangUpKnownPeer() drops the live link and (for an auto-reconnect pair)
+ *   tells rendezvous to stop healing it, without forgetting the secret.
+ *   callKnownPeer() clears that and, when possible, tries a silent
+ *   reconnect through the dead-drop. startOverKnownPeer() is the harder
+ *   reset: drops the link, forgets the stashed session AND the pairing
+ *   secret, so the next connection is a fully fresh ceremony — the saved
+ *   name stays, only deleteKnownPeer() forgets the device outright.
  */
 
 import { RendezvousManager } from './p2p/rendezvous.js';
 import { MqttCarrier } from './p2p/rendezvous-carriers.js';
-import { readKnownPeers, writeKnownPeers } from './arcade-known-peers.js';
+import { readKnownPeers, writeKnownPeers, setKnownPeerPaused } from './arcade-known-peers.js';
 
 // Free public MQTT-over-WSS broker used as the untrusted dead-drop. It sees
 // only ciphertext on unlinkable rotating topics, and only during repair.
@@ -280,6 +299,11 @@ async function ensureAddon() {
             const { peerId, status } = e.detail || {};
             applyStatus(mp);
             if (status === 'connected') {
+                // A link coming up (fresh or rendezvous-resumed) means it's
+                // no longer paused from the user's point of view, regardless
+                // of how it got here.
+                const devId = deviceIdForPeerId(peerId);
+                if (devId) setKnownPeerPaused(devId, false);
                 if (peerId && !announcedTo.has(peerId)) {
                     announcedTo.add(peerId);
                     try {
@@ -469,6 +493,28 @@ export const ArcadeP2P = {
     },
 
     /**
+     * Per-connection status for one known peer — distinct from status()
+     * above, which aggregates every live link into one SDK-facing value.
+     * Returns 'connected' | 'interrupted' | 'connecting' | 'paused' | 'idle'.
+     * 'paused' means the user hung up on purpose (hangUpKnownPeer) and it
+     * hasn't come back up since; 'idle' covers everything else not
+     * currently live (never connected this session, or dropped on its own).
+     */
+    connectionState(deviceId) {
+        const peerId = identityLinks.get(deviceId);
+        if (addon && peerId) {
+            const p = addon.peerNode.peers.get(peerId);
+            if (p) {
+                if (p.status === 'connected') return 'connected';
+                if (p.status === 'interrupted') return 'interrupted';
+                return 'connecting';
+            }
+        }
+        const known = readKnownPeers()[deviceId];
+        return (known && known.paused) ? 'paused' : 'idle';
+    },
+
+    /**
      * Replay-queue visibility: { depth, limit, overflowed }. depth is the
      * deepest per-link outbox (live links and rendezvous-stashed sessions);
      * overflowed means the transport already dropped the oldest unacked
@@ -539,9 +585,16 @@ export const ArcadeP2P = {
     },
 
     /**
-     * Turns auto-reconnect ON for a known peer and, if its direct link is
-     * live, (re)establishes the pairing secret right now. Requires the other
-     * device to opt in too — pairing completes when both randoms cross.
+     * Turns auto-reconnect ON for a known peer. If a pairing secret already
+     * exists (this peer was paired before and later toggled off), re-arms it
+     * in place via resumePair() — no live channel needed, since nothing was
+     * forgotten. Only when NO secret exists yet does this fall back to
+     * minting a fresh one over the direct link, which requires that link to
+     * be live right now; the other device must opt in too (pairing
+     * completes when both randoms cross). With neither an existing secret
+     * nor a live link, the flag is simply set for next time you connect —
+     * returns false in that case so callers don't claim a reconnect attempt
+     * that never actually happened.
      */
     async enableAutoReconnect(deviceId) {
         const known = readKnownPeers();
@@ -551,28 +604,105 @@ export const ArcadeP2P = {
         // Explicit user decision — re-trust this device even if its
         // fingerprint changed this session.
         fingerprintSuspects.delete(deviceId);
+        await ensureAddon(); // rdv is only populated once the addon has loaded
+        if (await rdv.resumePair(deviceId).catch(() => false)) {
+            stampLiveSession();
+            return true;
+        }
         const peerId = identityLinks.get(deviceId);
-        if (rdv && peerId) {
+        if (peerId && addon.peerNode.peers.has(peerId)) {
             await rdv.enablePair(peerId, deviceId).catch(() => {});
             stampLiveSession();
+            return true;
         }
-        return true;
+        return false;
     },
 
-    /** Turns auto-reconnect OFF and deletes the pairing secret. */
+    /**
+     * Turns auto-reconnect OFF. Unlike startOverKnownPeer(), this SUSPENDS
+     * the pairing (rdv.pausePair — same primitive hangUpKnownPeer uses)
+     * rather than forgetting the secret: it's a lightweight preference
+     * toggle, so re-enabling later needs no new ceremony to work again.
+     */
     async disableAutoReconnect(deviceId) {
         const known = readKnownPeers();
         if (known[deviceId]) {
             known[deviceId].autoReconnect = false;
             writeKnownPeers(known);
         }
-        if (rdv) await rdv.disablePair(deviceId).catch(() => {});
+        await ensureAddon(); // rdv is only populated once the addon has loaded
+        await rdv.pausePair(deviceId).catch(() => {});
     },
 
     /** true | false | undefined (never asked). */
     autoReconnectState(deviceId) {
         const rec = readKnownPeers()[deviceId];
         return rec ? rec.autoReconnect : undefined;
+    },
+
+    /**
+     * Hangs up on this peer: drops the live link right now, if any, and —
+     * for an auto-reconnect pair — tells the rendezvous layer to stop trying
+     * to heal it. Unlike disableAutoReconnect(), the pairing secret is kept,
+     * so callKnownPeer() needs no new ceremony to bring it back.
+     */
+    async hangUpKnownPeer(deviceId) {
+        setKnownPeerPaused(deviceId, true);
+        await ensureAddon(); // rdv/addon are only populated once the addon has loaded
+        await rdv.pausePair(deviceId).catch(() => {});
+        const peerId = identityLinks.get(deviceId);
+        if (peerId && addon.peerNode.peers.has(peerId)) {
+            addon.peerNode.disconnectPeer(peerId);
+        }
+        return true;
+    },
+
+    /**
+     * Calls this peer back: clears the paused flag and, for an auto-reconnect
+     * peer, asks the rendezvous layer to attempt a silent reconnect through
+     * the dead-drop right now. Best-effort only (the other device must be
+     * reachable there too) — returns false when there's no background path
+     * to try, so callers should keep a manual "get a new invite code" action
+     * available alongside this either way.
+     */
+    async callKnownPeer(deviceId) {
+        setKnownPeerPaused(deviceId, false);
+        const known = readKnownPeers()[deviceId];
+        if (known && known.autoReconnect) {
+            await ensureAddon(); // rdv is only populated once the addon has loaded
+            // Honest signal: resumePair() returns false when there's no
+            // pairing secret on record to re-arm (e.g. it was never
+            // established, or was forgotten before this peer's last manual
+            // reconnect) — that must NOT be reported as "trying" when
+            // nothing was actually attempted.
+            return await rdv.resumePair(deviceId).catch(() => false);
+        }
+        return false;
+    },
+
+    /**
+     * Wipes this connection back to a blank slate: drops any live link,
+     * forgets its stashed session (no resume-in-place on the next
+     * reconnect), and forgets the rendezvous pairing secret (auto-reconnect
+     * flips off — there's nothing left for it to resume). The saved
+     * name/history stay; only deleteKnownPeer() forgets those too.
+     */
+    async startOverKnownPeer(deviceId) {
+        await ensureAddon(); // rdv/addon are only populated once the addon has loaded
+        const peerId = identityLinks.get(deviceId);
+        if (peerId) {
+            addon.peerNode.disconnectPeer(peerId);
+            addon.peerNode.forgetSession(peerId);
+        }
+        await rdv.disablePair(deviceId).catch(() => {});
+        identityLinks.delete(deviceId);
+        const known = readKnownPeers();
+        if (known[deviceId]) {
+            known[deviceId].autoReconnect = false;
+            known[deviceId].paused = false;
+            writeKnownPeers(known);
+        }
+        return true;
     },
 
     /**

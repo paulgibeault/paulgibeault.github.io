@@ -127,9 +127,12 @@ try {
     const H = await launcherPage('host', contextH);
     const J = await launcherPage('joiner', contextJ);
 
-    // 1. Load the bridge on both (as the Multiplayer menu item would).
+    // 1. Load the bridge on both, as a real user would: open the single
+    //    Multiplayer menu item (the hub dialog), then "New connection" —
+    //    that's what actually initializes the transport (ensureAddon()).
     for (const [page, label] of [[H, 'host'], [J, 'joiner']]) {
         await page.evaluate(() => document.getElementById('menu-multiplayer').click());
+        await page.evaluate(() => document.getElementById('connections-dialog-new').click());
         await page.waitForFunction('!!window.__arcade.p2p && !!window.__arcade.p2p._addon()', null, { timeout: 15000 });
         check(`${label}: bridge + vendored transport loaded (no CDN)`, true);
     }

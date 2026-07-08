@@ -321,75 +321,232 @@ body.app-in-game .launcher-menu[data-open="true"] .launcher-menu__panel {
 }
 .launcher-menu__item--disabled .launcher-menu__item-icon { opacity: 0.4; }
 
-.launcher-menu__peer-input {
-    width: 110px;
+/* ---- CONNECTIONS DIALOG ---- */
+.connections-dialog {
+    position: fixed;
+    inset: 0;
+    z-index: 1100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: rgba(5, 5, 15, 0.72);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+}
+.connections-dialog[hidden] { display: none; }
+
+.connections-dialog__panel {
+    width: 100%;
+    max-width: 480px;
+    max-height: min(640px, 84vh);
+    display: flex;
+    flex-direction: column;
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.connections-dialog__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px;
+    border-bottom: 1px solid rgba(212, 175, 55, 0.15);
+    flex-shrink: 0;
+}
+.connections-dialog__header h2 {
+    font-family: var(--font-display);
+    font-size: 1rem;
+    color: var(--field-gold);
+    letter-spacing: 0.5px;
+}
+.connections-dialog__close {
     background: transparent;
+    border: 1px solid var(--card-border);
+    color: var(--text-secondary);
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.connections-dialog__close:hover,
+.connections-dialog__close:focus-visible {
+    background: var(--tactical-red-dim);
+    color: var(--tactical-red);
+    border-color: var(--tactical-red);
+    outline: none;
+}
+
+.connections-dialog__name-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 14px 16px 10px;
+    border-bottom: 1px solid rgba(212, 175, 55, 0.15);
+    flex-shrink: 0;
+}
+.connections-dialog__name-row label {
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--text-secondary);
+}
+.connections-dialog__name-input {
+    width: 100%;
+    background: rgba(255, 255, 255, 0.03);
     border: 1px solid var(--card-border);
     color: var(--snow-white);
     font-family: var(--font-mono);
-    font-size: 0.75rem;
-    padding: 4px 7px;
-    border-radius: 4px;
+    font-size: 0.85rem;
+    padding: 8px 10px;
+    border-radius: 6px;
 }
-.launcher-menu__peer-input:focus-visible {
+.connections-dialog__name-input:focus-visible {
     outline: none;
     border-color: var(--field-gold);
     color: var(--field-gold);
 }
+.connections-dialog__name-hint {
+    font-size: 0.64rem;
+    color: var(--text-secondary);
+}
 
-.launcher-menu__peer-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 10px;
-    border-radius: 4px;
+.connections-dialog__list-heading {
+    padding: 10px 16px 0;
+}
+
+.connections-dialog__new {
+    margin: 12px 16px 4px;
+    background: transparent;
+    border: 1px solid var(--field-gold-dim);
+    color: var(--field-gold);
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    padding: 9px 12px;
+    border-radius: 6px;
     cursor: pointer;
+    text-align: center;
+    transition: background 0.15s ease, border-color 0.15s ease;
+    flex-shrink: 0;
 }
-.launcher-menu__peer-row:hover { background: rgba(255, 255, 255, 0.04); }
-.launcher-menu__peer-row:focus-visible {
-    outline: 1px solid var(--field-gold);
-    outline-offset: -1px;
+.connections-dialog__new:hover,
+.connections-dialog__new:focus-visible {
+    background: var(--field-gold-dim);
+    border-color: var(--field-gold);
+    outline: none;
 }
-.launcher-menu__peer-info { flex: 1; min-width: 0; }
-.launcher-menu__peer-name {
-    display: block;
+
+.connections-dialog__list {
+    overflow-y: auto;
+    padding: 8px 10px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.connections-dialog__empty {
     font-family: var(--font-mono);
     font-size: 0.78rem;
+    color: var(--text-secondary);
+    padding: 20px 10px;
+    text-align: center;
+}
+
+.connections-row {
+    border: 1px solid rgba(212, 175, 55, 0.18);
+    border-radius: 8px;
+    padding: 10px 12px;
+    background: rgba(255, 255, 255, 0.02);
+}
+.connections-row__top {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+}
+.connections-row__name {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
     color: var(--snow-white);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
-.launcher-menu__peer-meta {
-    display: block;
-    font-size: 0.62rem;
+.connections-row__status {
+    flex-shrink: 0;
+    font-size: 0.65rem;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
     color: var(--text-secondary);
 }
-.launcher-menu__peer-btn {
-    flex-shrink: 0;
+.connections-row__status--live { color: var(--online-green); }
+.connections-row__status--pending { color: var(--field-gold); }
+.connections-row__status--paused { color: var(--text-secondary); }
+
+.connections-row__meta {
+    font-size: 0.66rem;
+    color: var(--text-secondary);
+    margin-top: 2px;
+}
+
+.connections-row__actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.connections-row__btn {
     background: transparent;
     border: 1px solid var(--card-border);
-    color: var(--text-secondary);
-    font-size: 0.7rem;
-    line-height: 1;
-    width: 22px;
-    height: 22px;
-    border-radius: 4px;
+    color: var(--snow-white);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    padding: 6px 10px;
+    border-radius: 5px;
     cursor: pointer;
     transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
-.launcher-menu__peer-btn:hover,
-.launcher-menu__peer-btn:focus-visible {
+.connections-row__btn:hover,
+.connections-row__btn:focus-visible {
     background: var(--field-gold-dim);
     color: var(--field-gold);
     border-color: var(--field-gold);
     outline: none;
 }
-.launcher-menu__peer-empty {
-    font-family: var(--font-mono);
-    font-size: 0.72rem;
+.connections-row__btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.connections-row__icon-group {
+    display: flex;
+    gap: 4px;
+    margin-left: auto;
+}
+.connections-row__icon-btn {
+    flex-shrink: 0;
+    background: transparent;
+    border: 1px solid var(--card-border);
     color: var(--text-secondary);
-    padding: 4px 10px 2px;
+    font-size: 0.72rem;
+    line-height: 1;
+    width: 24px;
+    height: 24px;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.connections-row__icon-btn:hover,
+.connections-row__icon-btn:focus-visible {
+    background: var(--field-gold-dim);
+    color: var(--field-gold);
+    border-color: var(--field-gold);
+    outline: none;
 }
 
 /* ---- TOAST ---- */

@@ -1,6 +1,6 @@
 /* arcade-known-peers.js — the single owner of arcade.v1._meta.knownPeers.
  *
- * Both writers import this module: the launcher menu's Known Peers panel
+ * Both writers import this module: the launcher's Multiplayer dialog
  * (rename / delete, loaded at startup — it's tiny) and the lazily-imported
  * P2P bridge (upsert on every identity handshake). One implementation of the
  * CRUD means one key, one shape, and every mutation is a fresh
@@ -9,7 +9,11 @@
  *
  * Entry shape (per deviceId):
  *   { name, remoteName, firstConnectedAt, lastConnectedAt, timesConnected,
- *     fingerprint, fingerprintChangedAt?, autoReconnect? }
+ *     fingerprint, fingerprintChangedAt?, autoReconnect?, paused? }
+ *
+ * `paused` is a display/intent flag only — it says the user hung up and
+ * doesn't want this link auto-healed. The actual teardown and the
+ * rendezvous pause live in arcade-p2p.js's hangUpKnownPeer/callKnownPeer.
  */
 
 export const KNOWN_PEERS_KEY = 'arcade.v1._meta.knownPeers';
@@ -47,6 +51,15 @@ export function renameKnownPeer(id, name) {
     return mutateKnownPeers((map) => {
         if (!map[id]) return null;
         map[id].name = trimmed;
+        return map;
+    });
+}
+
+/** Set the paused display flag for a known peer. */
+export function setKnownPeerPaused(id, paused) {
+    return mutateKnownPeers((map) => {
+        if (!map[id]) return null;
+        map[id].paused = !!paused;
         return map;
     });
 }

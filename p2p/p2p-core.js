@@ -927,6 +927,11 @@ export class PeerManager extends EventTarget {
         this._teardownPeer(peerId, 'disconnected');
     }
 
+    /** Drops one peer's stashed session, if any — a deliberate "start over". */
+    forgetSession(peerId) {
+        this.sessionStash.delete(peerId);
+    }
+
     /**
      * Installs an externally-negotiated connection under a peerId, resuming
      * that link's session (seq counters + outbox) from the live entry or the
