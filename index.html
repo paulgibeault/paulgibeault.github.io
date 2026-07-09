@@ -343,6 +343,29 @@
         </button>
         <div class="launcher-menu__heading connections-dialog__list-heading" id="connections-dialog-list-heading" hidden>Saved connections</div>
         <div class="connections-dialog__list" id="connections-dialog-list"></div>
+        <footer class="connections-dialog__footer">
+            <button type="button" class="connections-dialog__log-link" id="connections-dialog-log-open">🔧 Connection log</button>
+        </footer>
+    </div>
+</div>
+
+<!-- ========== CONNECTION LOG DIALOG ========== -->
+<!-- Read-only view of the session's connection log (arcade-diag.js): boot
+     decision, auto-reconnect episodes, carrier state. Opened from the
+     Multiplayer dialog's footer; viewing or copying it never starts a
+     connection attempt — unlike the troubleshooting log inside the
+     New-connection ceremony. -->
+<div class="connections-dialog connections-dialog--log" id="diag-log-dialog" hidden>
+    <div class="connections-dialog__panel" role="dialog" aria-modal="true" aria-labelledby="diag-log-title">
+        <header class="connections-dialog__header">
+            <h2 id="diag-log-title">Connection log</h2>
+            <button type="button" class="connections-dialog__close" id="diag-log-close" aria-label="Close">✕</button>
+        </header>
+        <textarea class="diag-log__box" id="diag-log-box" readonly spellcheck="false" rows="14" wrap="soft" aria-label="Connection log"></textarea>
+        <div class="diag-log__actions">
+            <button type="button" class="diag-log__btn diag-log__btn--primary" id="diag-log-copy">📋 Copy to clipboard</button>
+            <button type="button" class="diag-log__btn" id="diag-log-share" hidden>📤 Share…</button>
+        </div>
     </div>
 </div>
 
@@ -940,6 +963,12 @@
                     // The other device opted in and ours has no stored answer.
                     askAutoReconnect(deviceId, name);
                 });
+                ArcadeP2P.onRemoteBye(({ name }) => {
+                    // Their user tapped Hang Up — a deliberate goodbye, not a
+                    // failure, so no scary reconnect language.
+                    showToast(name + ' hung up. Call them back from Multiplayer anytime.');
+                    if (window.__arcade.renderKnownPeers) window.__arcade.renderKnownPeers();
+                });
                 ArcadeP2P.onMessage((targetGameId, payload, fromDeviceId) => {
                     // Route by the sender's gameId — both devices run the same
                     // game for a session, so target == sender's id. Messages
@@ -986,10 +1015,33 @@
         // without the second trigger a connection killed by that navigation
         // would never get a chance to heal until the user reconnects by hand.
         function tryResumeOnLaunch() {
+            // A recent live session → active resume. Otherwise, any
+            // auto-reconnect peer that isn't hung up still warrants booting
+            // the bridge: resumeRendezvous() arms quiet standby, which is
+            // what lets the OTHER device's Call reach this one while the
+            // arcade is merely open.
             let lastLive = 0;
             try { lastLive = parseInt(localStorage.getItem('arcade.v1._meta.lastLiveSession') || '0', 10); } catch (e) {}
-            if (lastLive && Date.now() - lastLive < 6 * 3600 * 1000) {
-                loadP2P().then((b) => b.resumeRendezvous()).catch(() => {});
+            let callable = false;
+            try {
+                const known = JSON.parse(localStorage.getItem('arcade.v1._meta.knownPeers') || '{}');
+                callable = Object.values(known).some((p) => p && p.autoReconnect && !p.paused);
+            } catch (e) {}
+            const boot = (lastLive && Date.now() - lastLive < 6 * 3600 * 1000) || callable;
+            // The connection log (Multiplayer dialog) starts with this
+            // decision, so a reconnect that never even booted is visible.
+            import('./arcade-diag.js').then(({ ArcadeDiag }) => {
+                ArcadeDiag.log('boot', 'launch: last live session '
+                    + (lastLive ? Math.round((Date.now() - lastLive) / 60000) + 'm ago' : 'none')
+                    + ', callable auto-reconnect peer: ' + (callable ? 'yes' : 'no')
+                    + ' → ' + (boot ? 'booting multiplayer bridge' : 'multiplayer stays cold'));
+            }).catch(() => {});
+            if (boot) {
+                loadP2P().then((b) => b.resumeRendezvous()).catch((e) => {
+                    import('./arcade-diag.js').then(({ ArcadeDiag }) => {
+                        ArcadeDiag.log('boot', 'resume-on-launch failed: ' + (e && e.message));
+                    }).catch(() => {});
+                });
             }
         }
 
@@ -1550,6 +1602,7 @@
     // touch, not something that happens on menu open.
     // ==========================================
     import { readKnownPeers, renameKnownPeer, deleteKnownPeer } from './arcade-known-peers.js';
+    import { ArcadeDiag } from './arcade-diag.js';
 
     (function connectionsDialogController() {
         const DEVICE_NAME_KEY = 'arcade.v1._meta.deviceName';
@@ -1626,7 +1679,7 @@
             const meta = document.createElement('div');
             meta.className = 'connections-row__meta';
             meta.textContent = 'Last connected ' + relativeTime(peer.lastConnectedAt)
-                + (state === 'idle' && peer.autoReconnect ? ' · auto-reconnect will retry' : '');
+                + (state === 'idle' && peer.autoReconnect ? ' · listening — Call reaches them while their arcade is open' : '');
             row.appendChild(meta);
 
             const actions = document.createElement('div');
@@ -1799,8 +1852,74 @@
         function closeDialog() {
             dialog.hidden = true;
             if (unsubStatus) { unsubStatus(); unsubStatus = null; }
+            closeLogDialog(); // never leave the log overlay orphaned on top
         }
         window.__arcade.closeConnectionsDialog = closeDialog;
+
+        // ---- connection log dialog (read-only; never starts a connection) ----
+        const logDialog = document.getElementById('diag-log-dialog');
+        const logOpen = document.getElementById('connections-dialog-log-open');
+        const logClose = document.getElementById('diag-log-close');
+        const logBox = document.getElementById('diag-log-box');
+        const logCopy = document.getElementById('diag-log-copy');
+        const logShare = document.getElementById('diag-log-share');
+        let unsubLog = null;
+
+        function renderLogText() {
+            const all = ArcadeDiag.entries();
+            logBox.value = all.length
+                ? all.map((entry) => ArcadeDiag.format(entry)).join('\n')
+                : 'Nothing yet this session — connection activity will appear here.';
+            logBox.scrollTop = logBox.scrollHeight;
+        }
+        function openLogDialog() {
+            logDialog.hidden = false;
+            renderLogText();
+            if (!unsubLog) unsubLog = ArcadeDiag.onEntry(() => renderLogText());
+            setTimeout(() => { if (logClose) logClose.focus(); }, 50);
+        }
+        function closeLogDialog() {
+            if (logDialog) logDialog.hidden = true;
+            if (unsubLog) { unsubLog(); unsubLog = null; }
+        }
+        // Clipboard first; iOS/WebViews sometimes deny it, so fall back to a
+        // selected textarea + execCommand, then to a prompt as a last resort.
+        async function copyTranscript() {
+            const transcript = ArcadeDiag.transcript();
+            try {
+                await navigator.clipboard.writeText(transcript);
+                toast('Connection log copied.');
+                return;
+            } catch (e) {}
+            try {
+                const ta = document.createElement('textarea');
+                ta.value = transcript;
+                ta.setAttribute('readonly', '');
+                ta.style.position = 'fixed';
+                ta.style.opacity = '0';
+                document.body.appendChild(ta);
+                ta.focus();
+                ta.select();
+                const ok = document.execCommand('copy');
+                ta.remove();
+                if (ok) { toast('Connection log copied.'); return; }
+            } catch (e) {}
+            window.prompt('Copy connection log:', transcript);
+        }
+        if (logDialog && logOpen && logClose && logBox && logCopy) {
+            logOpen.addEventListener('click', openLogDialog);
+            logClose.addEventListener('click', closeLogDialog);
+            logDialog.addEventListener('click', (e) => { if (e.target === logDialog) closeLogDialog(); });
+            logCopy.addEventListener('click', copyTranscript);
+            if (logShare && navigator.share) {
+                logShare.hidden = false;
+                logShare.addEventListener('click', async () => {
+                    try {
+                        await navigator.share({ title: 'Arcade connection log', text: ArcadeDiag.transcript() });
+                    } catch (e) {} // user cancelled the sheet — not an error
+                });
+            }
+        }
 
         menuBtn.addEventListener('click', openDialog);
         dialogClose.addEventListener('click', closeDialog);
@@ -1810,7 +1929,10 @@
             if (window.__arcade.openMultiplayerPanel) window.__arcade.openMultiplayerPanel();
         });
         document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape' && !dialog.hidden) closeDialog();
+            if (e.key !== 'Escape') return;
+            // Innermost overlay first: the log sits on top of the dialog.
+            if (logDialog && !logDialog.hidden) closeLogDialog();
+            else if (!dialog.hidden) closeDialog();
         });
         if (dialogPanel) {
             dialogPanel.addEventListener('keydown', (e) => {

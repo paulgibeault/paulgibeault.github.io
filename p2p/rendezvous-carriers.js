@@ -144,57 +144,158 @@ export const mqttCodec = {
 
 export class MqttCarrier {
     /**
+     * Self-healing MQTT connection: one connect() call keeps a socket alive
+     * until close() — redialing with backoff on failure or loss, re-issuing
+     * every subscription on each reconnect, and treating a missed PINGRESP
+     * as a dead socket (half-open WebSockets otherwise look healthy forever).
+     * Free public brokers restart routinely; a rendezvous that outlives one
+     * broker restart must keep listening, so socket loss is never surfaced
+     * as an error — publish() during an outage throws, and the rendezvous
+     * layer's republish schedule papers over the gap.
+     *
      * @param {object} [opts]
      * @param {string} [opts.url] - WSS endpoint of a public MQTT broker.
      * @param {string} [opts.topicPrefix] - Namespace prefix on the broker.
+     * @param {(msg: string) => void} [opts.onLog] - Socket-lifecycle
+     *   diagnostics (dial/up/lost/redial). Never called for per-message
+     *   traffic; never load-bearing.
      */
     constructor(opts = {}) {
         this.url = opts.url || 'wss://test.mosquitto.org:8081/mqtt';
         this.topicPrefix = opts.topicPrefix || 'qrp2p/r/v1/';
-        this.ws = null;
-        this.subs = new Map(); // full topic → Set<cb>
+        this.onLog = typeof opts.onLog === 'function' ? opts.onLog : null;
+        this.ws = null;             // the LIVE (post-CONNACK) socket only
+        this.subs = new Map();      // full topic → Set<cb>
         this.pingTimer = null;
         this.packetId = 1;
         this._parser = null;
+        this.closed = false;
+        this._dialing = false;
+        this._redialTimer = null;
+        this._backoffIdx = 0;
+        this._awaitingPong = false;
+        this._firstUp = null;       // resolves the connect() promise
+        this._connectPromise = null;
     }
 
-    async connect() {
-        if (this.ws) return;
-        await new Promise((resolve, reject) => {
-            const ws = new WebSocket(this.url, 'mqtt');
-            ws.binaryType = 'arraybuffer';
-            this._parser = mqttCodec.makeParser();
-            const fail = (why) => { try { ws.close(); } catch (e) {} reject(new Error(why)); };
-            const guard = setTimeout(() => fail('MQTT connect timeout'), 15000);
-            ws.onerror = () => { clearTimeout(guard); fail('MQTT websocket error'); };
-            ws.onopen = () => {
-                ws.send(mqttCodec.connect('qrp2p-' + Math.random().toString(36).slice(2, 10)));
-            };
-            ws.onmessage = (e) => {
-                for (const pkt of this._parser(new Uint8Array(e.data))) {
-                    if (pkt.type === 'connack') {
-                        clearTimeout(guard);
-                        if (!pkt.ok) return fail('MQTT connection refused');
-                        this.ws = ws;
-                        ws.onmessage = (ev) => this._onFrame(new Uint8Array(ev.data));
-                        ws.onerror = null;
-                        this.pingTimer = setInterval(() => {
-                            try { ws.send(mqttCodec.pingreq()); } catch (err) {}
-                        }, 30000);
-                        // Replay subscriptions registered before connect().
-                        for (const full of this.subs.keys()) {
-                            ws.send(mqttCodec.subscribe(this.packetId++ & 0xffff || 1, full));
-                        }
-                        resolve();
-                        return;
-                    }
+    /**
+     * Starts the connection manager. Resolves on the FIRST successful broker
+     * session; never rejects — if the broker is down, dialing continues with
+     * backoff until close(). Publishers must rely on their own retry
+     * schedule rather than on connect() having settled.
+     */
+    connect() {
+        if (this.closed) return Promise.reject(new Error('carrier closed'));
+        if (!this._connectPromise) {
+            this._connectPromise = new Promise((resolve) => { this._firstUp = resolve; });
+            this._dial();
+        }
+        return this._connectPromise;
+    }
+
+    _log(msg) {
+        if (this.onLog) { try { this.onLog(msg); } catch (e) {} }
+    }
+
+    _dial() {
+        if (this.closed || this.ws || this._dialing) return;
+        this._dialing = true;
+        this._log(`dialing ${this.url}…`);
+        const dialedAt = Date.now();
+        let ws;
+        try {
+            ws = new WebSocket(this.url, 'mqtt');
+        } catch (e) {
+            this._log(`WebSocket constructor failed (${e && e.message})`);
+            this._dialing = false;
+            this._scheduleRedial();
+            return;
+        }
+        ws.binaryType = 'arraybuffer';
+        this._parser = mqttCodec.makeParser();
+        let done = false;
+        const abort = () => {
+            if (done) return;
+            done = true;
+            clearTimeout(guard);
+            this._log(`dial failed after ${Date.now() - dialedAt}ms (socket error/closed/timeout)`);
+            try { ws.close(); } catch (e) {}
+            this._dialing = false;
+            this._scheduleRedial();
+        };
+        const guard = setTimeout(abort, 15000);
+        ws.onerror = abort;
+        ws.onclose = abort;
+        ws.onopen = () => {
+            try { ws.send(mqttCodec.connect('qrp2p-' + Math.random().toString(36).slice(2, 10))); } catch (e) { abort(); }
+        };
+        ws.onmessage = (e) => {
+            for (const pkt of this._parser(new Uint8Array(e.data))) {
+                if (pkt.type !== 'connack') continue;
+                if (done) return;
+                done = true;
+                clearTimeout(guard);
+                if (!pkt.ok) {
+                    this._log('broker refused the MQTT session (CONNACK != 0)');
+                    try { ws.close(); } catch (err) {}
+                    this._dialing = false;
+                    this._scheduleRedial();
+                    return;
                 }
-            };
-        });
+                this._log(`broker session up in ${Date.now() - dialedAt}ms (${this.subs.size} subscription(s) re-issued)`);
+                this._dialing = false;
+                this._backoffIdx = 0;
+                this.ws = ws;
+                ws.onmessage = (ev) => this._onFrame(new Uint8Array(ev.data));
+                ws.onerror = null;
+                ws.onclose = () => this._lost(ws);
+                this._startPing(ws);
+                // (Re-)issue every subscription on this fresh session.
+                for (const full of this.subs.keys()) {
+                    try { ws.send(mqttCodec.subscribe(this.packetId++ & 0xffff || 1, full)); } catch (err) {}
+                }
+                if (this._firstUp) { this._firstUp(); this._firstUp = null; }
+                return;
+            }
+        };
+    }
+
+    _startPing(ws) {
+        this._awaitingPong = false;
+        this.pingTimer = setInterval(() => {
+            if (this._awaitingPong) {
+                // No PINGRESP since our last PINGREQ: the socket is dead even
+                // if the WebSocket object doesn't know it yet.
+                this._lost(ws);
+                return;
+            }
+            this._awaitingPong = true;
+            try { ws.send(mqttCodec.pingreq()); } catch (err) { this._lost(ws); }
+        }, 30000);
+    }
+
+    _lost(ws) {
+        if (this.ws !== ws) return;
+        this.ws = null;
+        if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
+        this._log('broker session lost — redialing');
+        try { ws.onclose = null; ws.close(); } catch (e) {}
+        this._scheduleRedial();
+    }
+
+    _scheduleRedial() {
+        if (this.closed || this._redialTimer || this.ws || this._dialing) return;
+        const BACKOFF = [1000, 2000, 5000, 15000, 30000];
+        const delay = BACKOFF[Math.min(this._backoffIdx++, BACKOFF.length - 1)];
+        this._redialTimer = setTimeout(() => {
+            this._redialTimer = null;
+            this._dial();
+        }, delay);
     }
 
     _onFrame(bytes) {
         for (const pkt of this._parser(bytes)) {
+            if (pkt.type === 'pingresp') { this._awaitingPong = false; continue; }
             if (pkt.type !== 'publish') continue;
             const set = this.subs.get(pkt.topic);
             if (set) set.forEach(cb => { try { cb(pkt.payload); } catch (err) {} });
@@ -210,19 +311,24 @@ export class MqttCarrier {
         const full = this.topicPrefix + topic;
         if (!this.subs.has(full)) {
             this.subs.set(full, new Set());
-            if (this.ws) this.ws.send(mqttCodec.subscribe(this.packetId++ & 0xffff || 1, full));
+            if (this.ws) {
+                try { this.ws.send(mqttCodec.subscribe(this.packetId++ & 0xffff || 1, full)); } catch (e) {}
+            }
         }
         this.subs.get(full).add(cb);
         return () => { const s = this.subs.get(full); if (s) s.delete(cb); };
     }
 
     close() {
+        this.closed = true;
+        if (this._redialTimer) { clearTimeout(this._redialTimer); this._redialTimer = null; }
         if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
         if (this.ws) {
             try { this.ws.send(mqttCodec.disconnect()); } catch (e) {}
-            try { this.ws.close(); } catch (e) {}
+            try { this.ws.onclose = null; this.ws.close(); } catch (e) {}
             this.ws = null;
         }
+        if (this._firstUp) { this._firstUp(); this._firstUp = null; } // release any awaiter
         this.subs.clear();
     }
 }

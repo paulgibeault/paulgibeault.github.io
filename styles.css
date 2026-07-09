@@ -455,6 +455,89 @@ body.app-in-game .launcher-menu[data-open="true"] .launcher-menu__panel {
     text-align: center;
 }
 
+/* Multiplayer dialog footer: a single quiet entry point to the connection
+   log — the log itself lives in its own overlay so it never squeezes the
+   saved-connections list. */
+.connections-dialog__footer {
+    flex-shrink: 0;
+    padding: 8px 16px 12px;
+    border-top: 1px solid rgba(212, 175, 55, 0.15);
+    display: flex;
+    justify-content: center;
+}
+.connections-dialog__log-link {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.5px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: color 0.15s ease;
+}
+.connections-dialog__log-link:hover,
+.connections-dialog__log-link:focus-visible {
+    color: var(--field-gold);
+    outline: none;
+}
+
+/* Connection log overlay (read-only view of arcade-diag.js). Stacks above
+   the Multiplayer dialog it was opened from. */
+.connections-dialog--log { z-index: 1150; }
+.diag-log__box {
+    flex: 1;
+    min-height: 200px;
+    max-height: 50vh;
+    overflow-y: auto;
+    margin: 12px 16px 0;
+    border: 1px solid rgba(212, 175, 55, 0.18);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.35);
+    padding: 10px;
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    line-height: 1.6;
+    color: var(--snow-white);
+    resize: none;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+.diag-log__box:focus-visible {
+    outline: none;
+    border-color: var(--field-gold);
+}
+.diag-log__actions {
+    flex-shrink: 0;
+    display: flex;
+    gap: 8px;
+    padding: 12px 16px 14px;
+}
+.diag-log__btn {
+    flex: 1;
+    background: transparent;
+    border: 1px solid var(--card-border);
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    padding: 9px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.diag-log__btn--primary {
+    border-color: var(--field-gold-dim);
+    color: var(--field-gold);
+}
+.diag-log__btn:hover,
+.diag-log__btn:focus-visible {
+    background: var(--field-gold-dim);
+    border-color: var(--field-gold);
+    color: var(--field-gold);
+    outline: none;
+}
+
 .connections-row {
     border: 1px solid rgba(212, 175, 55, 0.18);
     border-radius: 8px;
