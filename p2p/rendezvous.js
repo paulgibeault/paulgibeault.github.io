@@ -45,6 +45,9 @@
  *               quiet STANDBY until the pair reconnects or the remote calls
  *               back. pausePair()/resumePair() are the local half: suspend
  *               repair without forgetting the secret / re-arm and try now.
+ *               Both halves PERSIST (IndexedDB): a hung-up pair stays hung
+ *               up across app restarts until its user calls again, and the
+ *               stored secret keeps that call ceremony-free.
  *
  * Security invariants:
  *   - decrypt-then-parse: blobs that fail AEAD are silence, not errors.
@@ -241,6 +244,11 @@ export class RendezvousManager extends EventTarget {
      */
     async enablePair(peerId, pairId) {
         this._cancelEpisode(pairId); // a manual re-pair supersedes any repair attempt
+        // Bind the live link to the pair NOW, not just on completion: the
+        // liveness checks (resumePair's "already connected", episode gating)
+        // must see the current link, or they judge the pair by a stale
+        // lastPeerId and arm pointless episodes against a connected peer.
+        this.pairsByPeerId.set(peerId, pairId);
         const rand = RC.randBytes(32);
         this.myRands.set(peerId, { pairId, rand });
         this.pm.sendExt(peerId, 'rdv', { t: 'pair', v: 1, rand: b64(rand) });
@@ -299,13 +307,66 @@ export class RendezvousManager extends EventTarget {
             this.pairsByPeerId.set(rec.lastPeerId, pairId);
             if (this._connectedPeerIdFor(pairId)) {
                 this._diag(`pair ${pairId}: resumePair (call) — already connected, nothing to ring`);
+                return true;
+            }
+            const ep = this.episodes.get(pairId);
+            if (ep && !ep.settled) {
+                // An episode already holds this pair's carrier, subscriptions
+                // and nonces — and the peer may be answering those nonces
+                // RIGHT NOW (its answer takes seconds of ICE gathering).
+                // Cancelling and restarting here would orphan that in-flight
+                // exchange, so repeated Call presses used to chase each other
+                // in circles (seen in field logs: three Calls in 8s, each
+                // rotating the offer nonce the other side was answering).
+                // Promote/republish the existing episode in place instead.
+                this._diag(`pair ${pairId}: resumePair (call) — episode already running, promoting it in place`);
+                ep.rec.enabled = true;
+                delete ep.rec.byeAt;
+                await this._promoteEpisode(pairId, ep);
             } else {
-                this._diag(`pair ${pairId}: resumePair (call) — re-arming an active episode`);
-                this._cancelEpisode(pairId);
+                this._diag(`pair ${pairId}: resumePair (call) — arming an active episode`);
                 this._startEpisode(pairId, rec.lastPeerId);
             }
         }
         return true;
+    }
+
+    /**
+     * Escalates an existing episode to fully-active on a user Call: quiet and
+     * standby episodes start initiating, an active one just republishes now.
+     * The carrier, subscriptions, dedup state and any in-flight exchange all
+     * survive — a Call must never destroy the handshake it's asking for.
+     */
+    async _promoteEpisode(pairId, ep) {
+        ep.standbyOnly = false;
+        if (ep.phase !== 'active') {
+            ep.phase = 'active';
+            // A promoted episode earns a fresh active window before demoting.
+            this._after(ep, this.options.episodeTimeoutMs, () => this._demoteEpisode(pairId, ep));
+        }
+        if (!ep.announced) {
+            ep.announced = true;
+            this._emit('reconnecting', { pairId, peerId: ep.peerId, role: ep.rec.role });
+        }
+        // An answer/adoption is in flight — let it finish; its stall timer
+        // re-arms if it never connects.
+        if (ep.exchanged) return;
+        try {
+            if (ep.rec.role === 'caller') {
+                // Fresh shadow only if we have none or ours has aged (same
+                // rule as a received ring) — a fresh nonce invalidates the
+                // offer the listener may currently be answering.
+                if (!ep.sealedOffer || Date.now() - ep.lastShadowAt > 30000) {
+                    await this._armCallerOffer(pairId, ep);
+                }
+            } else if (!ep.sealedRing) {
+                await this._armRing(pairId, ep);
+            }
+            this._schedulePublishes(pairId, ep);
+            if (ep.publishOnce) await ep.publishOnce();
+        } catch (e) {
+            this._diag(`pair ${pairId}: could not arm/publish on promote (${e && e.message})`, 'warn');
+        }
     }
 
     /**
@@ -714,6 +775,7 @@ export class RendezvousManager extends EventTarget {
             return true;
         }
         if (ep.exchanged) return true; // already applying an answer
+        if (ep.settled) return true;   // settled while the blob was decrypting
         const live = this.pm.peers.get(ep.peerId);
         if (live && live.status === 'connected') {
             // In-band repair won the race while the answer was in flight —
@@ -818,6 +880,22 @@ export class RendezvousManager extends EventTarget {
             await pc.setRemoteDescription(new RTCSessionDescription(payload.sessionDesc));
             await pc.setLocalDescription(await pc.createAnswer());
             await waitGathering(pc);
+            // The gathering wait is long (up to 10s): the in-band repair may
+            // have healed the live link meanwhile — this offer then predates
+            // the recovery, and adopting would CLOSE the healthy connection
+            // and replace it with an exchange whose other end is already
+            // gone (seen in field logs: a link recovered in-band died seconds
+            // later when a stale-offer answer landed). Re-check before the
+            // point of no return; likewise if the episode settled under us.
+            const liveNow = this.pm.peers.get(payload.peerId);
+            if (ep.settled || (liveNow && liveNow.status === 'connected')) {
+                this._diag(`pair ${pairId}: link recovered while answering — discarding the answer, keeping the live link`);
+                try { pc.close(); } catch (err) {}
+                if (payload.n) ep.deadNonces.add(payload.n);
+                ep.exchanged = false;
+                ep.answeredNonce = null;
+                return true;
+            }
             // Adopt now so ondatachannel and the resilience handlers are wired
             // before connectivity completes. The caller committed by
             // publishing; any interrupted remnant (or a superseded earlier

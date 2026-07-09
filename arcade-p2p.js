@@ -650,12 +650,29 @@ export const ArcadeP2P = {
         // fingerprint changed this session.
         fingerprintSuspects.delete(deviceId);
         await ensureAddon(); // rdv is only populated once the addon has loaded
+        const peerId = identityLinks.get(deviceId);
+        const livePeer = peerId ? addon.peerNode.peers.get(peerId) : null;
+        if (livePeer && livePeer.status === 'connected') {
+            // The link is live: enabling here is a fresh trust event, so mint
+            // (or refresh) the pairing secret over the channel — this also
+            // consumes a pending pair-request random from the other side.
+            // Resuming the OLD secret instead (the previous behavior) left
+            // that random dangling and re-armed a stale-key episode against
+            // a connected peer (seen in field logs).
+            await rdv.enablePair(peerId, deviceId).catch(() => {});
+            // Re-enable a paused stored record too; with the live link bound
+            // it sees 'already connected' and rings nothing.
+            await rdv.resumePair(deviceId).catch(() => false);
+            stampLiveSession();
+            return true;
+        }
         if (await rdv.resumePair(deviceId).catch(() => false)) {
             stampLiveSession();
             return true;
         }
-        const peerId = identityLinks.get(deviceId);
         if (peerId && addon.peerNode.peers.has(peerId)) {
+            // Link exists but isn't fully up (mid-ceremony/interrupted) — a
+            // best-effort mint; completion needs the channel to open.
             await rdv.enablePair(peerId, deviceId).catch(() => {});
             stampLiveSession();
             return true;
@@ -706,7 +723,15 @@ export const ArcadeP2P = {
         await rdv.pausePair(deviceId).catch(() => {});
         const peerId = identityLinks.get(deviceId);
         if (peerId && addon.peerNode.peers.has(peerId)) {
-            rdv.sendBye(peerId);
+            const byeSent = rdv.sendBye(peerId);
+            if (!byeSent) {
+                // The channel wasn't open (link interrupted/mid-repair): the
+                // peer will see a plain link death, burn a repair episode,
+                // and keep ringing a paused pair. Not fatal, but the log
+                // must say so — "they hung up but I kept calling" reports
+                // start exactly here.
+                ArcadeDiag.log('bridge', `Hang Up ${deviceId}: bye could NOT be sent (channel not open) — the peer will treat this as a connection failure`);
+            }
             // Give the bye frame a beat to flush before the pc closes under it.
             await new Promise((r) => setTimeout(r, 250));
         }

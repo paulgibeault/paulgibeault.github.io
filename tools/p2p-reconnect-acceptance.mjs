@@ -354,6 +354,104 @@ try {
         check('healed after re-pair: side B', await connectedAgain(s.J));
         await s.ctxH.close(); await s.ctxJ.close();
     }
+
+    // 6. IMPATIENT USERS: after a hang-up, BOTH sides mash Call. Every press
+    //    used to cancel the running episode — carrier, subscriptions and the
+    //    offer nonce the peer was mid-answering — and re-arm a fresh one, so
+    //    two users pressing Call kept resetting each other's handshake
+    //    (field log: three Calls in 8 seconds, never connected). A press on
+    //    a pair with a live episode must promote it in place, and the pair
+    //    must still converge under interleaved presses from both sides.
+    {
+        console.log('\n  [both sides mash Call after a hang-up]');
+        const s = await freshPair('F');
+        const devOnH = await peerDev(s.H);
+        const devOnJ = await peerDev(s.J);
+        await s.H.evaluate((d) => window.__arcade.p2p.hangUpKnownPeer(d), devOnH);
+        await s.J.waitForFunction(`window.__rdvEv.includes('remote-bye')`, null, { timeout: 15000 }).catch(() => {});
+        for (let i = 0; i < 3; i++) {
+            await s.H.evaluate((d) => window.__arcade.p2p.callKnownPeer(d), devOnH);
+            await new Promise(r => setTimeout(r, 400));
+            await s.J.evaluate((d) => window.__arcade.p2p.callKnownPeer(d), devOnJ);
+            await new Promise(r => setTimeout(r, 400));
+        }
+        check('mashed calls converged: side A connected', await connectedAgain(s.H));
+        check('mashed calls converged: side B connected', await connectedAgain(s.J));
+        await s.ctxH.close(); await s.ctxJ.close();
+    }
+
+    // 7. DOUBLE HANG-UP: both sides hang up. Both pairs are then paused —
+    //    deliberately unreachable — so a Call from ONE side alone must land
+    //    nowhere (the peer is deaf by choice), and a Call from EACH side
+    //    (any order, any gap) must re-establish with the kept secret. This
+    //    is the "we both hung up, can we ever get back?" guarantee.
+    {
+        console.log('\n  [double hang-up → both must call, and that works]');
+        const s = await freshPair('G');
+        const devOnH = await peerDev(s.H);
+        const devOnJ = await peerDev(s.J);
+        await s.H.evaluate((d) => window.__arcade.p2p.hangUpKnownPeer(d), devOnH);
+        await s.J.waitForFunction(`window.__rdvEv.includes('remote-bye')`, null, { timeout: 15000 }).catch(() => {});
+        await s.J.evaluate((d) => window.__arcade.p2p.hangUpKnownPeer(d), devOnJ);
+        const stateH = await s.H.evaluate((d) => window.__arcade.p2p.connectionState(d), devOnH);
+        const stateJ = await s.J.evaluate((d) => window.__arcade.p2p.connectionState(d), devOnJ);
+        check("both sides show 'paused' after the double hang-up",
+            stateH === 'paused' && stateJ === 'paused', `H=${stateH} J=${stateJ}`);
+
+        // One-sided call: H rings, but J hung up too — J must stay deaf
+        // (no episode armed, nothing claimed) until ITS user calls back.
+        const triedH = await s.H.evaluate((d) => window.__arcade.p2p.callKnownPeer(d), devOnH);
+        check('first call reports an attempt', triedH === true, String(triedH));
+        await new Promise(r => setTimeout(r, 3000));
+        const jDeaf = await s.J.evaluate(() => ({
+            episodes: window.__arcade.p2p._rdv().episodes.size,
+            status: window.__arcade.p2p.status()
+        }));
+        check('peer that also hung up stays deaf to a one-sided call',
+            jDeaf.episodes === 0 && jDeaf.status === 'idle', `episodes=${jDeaf.episodes} status=${jDeaf.status}`);
+
+        // Second side calls too (later, not simultaneous) → must converge.
+        const triedJ = await s.J.evaluate((d) => window.__arcade.p2p.callKnownPeer(d), devOnJ);
+        check('second call reports an attempt', triedJ === true, String(triedJ));
+        check('double hang-up survived: side A connected', await connectedAgain(s.H));
+        check('double hang-up survived: side B connected', await connectedAgain(s.J));
+        await s.ctxH.close(); await s.ctxJ.close();
+    }
+
+    // 8. HANG-UP SURVIVES A RESTART — in both directions: the reopened
+    //    hanger-upper must STILL be hung up (paused, no episode armed, deaf
+    //    to the peer) until its user presses Call, and that Call must still
+    //    work from the persisted secret with no new ceremony.
+    {
+        console.log('\n  [hang up → restart → still hung up, and Call still works]');
+        const s = await freshPair('H');
+        const devOnH = await peerDev(s.H);
+        await s.H.evaluate((d) => window.__arcade.p2p.hangUpKnownPeer(d), devOnH);
+        await s.J.waitForFunction(`window.__rdvEv.includes('remote-bye')`, null, { timeout: 15000 }).catch(() => {});
+
+        // Restart the hanger-upper. resume-on-launch boots the bridge (the
+        // session was live minutes ago) but must NOT resume the paused pair.
+        await s.H.reload();
+        await s.H.waitForFunction('!!window.__arcade && !!window.__arcade.showGame');
+        const booted = await s.H.waitForFunction(
+            '!!window.__arcade.p2p && !!window.__arcade.p2p._addon()', null, { timeout: 20000 }
+        ).then(() => true).catch(() => false);
+        check('reopened hanger-upper booted the bridge (recent session)', booted);
+        if (booted) {
+            await s.H.evaluate(FAST_RDV);
+            await new Promise(r => setTimeout(r, 2500)); // resume-on-launch settle time
+            const stateH = await s.H.evaluate((d) => window.__arcade.p2p.connectionState(d), devOnH);
+            check("hang-up persisted across the restart ('paused')", stateH === 'paused', stateH);
+            const armed = await s.H.evaluate(() => window.__arcade.p2p._rdv().episodes.size);
+            check('…and no episode armed for the hung-up pair (still deaf)', armed === 0, `episodes=${armed}`);
+
+            const tried = await s.H.evaluate((d) => window.__arcade.p2p.callKnownPeer(d), devOnH);
+            check('Call after restart reports an attempt (secret persisted)', tried === true, String(tried));
+            check('call landed: reopened caller connected', await connectedAgain(s.H));
+            check('call landed: waiting callee connected', await connectedAgain(s.J));
+        }
+        await s.ctxH.close(); await s.ctxJ.close();
+    }
 } catch (e) {
     console.error('\nFATAL:', e.message);
     failures++;
