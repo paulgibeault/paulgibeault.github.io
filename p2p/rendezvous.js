@@ -36,6 +36,14 @@
  *               is merely open. Privacy trade, documented in §7.5/§9: an
  *               enabled, disconnected pair keeps a standing (pseudonymous,
  *               daily-rotating) subscription on the carrier.
+ *   NUDGE       nudgeAll() — the app's "the world may have changed" kick
+ *               (page became visible, network came back, a suspend was
+ *               detected). Every live episode verifies its carrier socket
+ *               right now and republishes immediately instead of waiting
+ *               out the backoff schedule: a device thawing from a
+ *               background freeze would otherwise spend its first minutes
+ *               deaf (half-open socket) and mute (publishes that died in
+ *               the frozen socket are not retried until the next slot).
  *   ADOPTION    PeerManager.adoptConnection resumes the old session (seq
  *               counters + outbox) under the same peerId — apps just see
  *               interrupted → connected and queued traffic replays.
@@ -370,6 +378,49 @@ export class RendezvousManager extends EventTarget {
     }
 
     /**
+     * Kicks every live episode RIGHT NOW: verifies the carrier socket is
+     * actually alive and republishes the current offer/ring immediately
+     * instead of waiting for the next backoff slot. Call when the page
+     * returns to the foreground, the network comes back, or a suspend is
+     * detected — a page thawing from a background freeze usually holds a
+     * WebSocket that LOOKS open for another 30–90s while the broker has
+     * long dropped the session, and its earlier publishes died inside the
+     * frozen socket (QoS 0: nobody retries them but us). Per-episode
+     * rate-limited so visibility flapping can't spam the relay. Standby
+     * episodes only get the socket check — they must stay reachable, but
+     * still initiate nothing.
+     */
+    nudgeAll(why = 'nudge') {
+        for (const [pairId, ep] of this.episodes) {
+            if (ep.settled) continue;
+            this._nudgeEpisode(pairId, ep, why).catch(() => {});
+        }
+    }
+
+    async _nudgeEpisode(pairId, ep, why) {
+        try {
+            if (ep.carrier && typeof ep.carrier.ensureAlive === 'function') ep.carrier.ensureAlive();
+        } catch (e) {}
+        // An answer/adoption in flight — let it finish (its stall timer
+        // re-arms if it never connects); a standby stays passive.
+        if (ep.standbyOnly || ep.exchanged || !ep.publishOnce) return;
+        const now = Date.now();
+        if (now - (ep.lastNudgeAt || 0) < 5000) return;
+        ep.lastNudgeAt = now;
+        this._diag(`pair ${pairId}: nudged (${why}) — checking the carrier and republishing now`);
+        try {
+            // Same freshness rule as a received ring: a suspend usually means
+            // the network moved under the shadow's gathered candidates.
+            if (ep.rec.role === 'caller' && (!ep.sealedOffer || now - ep.lastShadowAt > 30000)) {
+                await this._armCallerOffer(pairId, ep);
+            }
+            await ep.publishOnce();
+        } catch (e) {
+            this._diag(`pair ${pairId}: nudge could not republish (${e && e.message})`, 'warn');
+        }
+    }
+
+    /**
      * Tells the device on `peerId` that this link is being closed ON PURPOSE
      * (a hang-up, not a failure), so it doesn't burn a repair episode on it.
      * Send BEFORE disconnecting the link — it rides the live control channel.
@@ -614,7 +665,7 @@ export class RendezvousManager extends EventTarget {
             offerNonce: null, sealedOffer: null, ringNonce: null, sealedRing: null,
             answeredNonce: null, deadNonces: new Set(), seenRings: new Set(),
             lastShadowAt: 0, publishOnce: null, publishScheduled: false, answering: false,
-            ownBlobs: new Set(), undecryptable: 0
+            ownBlobs: new Set(), undecryptable: 0, lastNudgeAt: 0, republishWindowLogged: false
         };
         this.episodes.set(pairId, ep);
         this._diag(`pair ${pairId}: episode started — role=${rec.role}, epoch=${rec.epoch || 0}, phase=${ep.phase}${standbyOnly ? ' (standby-only' + (byed ? ', after bye' : '') + ')' : ''}`);
@@ -638,6 +689,18 @@ export class RendezvousManager extends EventTarget {
                 }));
             }
             this._diag(`pair ${pairId}: carrier up, subscribed to ${topics.length} day-topic(s)`);
+            // A broker session that comes BACK mid-episode (socket died in a
+            // suspend, broker restarted) re-issues the subscriptions inside
+            // the carrier — but everything we published into the dead socket
+            // is gone (QoS 0), so republish the moment the session is up
+            // instead of waiting out the current backoff slot. Unset until
+            // after the FIRST session (connect() above), so the initial
+            // schedule isn't doubled.
+            ep.carrier.onSessionUp = () => {
+                if (ep.settled || !ep.publishOnce) return;
+                this._diag(`pair ${pairId}: carrier session restored — republishing now`);
+                Promise.resolve(ep.publishOnce()).catch(() => {});
+            };
             if (!ep.standbyOnly) {
                 if (rec.role === 'caller') await this._armCallerOffer(pairId, ep);
                 else await this._armRing(pairId, ep);
@@ -704,7 +767,15 @@ export class RendezvousManager extends EventTarget {
         const currentBlob = ep.rec.role === 'caller' ? () => ep.sealedOffer : () => ep.sealedRing;
         const publishOnce = async () => {
             if (ep.settled || !currentBlob()) return;
-            if (Date.now() - (ep.rec.lastSeenAt || 0) > this.options.resumeWindowMs) return;
+            if (Date.now() - (ep.rec.lastSeenAt || 0) > this.options.resumeWindowMs) {
+                // The only silent way out of the republish cadence — say so
+                // ONCE, or a log reader sees "armed" and then nothing.
+                if (!ep.republishWindowLogged) {
+                    ep.republishWindowLogged = true;
+                    this._diag(`pair ${pairId}: ${kind} republishing stopped — pair last seen over ${Math.round(this.options.resumeWindowMs / 3600000)}h ago (staying subscribe-only)`, 'warn');
+                }
+                return;
+            }
             try {
                 this._trackOwnBlob(ep, currentBlob());
                 await ep.carrier.publish(await RC.topicForDay(ep.topicKey, RC.dayString(Date.now())), currentBlob());

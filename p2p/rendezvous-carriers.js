@@ -6,6 +6,12 @@
  *   await carrier.publish(topic, payloadStr)
  *   const unsub = carrier.subscribe(topic, (payloadStr) => {})
  *   carrier.close()
+ * Optional (the episode layer feature-detects both):
+ *   carrier.ensureAlive()   - synchronous liveness kick: probe the socket
+ *                             NOW instead of waiting for the ping cadence
+ *   carrier.onSessionUp     - assignable callback, fired after each
+ *                             (re)established session once subscriptions
+ *                             are re-issued — the episode republishes there
  *
  * Topics are 32-hex-char pair/day rendezvous ids (never identifying);
  * payloads are AEAD-sealed base64url blobs. A carrier is UNTRUSTED by
@@ -176,6 +182,7 @@ export class MqttCarrier {
         this._awaitingPong = false;
         this._firstUp = null;       // resolves the connect() promise
         this._connectPromise = null;
+        this.onSessionUp = null;    // optional: fired on each (re)established session
     }
 
     /**
@@ -255,6 +262,7 @@ export class MqttCarrier {
                     try { ws.send(mqttCodec.subscribe(this.packetId++ & 0xffff || 1, full)); } catch (err) {}
                 }
                 if (this._firstUp) { this._firstUp(); this._firstUp = null; }
+                if (this.onSessionUp) { try { this.onSessionUp(); } catch (err) {} }
                 return;
             }
         };
@@ -300,6 +308,32 @@ export class MqttCarrier {
             const set = this.subs.get(pkt.topic);
             if (set) set.forEach(cb => { try { cb(pkt.payload); } catch (err) {} });
         }
+    }
+
+    /**
+     * Immediate liveness check, for foreground/network-change nudges. A page
+     * thawing from a suspend often holds a WebSocket object that still LOOKS
+     * open while the broker dropped the session long ago (keepalive expiry),
+     * and the regular 30s ping cadence — itself just thawed — is too slow
+     * for a user actively watching a Call attempt. With no socket, dial NOW
+     * (a suspended redial timer would otherwise wait out its full backoff);
+     * with one, ping and give the broker 5s to answer before declaring the
+     * socket dead and redialing.
+     */
+    ensureAlive() {
+        if (this.closed) return;
+        if (!this.ws) {
+            if (this._redialTimer) { clearTimeout(this._redialTimer); this._redialTimer = null; }
+            this._backoffIdx = 0;
+            this._dial();
+            return;
+        }
+        const ws = this.ws;
+        try { ws.send(mqttCodec.pingreq()); } catch (e) { this._lost(ws); return; }
+        this._awaitingPong = true;
+        setTimeout(() => {
+            if (this.ws === ws && this._awaitingPong) this._lost(ws);
+        }, 5000);
     }
 
     async publish(topic, payload) {

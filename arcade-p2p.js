@@ -278,7 +278,30 @@ function syncWakeLock() {
 }
 
 document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') syncWakeLock();
+    if (document.visibilityState === 'visible') {
+        syncWakeLock();
+        if (rdv && rdv.episodes.size) {
+            ArcadeDiag.log('bridge', 'page visible again — nudging rendezvous');
+            rdv.nudgeAll('foreground');
+        }
+    } else if (rdv && rdv.episodes.size) {
+        // Evidence line: a wake lock only stops dimming while VISIBLE. Once
+        // hidden, the browser may freeze this page's event loop outright —
+        // the log must show where such a gap could have started.
+        ArcadeDiag.log('bridge', 'page hidden — the browser may suspend timers and sockets until it returns');
+    }
+});
+window.addEventListener('online', () => {
+    if (rdv && rdv.episodes.size) {
+        ArcadeDiag.log('bridge', 'network back online — nudging rendezvous');
+        rdv.nudgeAll('online');
+    }
+});
+window.addEventListener('pageshow', (e) => {
+    if (e.persisted && rdv && rdv.episodes.size) {
+        ArcadeDiag.log('bridge', 'page restored from bfcache — nudging rendezvous');
+        rdv.nudgeAll('bfcache');
+    }
 });
 
 async function ensureAddon() {
@@ -454,6 +477,25 @@ async function ensureAddon() {
         // Game messages are routed on the transport 'message' listener above
         // (the addon's parsed 'data' event has no peerId, so it can't
         // attribute a sender).
+
+        // Suspend detector. Browsers freeze a page's event loop entirely
+        // (iOS Safari within seconds of backgrounding or the screen locking;
+        // wake locks only prevent dimming while visible), and a frozen page
+        // neither publishes to nor hears the dead-drop — field logs showed a
+        // Call arming its offer and then 90+ silent seconds. The heartbeat
+        // makes any freeze VISIBLE in the connection log (with its measured
+        // length, so "did the phone sleep?" is answerable from a bug report)
+        // and kicks the rendezvous the moment the page thaws —
+        // visibilitychange alone is not delivered on every iOS resume path.
+        let lastBeat = Date.now();
+        setInterval(() => {
+            const gap = Date.now() - lastBeat - 5000;
+            lastBeat = Date.now();
+            if (gap > 4000) {
+                ArcadeDiag.log('bridge', `suspend detected: event loop was paused ~${Math.round(gap / 1000)}s — nudging rendezvous`);
+                if (rdv) rdv.nudgeAll('suspend-recovery');
+            }
+        }, 5000);
 
         addon = mp;
         return mp;
