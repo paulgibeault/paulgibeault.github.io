@@ -943,31 +943,40 @@ export class RendezvousManager extends EventTarget {
     async _settleEpisode(pairId, ep) {
         if (ep.settled) return;
         ep.settled = true;
-        if (ep.exchanged) {
-            // Ratchet — but ONLY for a reconnect that actually went through
-            // the sealed exchange, so both sides advance in lockstep.
-            const own = this.pm.getOwnFingerprint(ep.peerId);
-            const theirs = this.pm.getPeerFingerprint(ep.peerId);
-            if (own && theirs) {
-                ep.rec.base = await RC.ratchet(ep.rec.base, await RC.transcriptHash(own, theirs));
-                ep.rec.epoch = ep.usedEpoch;
-                this._diag(`pair ${pairId}: reconnected via sealed exchange — key ratcheted to epoch ${ep.usedEpoch}`);
-            } else {
-                this._diag(`pair ${pairId}: reconnected but fingerprints unavailable (own=${!!own}, theirs=${!!theirs}) — NOT ratcheting; if the peer ratcheted, the pair is now desynced`, 'warn');
-            }
-        } else {
-            this._diag(`pair ${pairId}: link recovered in-band — episode closed without touching the key`);
-        }
+        // NOTE: the per-reconnect key ratchet is intentionally DISABLED.
+        //
+        // The old design advanced `rec.base` (and `rec.epoch`) on every sealed
+        // reconnect. But each side decided to ratchet independently, from a
+        // purely LOCAL condition (were both DTLS fingerprints available at the
+        // instant this side settled?). There is no agreement step, so any
+        // divergence — one side adopts the sealed connection while the other's
+        // link heals in-band, or fingerprints populate a tick later on one end
+        // — leaves the two sides on DIFFERENT base keys. Because the AEAD key
+        // AND the daily topic both derive from `base`, a base split makes the
+        // pair permanently deaf in both directions (the epoch window cannot
+        // rescue a wrong key on a wrong topic): auto-reconnect bricks the pair
+        // until a manual Start Over + fresh invite on BOTH devices.
+        //
+        // Freezing the secret removes that failure mode outright: both sides
+        // always hold the exact key minted over DTLS at the last MANUAL
+        // ceremony (`_establishPair` re-derives base and resets epoch 0 on both
+        // ends simultaneously — symmetric by construction), and it never
+        // changes underneath either of them during unattended reconnects. The
+        // trade is forward secrecy on the rendezvous *signaling* keys between
+        // manual pairings: those keys now rotate only on an in-person re-pair,
+        // not on every auto-heal. Game traffic is unaffected (separately DTLS-
+        // protected) and topics still rotate daily. Re-enabling a CORRECT
+        // ratchet requires a two-sided commit over the live channel so both
+        // ends advance together or neither does — tracked in the security-
+        // hardening issue, deferred past the current "test what we have" phase.
+        this._diag(ep.exchanged
+            ? `pair ${pairId}: reconnected via sealed exchange — secret held stable (ratchet disabled)`
+            : `pair ${pairId}: link recovered in-band — episode closed without touching the key`);
         ep.rec.lastPeerId = ep.peerId;
         ep.rec.lastSeenAt = Date.now();
         delete ep.rec.byeAt; // reconnected: any old hang-up is history
         try { await dbPut(pairId, ep.rec); } catch (e) {
-            // The ratchet advanced in memory but not on disk: after a restart
-            // this side is on the PREVIOUS base key while the peer moved on —
-            // different AEAD keys AND different topics, so the pair is deaf
-            // in both directions until the next manual ceremony re-mints the
-            // secret. Surface it loudly.
-            this._diag(`pair ${pairId}: FAILED to persist post-reconnect state (${e && e.message}) — the pair will desync across a restart (fix: Start Over + fresh invite on both devices)`, 'error');
+            this._diag(`pair ${pairId}: FAILED to persist post-reconnect state (${e && e.message})`, 'error');
         }
         this._cleanupEpisode(pairId, ep);
         this._emit(ep.exchanged ? 'reconnected' : 'recovered-inband', { pairId, peerId: ep.peerId });
