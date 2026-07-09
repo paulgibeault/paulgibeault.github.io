@@ -15,6 +15,12 @@
  *   pairBase_n+1 = HKDF(pairBase_n, salt=transcriptHash, info="qrp2p/rdv/v1/ratchet")
  *   transcriptHash = SHA-256( sort(fpA, fpB).join("|") )                    [DTLS fingerprints
  *                                                                            of the NEW connection]
+ *   confirmMac   = hex( HKDF(pairBase_0, salt=0^32, info="qrp2p/rdv/v1/confirm|" + role)[0..15] )
+ *                  (pairing key confirmation — proves the peer derived the
+ *                   SAME base before either side persists it; role-bound so
+ *                   a reflected confirmation never verifies)
+ *   keyCheck     = hex( HKDF(pairBase_n, salt=0^32, info="qrp2p/rdv/v1/check")[0..3] )
+ *                  (short NON-SECRET fingerprint for connection logs)
  * Sealing:
  *   blob = base64url( nonce(12) || AES-256-GCM(aeadKey, plaintext, aad) )
  *   aad  = utf8("qrp2p/rdv/v1|" + direction + "|" + epoch)   direction ∈ {"o","a","r"}
@@ -29,6 +35,8 @@ const INFO_BASE = 'qrp2p/rdv/v1/base';
 const INFO_TOPIC = 'qrp2p/rdv/v1/topic';
 const INFO_AEAD = 'qrp2p/rdv/v1/aead';
 const INFO_RATCHET = 'qrp2p/rdv/v1/ratchet';
+const INFO_CONFIRM = 'qrp2p/rdv/v1/confirm|'; // + role
+const INFO_CHECK = 'qrp2p/rdv/v1/check';
 const AAD_PREFIX = 'qrp2p/rdv/v1|';
 
 const te = new TextEncoder();
@@ -166,6 +174,40 @@ export class RendezvousCrypto {
         } catch (e) {
             return null;
         }
+    }
+
+    /**
+     * Pairing key confirmation: proves to the peer that this side derived
+     * the same base, before either side persists anything. Bound to the
+     * sender's role so a reflected confirmation never verifies as the
+     * peer's. Rides the DTLS-authenticated control channel; 128 bits is
+     * ample there.
+     */
+    static async confirmMac(pairBase, role) {
+        if (role !== 'caller' && role !== 'listener') throw new Error('role must be "caller" or "listener"');
+        const bits = await hkdfBits(pairBase, new Uint8Array(32), INFO_CONFIRM + role, 128);
+        return bytesToHex(bits);
+    }
+
+    /**
+     * Short NON-SECRET fingerprint of the base for connection logs: two
+     * devices whose logs show the same key check hold the same base (and so
+     * meet on the same topics); different checks explain mutual deafness at
+     * a glance. One-way and truncated to 32 bits — useless for key recovery.
+     */
+    static async keyCheck(pairBase) {
+        const bits = await hkdfBits(pairBase, new Uint8Array(32), INFO_CHECK, 32);
+        return bytesToHex(bits);
+    }
+
+    /**
+     * Short log tag for a pairing random (SHA-256, first 4 bytes): lets two
+     * devices' logs show WHICH random each exchange consumed without ever
+     * logging the random itself.
+     */
+    static async tag(bytes) {
+        const d = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+        return bytesToHex(d.slice(0, 4));
     }
 
     /**
