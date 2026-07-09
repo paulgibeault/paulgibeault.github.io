@@ -331,6 +331,13 @@ async function ensureAddon() {
         // re-announcing on every redundant status event for a peer we've
         // already greeted.
         const announcedTo = new Set();
+        // peerIds whose identity envelope already triggered a pairing mint.
+        // Identity frames ride the replayable app-message path (outbox +
+        // replay on reconnect), so the SAME announcement can be delivered
+        // twice — and a second enablePair() mints a second random, which is
+        // how a pair used to end up committed to two different keys on the
+        // two devices (permanently deaf rendezvous). One mint per link.
+        const autoPairMintedFor = new Set();
         mp.addEventListener('status', (e) => {
             const { peerId, status } = e.detail || {};
             applyStatus(mp);
@@ -348,6 +355,7 @@ async function ensureAddon() {
                 }
             } else if (peerId && (status === 'disconnected' || status === 'failed' || status === 'closed')) {
                 announcedTo.delete(peerId);
+                autoPairMintedFor.delete(peerId);
             }
         });
 
@@ -406,7 +414,9 @@ async function ensureAddon() {
                 // via onPeerIdentity's fingerprintChanged flag).
                 const known = readKnownPeers();
                 if (known[env.deviceId] && known[env.deviceId].autoReconnect && rdv
-                        && !fingerprintSuspects.has(env.deviceId)) {
+                        && !fingerprintSuspects.has(env.deviceId)
+                        && !autoPairMintedFor.has(d.peerId)) {
+                    autoPairMintedFor.add(d.peerId);
                     rdv.enablePair(d.peerId, env.deviceId).catch(() => {});
                     stampLiveSession();
                 }

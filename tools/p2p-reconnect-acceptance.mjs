@@ -452,6 +452,70 @@ try {
         }
         await s.ctxH.close(); await s.ctxJ.close();
     }
+    // 9. PAIRING STORM: the enable triggers (user toggle, identity-handshake
+    //    auto-pair, pair-request auto-accept) can all fire in the same
+    //    instant — and identity envelopes replay after a reconnect, firing
+    //    the auto-pair path twice. Every extra trigger used to mint a fresh
+    //    pairing random; the crossed exchanges then committed DIFFERENT
+    //    bases on the two devices, leaving rendezvous permanently deaf on
+    //    disjoint topics (field logs: laptop and phone each ringing/offering
+    //    into silence, zero decrypt warnings). All triggers must collapse
+    //    into one confirmed exchange, both sides must commit the SAME key,
+    //    and the pair must still heal through the dead-drop afterwards.
+    {
+        console.log('\n  [pairing storm: every enable trigger at once, both sides]');
+        const s = await freshPair('I');
+        const storm = (page) => page.evaluate(async () => {
+            const dev = Object.keys(JSON.parse(localStorage.getItem('arcade.v1._meta.knownPeers')))[0];
+            const rdv = window.__arcade.p2p._rdv();
+            const peerId = [...rdv.pairsByPeerId.entries()].find(([, p]) => p === dev)?.[0];
+            const bursts = [];
+            for (let i = 0; i < 3; i++) bursts.push(window.__arcade.p2p.enableAutoReconnect(dev));
+            // A replayed identity envelope reaches the rendezvous layer as a
+            // direct enablePair — the bridge's once-per-link guard can't help.
+            if (peerId) bursts.push(rdv.enablePair(peerId, dev));
+            await Promise.all(bursts.map(b => Promise.resolve(b).catch(() => {})));
+        });
+        await Promise.all([storm(s.H), storm(s.J)]);
+        // Every exchange must settle committed — no candidate stuck waiting.
+        for (const page of [s.H, s.J]) {
+            const settled = await page.waitForFunction(`(() => {
+                const r = window.__arcade.p2p._rdv();
+                return r.myRands.size === 0 &&
+                    [...r.pairExchanges.values()].every(ex => ex.committed);
+            })()`, null, { timeout: 15000 }).then(() => true).catch(() => false);
+            check('storm settled into a committed exchange', settled);
+        }
+        const keyCheckOf = (page) => page.evaluate(async () => {
+            const dev = Object.keys(JSON.parse(localStorage.getItem('arcade.v1._meta.knownPeers')))[0];
+            const rec = await new Promise((resolve, reject) => {
+                const req = indexedDB.open('qrp2p-rendezvous', 1);
+                req.onsuccess = () => {
+                    const db = req.result;
+                    const get = db.transaction('pairs', 'readonly').objectStore('pairs').get(dev);
+                    get.onsuccess = () => { db.close(); resolve(get.result); };
+                    get.onerror = () => { db.close(); reject(get.error); };
+                };
+                req.onerror = () => reject(req.error);
+            });
+            if (!rec) return null;
+            const { RendezvousCrypto } = await import('./p2p/rendezvous-crypto.js');
+            return RendezvousCrypto.keyCheck(rec.base);
+        });
+        const [checkH, checkJ] = await Promise.all([keyCheckOf(s.H), keyCheckOf(s.J)]);
+        check('both sides persisted a secret', !!checkH && !!checkJ, `H=${checkH} J=${checkJ}`);
+        check('both sides committed the SAME key', !!checkH && checkH === checkJ, `H=${checkH} J=${checkJ}`);
+
+        // Same room, end to end: kill the link quietly and demand a heal.
+        await s.H.evaluate(() => {
+            const pm = window.__arcade.p2p._addon().peerNode;
+            Array.from(pm.peers.values()).forEach(p => { try { p.dataChannel.close(); } catch (e) {} });
+        });
+        await s.H.waitForFunction(`window.__arcade.p2p.status() !== 'connected'`, null, { timeout: 30000 }).catch(() => {});
+        check('post-storm heal: side A connected', await connectedAgain(s.H));
+        check('post-storm heal: side B connected', await connectedAgain(s.J));
+        await s.ctxH.close(); await s.ctxJ.close();
+    }
 } catch (e) {
     console.error('\nFATAL:', e.message);
     failures++;
