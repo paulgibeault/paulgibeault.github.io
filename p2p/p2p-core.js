@@ -556,9 +556,18 @@ export class PeerManager extends EventTarget {
         // (identity/fingerprint claims must never bind through a relay).
         // The host always stamps relayed:true itself, so a sender cannot
         // launder a relayed frame into looking direct.
-        if (this.isHost && msg.from !== this.myId) {
+        //
+        // `from` is stamped with the source LINK's peerId — the host-assigned
+        // identifier of the data channel this frame actually arrived on — NOT
+        // the sender-supplied `msg.from`. A client controls its own `msg.from`,
+        // so relaying it verbatim would let any joiner post a message that the
+        // other peers attribute to a different peer. peerId cannot be forged:
+        // it is the key under which this inbound channel is registered.
+        // (Inbound frames are always from a remote client, never the host, so
+        // there is no host-origin frame to exclude here.)
+        if (this.isHost) {
             this.peers.forEach((destData, destId) => {
-                if (destId !== peerId) this._sendAppTo(destId, { text: msg.text, from: msg.from, relayed: true });
+                if (destId !== peerId) this._sendAppTo(destId, { text: msg.text, from: peerId, relayed: true });
             });
         }
 
