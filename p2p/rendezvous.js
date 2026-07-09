@@ -292,14 +292,15 @@ export class RendezvousManager extends EventTarget {
             this._diag(`pair ${pairId}: resumePair found no stored secret — nothing to call with`, 'warn');
             return false;
         }
-        this._diag(`pair ${pairId}: resumePair (call) — re-arming an active episode`);
         rec.enabled = true;
         delete rec.byeAt;
         await dbPut(pairId, rec);
         if (rec.lastPeerId) {
             this.pairsByPeerId.set(rec.lastPeerId, pairId);
-            const live = this.pm.peers.get(rec.lastPeerId);
-            if (!live || live.status !== 'connected') {
+            if (this._connectedPeerIdFor(pairId)) {
+                this._diag(`pair ${pairId}: resumePair (call) — already connected, nothing to ring`);
+            } else {
+                this._diag(`pair ${pairId}: resumePair (call) — re-arming an active episode`);
                 this._cancelEpisode(pairId);
                 this._startEpisode(pairId, rec.lastPeerId);
             }
@@ -368,11 +369,38 @@ export class RendezvousManager extends EventTarget {
         this.myRands.delete(peerId);
         this.pendingRands.delete(peerId);
         this.pairsByPeerId.set(peerId, pairId);
+        // A fresh secret supersedes ANY in-flight episode: an episode armed
+        // before this exchange still holds the OLD base/role/epoch, so its
+        // publishes ride retired topics and keys — and worse, it occupies
+        // the pair's one episode slot, blocking every future repair from
+        // using the new secret until the app restarts. enablePair() cancels
+        // on ITS side, but a resumePair() racing in between (seen in field
+        // logs: the launcher's enable-auto-reconnect calls resumePair first)
+        // re-arms with the old record; completion is the last safe gate.
+        if (this.episodes.has(pairId)) {
+            this._diag(`pair ${pairId}: fresh secret supersedes the in-flight episode (it held the old key) — cancelling it`);
+            this._cancelEpisode(pairId);
+        }
         this._diag(`pair ${pairId}: secret established (role=${role}, epoch 0)`);
         this._emit('pair-established', { pairId, peerId, role });
     }
 
     // ---- triggers ----------------------------------------------------------
+
+    /**
+     * The pair's CURRENTLY connected transport peerId, or null. A device
+     * reconnected by a fresh manual ceremony gets a NEW peerId, so liveness
+     * must be judged across every peerId ever mapped to the pair — checking
+     * only rec.lastPeerId sees a dead link and arms pointless episodes.
+     */
+    _connectedPeerIdFor(pairId) {
+        for (const [pid, pr] of this.pairsByPeerId) {
+            if (pr !== pairId) continue;
+            const p = this.pm.peers.get(pid);
+            if (p && p.status === 'connected') return pid;
+        }
+        return null;
+    }
 
     _onStatus({ peerId, status }) {
         const pairId = this.pairsByPeerId.get(peerId);
@@ -414,16 +442,14 @@ export class RendezvousManager extends EventTarget {
             this.delayTimers.delete(pairId);
             const rec = await dbGet(pairId).catch(() => null);
             if (!rec || !rec.enabled) return;
-            const live = this.pm.peers.get(peerId);
-            if (live && live.status === 'connected') return;
+            if (this._connectedPeerIdFor(pairId)) return;
             if (rec.role === 'listener') {
                 this._startEpisode(pairId, peerId);
             } else {
                 const extra = Math.max(0, this.options.callerDelayMs - this.options.listenerDelayMs);
                 const t2 = setTimeout(() => {
                     this.delayTimers.delete(pairId);
-                    const nowLive = this.pm.peers.get(peerId);
-                    if (nowLive && nowLive.status === 'connected') return;
+                    if (this._connectedPeerIdFor(pairId)) return;
                     this._startEpisode(pairId, peerId);
                 }, extra);
                 this.delayTimers.set(pairId, () => clearTimeout(t2));
@@ -516,8 +542,7 @@ export class RendezvousManager extends EventTarget {
             this._diag(`pair ${pairId}: episode not started (${!rec ? 'no stored secret' : 'pair disabled/paused'})`);
             return;
         }
-        const live = this.pm.peers.get(peerId);
-        if (live && live.status === 'connected') return;
+        if (this._connectedPeerIdFor(pairId)) return;
         const byed = !!(rec.byeAt && rec.byeAt > (rec.lastSeenAt || 0));
         const standbyOnly = !!opts.standbyOnly || byed;
         const quiet = !!opts.quiet || standbyOnly;

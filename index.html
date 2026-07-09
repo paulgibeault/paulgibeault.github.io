@@ -343,15 +343,29 @@
         </button>
         <div class="launcher-menu__heading connections-dialog__list-heading" id="connections-dialog-list-heading" hidden>Saved connections</div>
         <div class="connections-dialog__list" id="connections-dialog-list"></div>
-        <!-- Read-only view of the session's connection log (arcade-diag.js):
-             boot decision, auto-reconnect episodes, carrier state. Viewing or
-             copying it never starts a connection attempt — unlike the
-             troubleshooting log inside the New-connection ceremony. -->
-        <details class="connections-dialog__log" id="connections-dialog-log">
-            <summary>🔧 Connection log</summary>
-            <div class="connections-dialog__log-box" id="connections-dialog-log-box" role="log" aria-live="polite"></div>
-            <button type="button" class="connections-row__btn connections-dialog__log-copy" id="connections-dialog-log-copy">📋 Copy log</button>
-        </details>
+        <footer class="connections-dialog__footer">
+            <button type="button" class="connections-dialog__log-link" id="connections-dialog-log-open">🔧 Connection log</button>
+        </footer>
+    </div>
+</div>
+
+<!-- ========== CONNECTION LOG DIALOG ========== -->
+<!-- Read-only view of the session's connection log (arcade-diag.js): boot
+     decision, auto-reconnect episodes, carrier state. Opened from the
+     Multiplayer dialog's footer; viewing or copying it never starts a
+     connection attempt — unlike the troubleshooting log inside the
+     New-connection ceremony. -->
+<div class="connections-dialog connections-dialog--log" id="diag-log-dialog" hidden>
+    <div class="connections-dialog__panel" role="dialog" aria-modal="true" aria-labelledby="diag-log-title">
+        <header class="connections-dialog__header">
+            <h2 id="diag-log-title">Connection log</h2>
+            <button type="button" class="connections-dialog__close" id="diag-log-close" aria-label="Close">✕</button>
+        </header>
+        <textarea class="diag-log__box" id="diag-log-box" readonly spellcheck="false" rows="14" wrap="soft" aria-label="Connection log"></textarea>
+        <div class="diag-log__actions">
+            <button type="button" class="diag-log__btn diag-log__btn--primary" id="diag-log-copy">📋 Copy to clipboard</button>
+            <button type="button" class="diag-log__btn" id="diag-log-share" hidden>📤 Share…</button>
+        </div>
     </div>
 </div>
 
@@ -1821,9 +1835,6 @@
             if (window.__arcade.closeLauncherMenu) window.__arcade.closeLauncherMenu();
             dialog.hidden = false;
             render();
-            // The log <details> keeps its open state across dialog closes —
-            // reattach the live tail (closeDialog dropped it) and refresh.
-            if (logDetails && logDetails.open) attachLogTail();
             // Live status needs the bridge — load it the same way "Multiplayer"
             // does, then keep the list live for as long as the dialog is open.
             if (window.__arcade.loadP2P) {
@@ -1841,56 +1852,73 @@
         function closeDialog() {
             dialog.hidden = true;
             if (unsubStatus) { unsubStatus(); unsubStatus = null; }
-            if (unsubLog) { unsubLog(); unsubLog = null; }
+            closeLogDialog(); // never leave the log overlay orphaned on top
         }
         window.__arcade.closeConnectionsDialog = closeDialog;
 
-        // ---- connection log (read-only; never starts a connection) ----
-        const logDetails = document.getElementById('connections-dialog-log');
-        const logBox = document.getElementById('connections-dialog-log-box');
-        const logCopy = document.getElementById('connections-dialog-log-copy');
+        // ---- connection log dialog (read-only; never starts a connection) ----
+        const logDialog = document.getElementById('diag-log-dialog');
+        const logOpen = document.getElementById('connections-dialog-log-open');
+        const logClose = document.getElementById('diag-log-close');
+        const logBox = document.getElementById('diag-log-box');
+        const logCopy = document.getElementById('diag-log-copy');
+        const logShare = document.getElementById('diag-log-share');
         let unsubLog = null;
 
-        function logLine(entry) {
-            const div = document.createElement('div');
-            div.className = 'connections-dialog__log-line connections-dialog__log-line--' + entry.tag;
-            div.textContent = ArcadeDiag.format(entry);
-            return div;
-        }
-        function renderLog() {
-            logBox.innerHTML = '';
+        function renderLogText() {
             const all = ArcadeDiag.entries();
-            if (!all.length) {
-                const empty = document.createElement('div');
-                empty.className = 'connections-dialog__log-line';
-                empty.textContent = 'Nothing yet this session.';
-                logBox.appendChild(empty);
-                return;
-            }
-            for (const entry of all) logBox.appendChild(logLine(entry));
+            logBox.value = all.length
+                ? all.map((entry) => ArcadeDiag.format(entry)).join('\n')
+                : 'Nothing yet this session — connection activity will appear here.';
             logBox.scrollTop = logBox.scrollHeight;
         }
-        function attachLogTail() {
-            renderLog();
-            if (!unsubLog) unsubLog = ArcadeDiag.onEntry((entry) => {
-                logBox.appendChild(logLine(entry));
-                logBox.scrollTop = logBox.scrollHeight;
-            });
+        function openLogDialog() {
+            logDialog.hidden = false;
+            renderLogText();
+            if (!unsubLog) unsubLog = ArcadeDiag.onEntry(() => renderLogText());
+            setTimeout(() => { if (logClose) logClose.focus(); }, 50);
         }
-        if (logDetails && logBox && logCopy) {
-            logDetails.addEventListener('toggle', () => {
-                if (logDetails.open) attachLogTail();
-                else if (unsubLog) { unsubLog(); unsubLog = null; }
-            });
-            logCopy.addEventListener('click', async () => {
-                const transcript = ArcadeDiag.transcript();
-                try {
-                    await navigator.clipboard.writeText(transcript);
-                    toast('Connection log copied.');
-                } catch (e) {
-                    window.prompt('Copy connection log:', transcript);
-                }
-            });
+        function closeLogDialog() {
+            if (logDialog) logDialog.hidden = true;
+            if (unsubLog) { unsubLog(); unsubLog = null; }
+        }
+        // Clipboard first; iOS/WebViews sometimes deny it, so fall back to a
+        // selected textarea + execCommand, then to a prompt as a last resort.
+        async function copyTranscript() {
+            const transcript = ArcadeDiag.transcript();
+            try {
+                await navigator.clipboard.writeText(transcript);
+                toast('Connection log copied.');
+                return;
+            } catch (e) {}
+            try {
+                const ta = document.createElement('textarea');
+                ta.value = transcript;
+                ta.setAttribute('readonly', '');
+                ta.style.position = 'fixed';
+                ta.style.opacity = '0';
+                document.body.appendChild(ta);
+                ta.focus();
+                ta.select();
+                const ok = document.execCommand('copy');
+                ta.remove();
+                if (ok) { toast('Connection log copied.'); return; }
+            } catch (e) {}
+            window.prompt('Copy connection log:', transcript);
+        }
+        if (logDialog && logOpen && logClose && logBox && logCopy) {
+            logOpen.addEventListener('click', openLogDialog);
+            logClose.addEventListener('click', closeLogDialog);
+            logDialog.addEventListener('click', (e) => { if (e.target === logDialog) closeLogDialog(); });
+            logCopy.addEventListener('click', copyTranscript);
+            if (logShare && navigator.share) {
+                logShare.hidden = false;
+                logShare.addEventListener('click', async () => {
+                    try {
+                        await navigator.share({ title: 'Arcade connection log', text: ArcadeDiag.transcript() });
+                    } catch (e) {} // user cancelled the sheet — not an error
+                });
+            }
         }
 
         menuBtn.addEventListener('click', openDialog);
@@ -1901,7 +1929,10 @@
             if (window.__arcade.openMultiplayerPanel) window.__arcade.openMultiplayerPanel();
         });
         document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape' && !dialog.hidden) closeDialog();
+            if (e.key !== 'Escape') return;
+            // Innermost overlay first: the log sits on top of the dialog.
+            if (logDialog && !logDialog.hidden) closeLogDialog();
+            else if (!dialog.hidden) closeDialog();
         });
         if (dialogPanel) {
             dialogPanel.addEventListener('keydown', (e) => {

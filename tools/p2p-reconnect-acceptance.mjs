@@ -313,6 +313,47 @@ try {
         }
         await s.ctxH.close(); await s.ctxJ.close();
     }
+
+    // 5. RE-PAIR SUPERSEDES A STALE EPISODE: with a repair episode stuck
+    //    active (the peer is unreachable), a fresh manual ceremony re-pairs —
+    //    the fresh secret MUST cancel the stale episode, which still holds
+    //    the OLD base/role/epoch and squats the pair's one episode slot. If
+    //    it survives, every publish rides retired topics/keys and no episode
+    //    with the new secret can ever start, so healing is dead until an app
+    //    restart (found via field logs from a laptop↔phone session).
+    {
+        console.log('\n  [manual re-ceremony while a stale episode is running]');
+        const s = await freshPair('E');
+        const killLinks = (page) => page.evaluate(() => {
+            const pm = window.__arcade.p2p._addon().peerNode;
+            Array.from(pm.peers.values()).forEach(p => { try { p.dataChannel.close(); } catch (e) {} });
+        });
+        // Park J quietly (paused, no bye) and kill the link: H's episode
+        // arms and can never complete — the "stale episode" of the field log.
+        await s.J.evaluate(async (d) => { await window.__arcade.p2p._rdv().pausePair(d); }, await peerDev(s.J));
+        await killLinks(s.H);
+        const armed = await s.H.waitForFunction(
+            `window.__arcade.p2p._rdv().episodes.size === 1`, null, { timeout: 30000 }
+        ).then(() => true).catch(() => false);
+        check('stale episode armed while the peer is unreachable', armed);
+
+        // Fresh manual ceremony (new transport peerIds). The identity
+        // handshake re-pairs automatically — both sides still have
+        // autoReconnect on — and the fresh secret must supersede.
+        await ceremony(s.H, s.J);
+        const staleCancelled = await s.H.waitForFunction(
+            `window.__arcade.p2p._rdv().episodes.size === 0`, null, { timeout: 15000 }
+        ).then(() => true).catch(() => false);
+        check('fresh pairing cancelled the stale episode', staleCancelled);
+
+        // Break the new link quietly: both sides must heal with the NEW
+        // secret (before the fix, H stayed deaf on retired topics forever).
+        await killLinks(s.H);
+        await s.H.waitForFunction(`window.__arcade.p2p.status() !== 'connected'`, null, { timeout: 30000 }).catch(() => {});
+        check('healed after re-pair: side A', await connectedAgain(s.H));
+        check('healed after re-pair: side B', await connectedAgain(s.J));
+        await s.ctxH.close(); await s.ctxJ.close();
+    }
 } catch (e) {
     console.error('\nFATAL:', e.message);
     failures++;
