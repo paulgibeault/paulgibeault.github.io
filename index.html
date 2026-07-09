@@ -940,6 +940,12 @@
                     // The other device opted in and ours has no stored answer.
                     askAutoReconnect(deviceId, name);
                 });
+                ArcadeP2P.onRemoteBye(({ name }) => {
+                    // Their user tapped Hang Up — a deliberate goodbye, not a
+                    // failure, so no scary reconnect language.
+                    showToast(name + ' hung up. Call them back from Multiplayer anytime.');
+                    if (window.__arcade.renderKnownPeers) window.__arcade.renderKnownPeers();
+                });
                 ArcadeP2P.onMessage((targetGameId, payload, fromDeviceId) => {
                     // Route by the sender's gameId — both devices run the same
                     // game for a session, so target == sender's id. Messages
@@ -986,9 +992,19 @@
         // without the second trigger a connection killed by that navigation
         // would never get a chance to heal until the user reconnects by hand.
         function tryResumeOnLaunch() {
+            // A recent live session → active resume. Otherwise, any
+            // auto-reconnect peer that isn't hung up still warrants booting
+            // the bridge: resumeRendezvous() arms quiet standby, which is
+            // what lets the OTHER device's Call reach this one while the
+            // arcade is merely open.
             let lastLive = 0;
             try { lastLive = parseInt(localStorage.getItem('arcade.v1._meta.lastLiveSession') || '0', 10); } catch (e) {}
-            if (lastLive && Date.now() - lastLive < 6 * 3600 * 1000) {
+            let callable = false;
+            try {
+                const known = JSON.parse(localStorage.getItem('arcade.v1._meta.knownPeers') || '{}');
+                callable = Object.values(known).some((p) => p && p.autoReconnect && !p.paused);
+            } catch (e) {}
+            if ((lastLive && Date.now() - lastLive < 6 * 3600 * 1000) || callable) {
                 loadP2P().then((b) => b.resumeRendezvous()).catch(() => {});
             }
         }
@@ -1626,7 +1642,7 @@
             const meta = document.createElement('div');
             meta.className = 'connections-row__meta';
             meta.textContent = 'Last connected ' + relativeTime(peer.lastConnectedAt)
-                + (state === 'idle' && peer.autoReconnect ? ' · auto-reconnect will retry' : '');
+                + (state === 'idle' && peer.autoReconnect ? ' · listening — Call reaches them while their arcade is open' : '');
             row.appendChild(meta);
 
             const actions = document.createElement('div');

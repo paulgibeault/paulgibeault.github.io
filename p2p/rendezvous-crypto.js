@@ -17,7 +17,9 @@
  *                                                                            of the NEW connection]
  * Sealing:
  *   blob = base64url( nonce(12) || AES-256-GCM(aeadKey, plaintext, aad) )
- *   aad  = utf8("qrp2p/rdv/v1|" + direction + "|" + epoch)   direction ∈ {"o","a"}
+ *   aad  = utf8("qrp2p/rdv/v1|" + direction + "|" + epoch)   direction ∈ {"o","a","r"}
+ *          ("o" offer, "a" answer, "r" ring — a listener-role doorbell asking
+ *           the caller role to publish a fresh offer, PROTOCOL.md §7.5)
  *
  * open() returns null on ANY failure — decrypt-then-parse: unauthenticated
  * bytes never reach a parser.
@@ -128,7 +130,9 @@ export class RendezvousCrypto {
     }
 
     static aad(direction, epoch) {
-        if (direction !== 'o' && direction !== 'a') throw new Error('direction must be "o" or "a"');
+        if (direction !== 'o' && direction !== 'a' && direction !== 'r') {
+            throw new Error('direction must be "o", "a" or "r"');
+        }
         return te.encode(AAD_PREFIX + direction + '|' + epoch);
     }
 

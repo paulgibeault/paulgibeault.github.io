@@ -62,14 +62,17 @@
  *
  * Call / Hang up / Start over — the launcher's Multiplayer dialog, framed
  * like a phone: a saved connection is either live (Hang Up ends it, keeping
- * the secret for later) or not (Call tries to silently bring it back):
- *   hangUpKnownPeer() drops the live link and (for an auto-reconnect pair)
- *   tells rendezvous to stop healing it, without forgetting the secret.
- *   callKnownPeer() clears that and, when possible, tries a silent
- *   reconnect through the dead-drop. startOverKnownPeer() is the harder
- *   reset: drops the link, forgets the stashed session AND the pairing
- *   secret, so the next connection is a fully fresh ceremony — the saved
- *   name stays, only deleteKnownPeer() forgets the device outright.
+ * the secret for later) or not (Call rings it through the dead-drop):
+ *   hangUpKnownPeer() says goodbye over the live channel (the other side
+ *   drops to quiet standby instead of burning a repair episode), drops the
+ *   link, and tells our rendezvous to stop healing it — secret kept.
+ *   callKnownPeer() clears that and rings: it reaches the peer whenever
+ *   their arcade is merely OPEN with the pair enabled (active repair,
+ *   quiet standby after a timeout, or standby-at-boot — see
+ *   resumeRendezvous). startOverKnownPeer() is the harder reset: drops the
+ *   link, forgets the stashed session AND the pairing secret, so the next
+ *   connection is a fully fresh ceremony — the saved name stays, only
+ *   deleteKnownPeer() forgets the device outright.
  */
 
 import { RendezvousManager } from './p2p/rendezvous.js';
@@ -160,6 +163,7 @@ function getMyDeviceName() {
 
 const peerIdentityListeners = []; // fn({deviceId, name, remoteName, isNew, fingerprintChanged})
 const pairRequestListeners = [];  // fn({deviceId, name}) — peer wants auto-reconnect, user undecided
+const remoteByeListeners = [];    // fn({deviceId, name}) — peer hung up on purpose
 const presenceListeners = [];     // fn({gameId, deviceId, name, kind}) — remote game mounted/listening
 const identityLinks = new Map();  // deviceId → transport peerId of its DIRECT link
 
@@ -355,6 +359,11 @@ async function ensureAddon() {
             if (!detail) return; // malformed deviceId — bind nothing
             if (!d.relayed) {
                 identityLinks.set(env.deviceId, d.peerId);
+                // A completed handshake means this connection is live on
+                // purpose — clear any leftover hang-up flag. (The status
+                // handler's clear above misses FRESH ceremonies, because at
+                // 'connected' time this identityLinks binding didn't exist.)
+                setKnownPeerPaused(env.deviceId, false);
                 if (detail.fingerprintChanged) fingerprintSuspects.add(env.deviceId);
                 // A manual ceremony with an auto-reconnect peer is a fresh
                 // trust event: re-establish the pairing secret every time —
@@ -374,7 +383,10 @@ async function ensureAddon() {
 
         // Rendezvous (PROTOCOL.md §7): zero-touch reconnection for opted-in
         // pairs. The carrier moves only sealed blobs; episodes surface to
-        // games as 'interrupted' so nobody resets a running game.
+        // games as 'interrupted' so nobody resets a running game. 'gave-up'
+        // (v1.10) means the episode went QUIET — games release the session,
+        // but the pair stays subscribed and reachable, so a much later
+        // 'reconnected' with no fresh 'reconnecting' in between is normal.
         rdv = new RendezvousManager(mp.peerNode, { carrierFactory: rdvCarrierFactory });
         rdv.addEventListener('reconnecting', () => {
             rdvReconnecting = true;
@@ -388,6 +400,25 @@ async function ensureAddon() {
             });
         }
         rdv.addEventListener('pair-established', () => stampLiveSession());
+        rdv.addEventListener('remote-bye', (e) => {
+            // The peer hung up on purpose. Drop the link NOW instead of
+            // letting it linger 'interrupted' through the repair grace
+            // period — games should see the session end promptly. The
+            // rendezvous layer already recorded the bye, so the teardown
+            // below starts a quiet standby (callable), not a repair episode.
+            const { peerId } = e.detail || {};
+            if (peerId && mp.peerNode.peers.has(peerId)) {
+                mp.peerNode.disconnectPeer(peerId);
+            }
+            const devId = peerId ? deviceIdForPeerId(peerId) : null;
+            if (devId) {
+                const known = readKnownPeers();
+                for (const fn of remoteByeListeners) {
+                    try { fn({ deviceId: devId, name: (known[devId] && known[devId].name) || 'Unnamed device' }); }
+                    catch (err) {}
+                }
+            }
+        });
         rdv.addEventListener('pair-request', (e) => {
             // The other device opted in; ours decides based on the stored
             // flag, or asks the user via the launcher's onPairRequest hook.
@@ -641,16 +672,28 @@ export const ArcadeP2P = {
     },
 
     /**
-     * Hangs up on this peer: drops the live link right now, if any, and —
-     * for an auto-reconnect pair — tells the rendezvous layer to stop trying
-     * to heal it. Unlike disableAutoReconnect(), the pairing secret is kept,
-     * so callKnownPeer() needs no new ceremony to bring it back.
+     * Hangs up on this peer: says goodbye over the live channel (so the
+     * other side doesn't burn a repair episode on a link we closed on
+     * purpose — it drops to quiet standby instead, still callable), then
+     * drops the link and tells our rendezvous layer to stop healing it.
+     * Unlike disableAutoReconnect(), the pairing secret is kept, so
+     * callKnownPeer() needs no new ceremony to bring it back.
      */
     async hangUpKnownPeer(deviceId) {
         setKnownPeerPaused(deviceId, true);
         await ensureAddon(); // rdv/addon are only populated once the addon has loaded
+        // Pause OUR side before the bye goes out: the peer reacts to a bye by
+        // dropping the link immediately, and if our pair were still enabled
+        // when that close lands, our own rendezvous would fire a repair
+        // episode for the very link we're hanging up (and litter the
+        // dead-drop with an offer nobody should answer).
         await rdv.pausePair(deviceId).catch(() => {});
         const peerId = identityLinks.get(deviceId);
+        if (peerId && addon.peerNode.peers.has(peerId)) {
+            rdv.sendBye(peerId);
+            // Give the bye frame a beat to flush before the pc closes under it.
+            await new Promise((r) => setTimeout(r, 250));
+        }
         if (peerId && addon.peerNode.peers.has(peerId)) {
             addon.peerNode.disconnectPeer(peerId);
         }
@@ -659,10 +702,11 @@ export const ArcadeP2P = {
 
     /**
      * Calls this peer back: clears the paused flag and, for an auto-reconnect
-     * peer, asks the rendezvous layer to attempt a silent reconnect through
-     * the dead-drop right now. Best-effort only (the other device must be
-     * reachable there too) — returns false when there's no background path
-     * to try, so callers should keep a manual "get a new invite code" action
+     * peer, rings it through the dead-drop right now. The ring lands whenever
+     * the other device has the arcade open with the pair enabled — it does
+     * NOT require the other user to act, only to not have hung up themselves.
+     * Returns false when there's no pairing secret on record to ring with,
+     * so callers should keep a manual "get a new invite code" action
      * available alongside this either way.
      */
     async callKnownPeer(deviceId) {
@@ -719,14 +763,37 @@ export const ArcadeP2P = {
     },
 
     /**
+     * Fires when a peer hangs up on purpose (its user tapped Hang Up):
+     * fn({deviceId, name}). The link is already being dropped; this is for
+     * UI feedback — distinguish "they hung up" from a connection failure.
+     */
+    onRemoteBye(fn) {
+        remoteByeListeners.push(fn);
+        return () => {
+            const i = remoteByeListeners.indexOf(fn);
+            if (i >= 0) remoteByeListeners.splice(i, 1);
+        };
+    },
+
+    /**
      * Call at launcher startup: if a paired session was live recently, boot
-     * the transport and let the rendezvous layer reconnect it — this is what
-     * resumes a game after the browser was killed on both ends.
+     * the transport and let the rendezvous layer actively reconnect it —
+     * this is what resumes a game after the browser was killed on both
+     * ends. Outside that window, any auto-reconnect peer still gets a quiet
+     * STANDBY (subscribe-only): this device initiates nothing, but a Call
+     * from the other side reaches it for as long as the arcade is open.
      */
     async resumeRendezvous() {
         let ts = 0;
         try { ts = parseInt(localStorage.getItem(LAST_LIVE_SESSION_KEY) || '0', 10); } catch (e) {}
-        if (!ts || Date.now() - ts > RESUME_WINDOW_MS) return false;
+        const fresh = ts && Date.now() - ts <= RESUME_WINDOW_MS;
+        if (!fresh) {
+            const known = readKnownPeers();
+            if (!Object.values(known).some((p) => p && p.autoReconnect && !p.paused)) return false;
+            await ensureAddon();
+            await rdv.standbyAll();
+            return true;
+        }
         await ensureAddon();
         await rdv.resumeAll();
         return true;
