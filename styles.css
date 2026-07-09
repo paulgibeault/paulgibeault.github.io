@@ -455,6 +455,41 @@ body.app-in-game .launcher-menu[data-open="true"] .launcher-menu__panel {
     text-align: center;
 }
 
+/* Read-only connection log (boot decision + auto-reconnect episodes).
+   Lives in the Multiplayer dialog so it can be inspected/copied WITHOUT
+   starting a new connection attempt. */
+.connections-dialog__log {
+    margin: 0 16px 14px;
+    flex-shrink: 0;
+}
+.connections-dialog__log summary {
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    user-select: none;
+}
+.connections-dialog__log summary:hover { color: var(--field-gold); }
+.connections-dialog__log-box {
+    margin-top: 8px;
+    max-height: 180px;
+    overflow-y: auto;
+    border: 1px solid rgba(212, 175, 55, 0.18);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.35);
+    padding: 8px;
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    overflow-wrap: anywhere;
+}
+.connections-dialog__log-line--boot,
+.connections-dialog__log-line--bridge { color: var(--snow-white); }
+.connections-dialog__log-line--rdv { color: var(--field-gold); }
+.connections-dialog__log-line--mqtt { color: var(--text-secondary); }
+.connections-dialog__log-copy { margin-top: 8px; }
+
 .connections-row {
     border: 1px solid rgba(212, 175, 55, 0.18);
     border-radius: 8px;

@@ -78,6 +78,7 @@
 import { RendezvousManager } from './p2p/rendezvous.js';
 import { MqttCarrier } from './p2p/rendezvous-carriers.js';
 import { readKnownPeers, writeKnownPeers, setKnownPeerPaused } from './arcade-known-peers.js';
+import { ArcadeDiag } from './arcade-diag.js';
 
 // Free public MQTT-over-WSS broker used as the untrusted dead-drop. It sees
 // only ciphertext on unlinkable rotating topics, and only during repair.
@@ -91,7 +92,7 @@ function rdvCarrierFactory() {
     if (typeof window !== 'undefined' && window.__arcadeRdvCarrierFactory) {
         return window.__arcadeRdvCarrierFactory();
     }
-    return new MqttCarrier({ url: RDV_BROKER_URL });
+    return new MqttCarrier({ url: RDV_BROKER_URL, onLog: (msg) => ArcadeDiag.log('mqtt', msg) });
 }
 
 // Terminal link statuses have already been removed from the transport's peers
@@ -243,6 +244,7 @@ const messageListeners = []; // fn(gameId, payload)
 
 function setStatus(next) {
     if (next === sdkStatus) return;
+    ArcadeDiag.log('bridge', `status ${sdkStatus} → ${next}`);
     sdkStatus = next;
     syncWakeLock();
     for (const fn of statusListeners) {
@@ -292,6 +294,13 @@ async function ensureAddon() {
         const { default: P2PAddon } = await import('./p2p/p2p-addon.js');
         const mp = new P2PAddon();
         await mp.init();
+        ArcadeDiag.log('bridge', 'transport booted');
+        // Transport-level diagnostics (interruptions, in-band repair, ICE)
+        // feed the same connection log the Multiplayer dialog shows.
+        mp.peerNode.addEventListener('diagnostic', (e) => {
+            const d = e.detail || {};
+            ArcadeDiag.log('p2p', (d.type && d.type !== 'info' ? d.type.toUpperCase() + ': ' : '') + d.msg);
+        });
 
         // Tracks which transport peerIds we've already announced our identity
         // to, so a second peer joining an already-'connected' host (via
@@ -388,6 +397,10 @@ async function ensureAddon() {
         // but the pair stays subscribed and reachable, so a much later
         // 'reconnected' with no fresh 'reconnecting' in between is normal.
         rdv = new RendezvousManager(mp.peerNode, { carrierFactory: rdvCarrierFactory });
+        rdv.addEventListener('diagnostic', (e) => {
+            const d = e.detail || {};
+            ArcadeDiag.log('rdv', (d.type && d.type !== 'info' ? d.type.toUpperCase() + ': ' : '') + d.msg);
+        });
         rdv.addEventListener('reconnecting', () => {
             rdvReconnecting = true;
             applyStatus(mp);
@@ -628,6 +641,7 @@ export const ArcadeP2P = {
      * that never actually happened.
      */
     async enableAutoReconnect(deviceId) {
+        ArcadeDiag.log('bridge', `user action: enable auto-reconnect for ${deviceId}`);
         const known = readKnownPeers();
         if (!known[deviceId]) return false;
         known[deviceId].autoReconnect = true;
@@ -656,6 +670,7 @@ export const ArcadeP2P = {
      * toggle, so re-enabling later needs no new ceremony to work again.
      */
     async disableAutoReconnect(deviceId) {
+        ArcadeDiag.log('bridge', `user action: disable auto-reconnect for ${deviceId}`);
         const known = readKnownPeers();
         if (known[deviceId]) {
             known[deviceId].autoReconnect = false;
@@ -680,6 +695,7 @@ export const ArcadeP2P = {
      * callKnownPeer() needs no new ceremony to bring it back.
      */
     async hangUpKnownPeer(deviceId) {
+        ArcadeDiag.log('bridge', `user action: Hang Up ${deviceId}`);
         setKnownPeerPaused(deviceId, true);
         await ensureAddon(); // rdv/addon are only populated once the addon has loaded
         // Pause OUR side before the bye goes out: the peer reacts to a bye by
@@ -710,6 +726,7 @@ export const ArcadeP2P = {
      * available alongside this either way.
      */
     async callKnownPeer(deviceId) {
+        ArcadeDiag.log('bridge', `user action: Call ${deviceId}`);
         setKnownPeerPaused(deviceId, false);
         const known = readKnownPeers()[deviceId];
         if (known && known.autoReconnect) {
@@ -719,8 +736,14 @@ export const ArcadeP2P = {
             // established, or was forgotten before this peer's last manual
             // reconnect) — that must NOT be reported as "trying" when
             // nothing was actually attempted.
-            return await rdv.resumePair(deviceId).catch(() => false);
+            const tried = await rdv.resumePair(deviceId).catch((e) => {
+                ArcadeDiag.log('bridge', `Call ${deviceId} failed: ${e && e.message}`);
+                return false;
+            });
+            if (!tried) ArcadeDiag.log('bridge', `Call ${deviceId}: no pairing secret on record — nothing rung`);
+            return tried;
         }
+        ArcadeDiag.log('bridge', `Call ${deviceId}: auto-reconnect is off for this peer — nothing rung`);
         return false;
     },
 
@@ -732,6 +755,7 @@ export const ArcadeP2P = {
      * name/history stay; only deleteKnownPeer() forgets those too.
      */
     async startOverKnownPeer(deviceId) {
+        ArcadeDiag.log('bridge', `user action: Start Over ${deviceId} (forgetting session + pairing secret)`);
         await ensureAddon(); // rdv/addon are only populated once the addon has loaded
         const peerId = identityLinks.get(deviceId);
         if (peerId) {
@@ -789,11 +813,16 @@ export const ArcadeP2P = {
         const fresh = ts && Date.now() - ts <= RESUME_WINDOW_MS;
         if (!fresh) {
             const known = readKnownPeers();
-            if (!Object.values(known).some((p) => p && p.autoReconnect && !p.paused)) return false;
+            if (!Object.values(known).some((p) => p && p.autoReconnect && !p.paused)) {
+                ArcadeDiag.log('bridge', 'resume-on-launch: no recent session and no callable auto-reconnect peer — staying cold');
+                return false;
+            }
+            ArcadeDiag.log('bridge', `resume-on-launch: last live session ${ts ? Math.round((Date.now() - ts) / 60000) + 'm ago' : 'never'} (outside ${RESUME_WINDOW_MS / 3600000}h window) — arming quiet standby only`);
             await ensureAddon();
             await rdv.standbyAll();
             return true;
         }
+        ArcadeDiag.log('bridge', `resume-on-launch: last live session ${Math.round((Date.now() - ts) / 60000)}m ago — actively resuming paired sessions`);
         await ensureAddon();
         await rdv.resumeAll();
         return true;

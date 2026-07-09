@@ -156,10 +156,14 @@ export class MqttCarrier {
      * @param {object} [opts]
      * @param {string} [opts.url] - WSS endpoint of a public MQTT broker.
      * @param {string} [opts.topicPrefix] - Namespace prefix on the broker.
+     * @param {(msg: string) => void} [opts.onLog] - Socket-lifecycle
+     *   diagnostics (dial/up/lost/redial). Never called for per-message
+     *   traffic; never load-bearing.
      */
     constructor(opts = {}) {
         this.url = opts.url || 'wss://test.mosquitto.org:8081/mqtt';
         this.topicPrefix = opts.topicPrefix || 'qrp2p/r/v1/';
+        this.onLog = typeof opts.onLog === 'function' ? opts.onLog : null;
         this.ws = null;             // the LIVE (post-CONNACK) socket only
         this.subs = new Map();      // full topic → Set<cb>
         this.pingTimer = null;
@@ -189,13 +193,20 @@ export class MqttCarrier {
         return this._connectPromise;
     }
 
+    _log(msg) {
+        if (this.onLog) { try { this.onLog(msg); } catch (e) {} }
+    }
+
     _dial() {
         if (this.closed || this.ws || this._dialing) return;
         this._dialing = true;
+        this._log(`dialing ${this.url}…`);
+        const dialedAt = Date.now();
         let ws;
         try {
             ws = new WebSocket(this.url, 'mqtt');
         } catch (e) {
+            this._log(`WebSocket constructor failed (${e && e.message})`);
             this._dialing = false;
             this._scheduleRedial();
             return;
@@ -207,6 +218,7 @@ export class MqttCarrier {
             if (done) return;
             done = true;
             clearTimeout(guard);
+            this._log(`dial failed after ${Date.now() - dialedAt}ms (socket error/closed/timeout)`);
             try { ws.close(); } catch (e) {}
             this._dialing = false;
             this._scheduleRedial();
@@ -224,11 +236,13 @@ export class MqttCarrier {
                 done = true;
                 clearTimeout(guard);
                 if (!pkt.ok) {
+                    this._log('broker refused the MQTT session (CONNACK != 0)');
                     try { ws.close(); } catch (err) {}
                     this._dialing = false;
                     this._scheduleRedial();
                     return;
                 }
+                this._log(`broker session up in ${Date.now() - dialedAt}ms (${this.subs.size} subscription(s) re-issued)`);
                 this._dialing = false;
                 this._backoffIdx = 0;
                 this.ws = ws;
@@ -264,6 +278,7 @@ export class MqttCarrier {
         if (this.ws !== ws) return;
         this.ws = null;
         if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
+        this._log('broker session lost — redialing');
         try { ws.onclose = null; ws.close(); } catch (e) {}
         this._scheduleRedial();
     }

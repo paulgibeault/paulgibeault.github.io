@@ -1,4 +1,4 @@
-const CACHE_NAME = 'paul-arcade-v21';
+const CACHE_NAME = 'paul-arcade-v22';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
@@ -8,6 +8,7 @@ const ASSETS_TO_CACHE = [
   './arcade-sdk.js',
   './arcade-p2p.js',
   './arcade-known-peers.js',
+  './arcade-diag.js',
   './p2p/p2p-addon.js',
   './p2p/p2p-ui.js',
   './p2p/p2p-core.js',
