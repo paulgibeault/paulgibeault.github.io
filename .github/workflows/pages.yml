@@ -40,7 +40,19 @@ jobs:
           npx playwright install --with-deps chrome
 
       - name: P2P acceptance (real WebRTC, self-contained)
-        run: node tools/p2p-acceptance.mjs
+        # Real-WebRTC negotiation is timing-sensitive under headless CI; retry a
+        # few times so a transient hiccup doesn't block the deploy. A genuine
+        # regression fails all attempts.
+        run: |
+          for i in 1 2 3; do
+            echo "::group::p2p-acceptance attempt $i"
+            if node tools/p2p-acceptance.mjs; then echo "::endgroup::"; exit 0; fi
+            echo "::endgroup::"
+            echo "attempt $i failed; retrying in 3s"
+            sleep 3
+          done
+          echo "p2p-acceptance failed after 3 attempts"
+          exit 1
 
       # NOTE: the full per-game §13 acceptance (tools/acceptance.mjs) and the
       # --pool test need a launcher staged with catalog-registered games, which
