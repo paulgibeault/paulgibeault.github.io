@@ -868,6 +868,10 @@
         // talk only to the SDK; this is the launcher end of arcade:peer.*.
         let p2pBridge = null;
         let p2pLoadPromise = null;
+        // Peer-layer capability flags shipped in arcade:welcome. Games
+        // feature-detect via Arcade.peer.caps() instead of version checks —
+        // additive launcher features never bump the protocol version.
+        const ARCADE_PEER_CAPS = ['peer.sendTo', 'peer.roster', 'peer.meta'];
         function loadP2P() {
             if (p2pBridge) return Promise.resolve(p2pBridge);
             if (p2pLoadPromise) return p2pLoadPromise;
@@ -1181,6 +1185,7 @@
                     postToIframe(gameId, {
                         type: 'arcade:welcome',
                         version: 2,
+                        caps: ARCADE_PEER_CAPS,
                         peerStatus: p2pBridge ? p2pBridge.status() : 'idle',
                         peers: p2pBridge ? p2pBridge.connectedPeers() : [],
                         settings: currentSettings()

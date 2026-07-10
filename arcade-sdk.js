@@ -121,6 +121,10 @@
     var handshakeTimer = null;
 
     var peerStatus = 'unavailable';
+    // Launcher capability flags (welcome.caps) — additive feature detection
+    // so a game never hard-depends on a launcher feature mid-rollout.
+    // Empty when standalone or on an older launcher.
+    var peerCaps = [];
     var settings = {
         fontScale: 1,
         theme: 'dark',
@@ -548,6 +552,9 @@
                 framed = true;
                 parentOrigin = e.origin;
                 setPeerStatus(typeof data.peerStatus === 'string' ? data.peerStatus : 'idle');
+                if (Array.isArray(data.caps)) {
+                    peerCaps = data.caps.filter(function (c) { return typeof c === 'string'; });
+                }
                 if (Array.isArray(data.peers)) {
                     for (var pi = 0; pi < data.peers.length; pi++) {
                         var p = data.peers[pi];
@@ -878,6 +885,7 @@
     var peerApi = {
         status: function () { return peerStatus; },
         onStatus: makeSubscriber(listeners.peerStatus),
+        caps: function () { return Object.freeze(peerCaps.slice()); },
         send: function (payload) {
             // 'interrupted' = live session being repaired by the transport —
             // sends are queued and replayed on recovery (exactly-once), so
