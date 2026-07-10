@@ -22,7 +22,17 @@ if [ -f "$PID_FILE" ]; then
 fi
 
 # Start new server, capturing stdout and stderr to log file
-python3 -m http.server "$PORT" --directory "$DIR" > "$LOG_FILE" 2>&1 &
+python3 - "$PORT" "$DIR" > "$LOG_FILE" 2>&1 <<'PYSRV' &
+import functools, http.server, sys
+# Cache-Control: no-store — Safari's heuristic caching over a header-less
+# python http.server served a STALE module during live debugging twice.
+class NoStore(http.server.SimpleHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header('Cache-Control', 'no-store')
+        super().end_headers()
+http.server.ThreadingHTTPServer(('', int(sys.argv[1])),
+    functools.partial(NoStore, directory=sys.argv[2])).serve_forever()
+PYSRV
 NEW_PID=$!
 
 # Verify it started

@@ -210,7 +210,17 @@ for arg in "$@"; do
 done
 
 # ─── start server ──────────────────────────────────────────────────────
-python3 -m http.server "$PORT" --bind 127.0.0.1 --directory "$STAGE_DIR" > "$LOG_FILE" 2>&1 &
+python3 - "$PORT" "$STAGE_DIR" > "$LOG_FILE" 2>&1 <<'PYSRV' &
+import functools, http.server, sys
+# Cache-Control: no-store — Safari's heuristic caching over a header-less
+# python http.server served a STALE module during live debugging twice.
+class NoStore(http.server.SimpleHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header('Cache-Control', 'no-store')
+        super().end_headers()
+http.server.ThreadingHTTPServer(('127.0.0.1', int(sys.argv[1])),
+    functools.partial(NoStore, directory=sys.argv[2])).serve_forever()
+PYSRV
 NEW_PID=$!
 echo "$NEW_PID" > "$PID_FILE"
 

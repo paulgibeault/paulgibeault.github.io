@@ -75,7 +75,7 @@
  *   deleteKnownPeer() forgets the device outright.
  */
 
-import { RendezvousManager } from './p2p/rendezvous.js';
+import { RendezvousManager, RDV_BUILD } from './p2p/rendezvous.js';
 import { MqttCarrier } from './p2p/rendezvous-carriers.js';
 import { readKnownPeers, writeKnownPeers, setKnownPeerPaused } from './arcade-known-peers.js';
 import { ArcadeDiag } from './arcade-diag.js';
@@ -430,6 +430,9 @@ async function ensureAddon() {
         // but the pair stays subscribed and reachable, so a much later
         // 'reconnected' with no fresh 'reconnecting' in between is normal.
         rdv = new RendezvousManager(mp.peerNode, { carrierFactory: rdvCarrierFactory });
+        // Which build produced this log? Answer it up front: stale-cache
+        // sessions are indistinguishable from real bugs without this line.
+        ArcadeDiag.log('rdv', `build ${RDV_BUILD}`);
         rdv.addEventListener('diagnostic', (e) => {
             const d = e.detail || {};
             ArcadeDiag.log('rdv', (d.type && d.type !== 'info' ? d.type.toUpperCase() + ': ' : '') + d.msg);
