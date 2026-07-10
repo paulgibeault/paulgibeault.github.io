@@ -91,6 +91,12 @@
 import { RendezvousCrypto as RC } from './rendezvous-crypto.js';
 import { ConnectionUtils } from './p2p-core.js';
 
+// Bumped on every rendezvous protocol/behaviour change. The bridge prints
+// this at boot: the FIRST question a connection log must answer is "which
+// build produced this?" — field sessions have been burned diagnosing bugs
+// that were already fixed but not actually loaded (stale caches).
+export const RDV_BUILD = 'v2.3 pair-confirm/serialized/flap-resend';
+
 const DB_NAME = 'qrp2p-rendezvous';
 const DB_STORE = 'pairs';
 
@@ -273,6 +279,18 @@ export class RendezvousManager extends EventTarget {
     }
 
     /**
+     * Sends a pairing frame, surfacing failure: control frames ride no
+     * outbox, so one sent into a closed/interrupted channel is silently
+     * dropped — a lost pairing frame used to starve the exchange with no
+     * trace in the log. _resumeExchangeLocked re-sends on the next link-up.
+     */
+    _sendFrame(peerId, frame, what) {
+        const ok = this.pm.sendExt(peerId, 'rdv', frame);
+        if (!ok) this._diag(`${what} could not be sent (control channel not open) — will re-send when the link returns`, 'warn');
+        return ok;
+    }
+
+    /**
      * Serialized read-modify-write for a pair's stored record. Overlapping
      * get→put sequences clobber each other: a field log showed resumePair
      * resurrecting the base _commitPairing had just replaced — the device
@@ -330,21 +348,21 @@ export class RendezvousManager extends EventTarget {
         const outstanding = this.myRands.get(peerId);
         if (outstanding && outstanding.pairId === pairId) {
             this._diag(`pair ${pairId}: pairing already in progress — re-sending the same random (rand#${outstanding.tag})`);
-            this.pm.sendExt(peerId, 'rdv', { t: 'pair', v: 2, rand: b64(outstanding.rand) });
+            this._sendFrame(peerId, { t: 'pair', v: 2, rand: b64(outstanding.rand) }, `pair ${pairId}: pairing random`);
             return;
         }
         const ex = this.pairExchanges.get(peerId);
         if (ex && ex.pairId === pairId && !ex.committed) {
             this._diag(`pair ${pairId}: exchange awaiting the peer's key confirmation — re-sending ours, not minting a fresh random`);
-            if (ex.myRandB64) this.pm.sendExt(peerId, 'rdv', { t: 'pair', v: 2, rand: ex.myRandB64 });
-            this.pm.sendExt(peerId, 'rdv', ex.confirmFrame);
+            if (ex.myRandB64) this._sendFrame(peerId, { t: 'pair', v: 2, rand: ex.myRandB64 }, `pair ${pairId}: pairing random`);
+            this._sendFrame(peerId, ex.confirmFrame, `pair ${pairId}: key confirmation`);
             return;
         }
         const rand = RC.randBytes(32);
         const tag = await RC.tag(rand);
         this.myRands.set(peerId, { pairId, rand, tag });
         this._diag(`pair ${pairId}: pairing random minted and sent (rand#${tag})`);
-        this.pm.sendExt(peerId, 'rdv', { t: 'pair', v: 2, rand: b64(rand) });
+        this._sendFrame(peerId, { t: 'pair', v: 2, rand: b64(rand) }, `pair ${pairId}: pairing random`);
         const pending = this.pendingRands.get(peerId);
         if (pending) {
             await this._completePairing(peerId, pairId, rand, pending.rand, pending.v);
@@ -554,7 +572,7 @@ export class RendezvousManager extends EventTarget {
             // our confirmation instead, in case theirs got lost.
             const dupOfEx = ex && ex.theirRandHex === theirRandHex;
             this._diag(`${dupOfEx ? `pair ${ex.pairId}: ` : ''}duplicate pairing random ignored (rand#${await RC.tag(theirRand)})${dupOfEx && !ex.legacy ? ' — re-sending our key confirmation' : ''}`);
-            if (dupOfEx && !ex.legacy) this.pm.sendExt(peerId, 'rdv', ex.confirmFrame);
+            if (dupOfEx && !ex.legacy) this._sendFrame(peerId, ex.confirmFrame, `pair ${ex.pairId}: key confirmation`);
             return;
         }
         // A fresh random supersedes any stashed confirmation: the channel is
@@ -621,7 +639,7 @@ export class RendezvousManager extends EventTarget {
             confirmFrame: { t: 'pair-confirm', v: 2, mac: await RC.confirmMac(base, role) }
         };
         this.pairExchanges.set(peerId, ex);
-        this.pm.sendExt(peerId, 'rdv', ex.confirmFrame);
+        this._sendFrame(peerId, ex.confirmFrame, `pair ${pairId}: key confirmation`);
         if (legacy) {
             // A pre-confirmation peer committed the moment the randoms
             // crossed — holding back here would only desync us from it.
@@ -652,6 +670,27 @@ export class RendezvousManager extends EventTarget {
         }
     }
 
+    /**
+     * The link to this peer is (back) up: re-send whatever half-finished
+     * pairing material we hold, in case our earlier frames died in a closed
+     * channel. Idempotent on the receiving side (duplicate randoms are
+     * dropped, confirmations re-verify). Always entered under the peer lock.
+     */
+    async _resumeExchangeLocked(peerId) {
+        const mine = this.myRands.get(peerId);
+        if (mine) {
+            this._diag(`pair ${mine.pairId}: link is up with the exchange unfinished — re-sending our pairing random (rand#${mine.tag})`);
+            this._sendFrame(peerId, { t: 'pair', v: 2, rand: b64(mine.rand) }, `pair ${mine.pairId}: pairing random`);
+            return;
+        }
+        const ex = this.pairExchanges.get(peerId);
+        if (ex && !ex.committed) {
+            this._diag(`pair ${ex.pairId}: link is up with the exchange awaiting confirmation — re-sending our material (key check ${ex.check})`);
+            if (ex.myRandB64) this._sendFrame(peerId, { t: 'pair', v: 2, rand: ex.myRandB64 }, `pair ${ex.pairId}: pairing random`);
+            this._sendFrame(peerId, ex.confirmFrame, `pair ${ex.pairId}: key confirmation`);
+        }
+    }
+
     /** Peer's key confirmation: commit on proof, refuse on mismatch.
      *  Always entered under the peer lock. */
     async _onPairConfirmLocked(peerId, mac) {
@@ -675,11 +714,17 @@ export class RendezvousManager extends EventTarget {
             this._diag(`pair ${ex.pairId}: peer's key confirmation does not match the committed key (our check ${ex.check}) — holding it for an in-flight re-key`, 'warn');
             return;
         }
-        // The two sides derived DIFFERENT bases — two exchanges crossed
-        // (e.g. both sides minted concurrently against different randoms).
-        // Neither side commits, so nothing bricks; restart the exchange
-        // from exactly ONE side (deterministic: both sides see the same two
-        // MAC values, the lexicographically lower one re-initiates).
+        // The two sides derived DIFFERENT bases — two exchanges crossed.
+        // Neither side commits, so nothing bricks. BOTH sides restart: two
+        // fresh randoms crossing converge (completion pairs each side's
+        // latest mint with the other's, deriving the same base on both
+        // ends), and the idempotent re-send paths absorb the duplicate
+        // traffic. A single-side rule ("lower MAC restarts") is NOT safe
+        // here — it assumes both sides compare the same two MAC values,
+        // which is false exactly when candidates crossed: each side
+        // compares a different pair, and both can conclude "wait" (seen in
+        // a field log — the exchange then starved until it expired and no
+        // secret was saved at all).
         if (ex.timer) { ex.timer(); ex.timer = null; }
         this.pairExchanges.delete(peerId);
         const retries = this.confirmRetries.get(peerId) || 0;
@@ -689,16 +734,12 @@ export class RendezvousManager extends EventTarget {
             return;
         }
         this.confirmRetries.set(peerId, retries + 1);
-        if (ex.confirmFrame.mac < mac) {
-            this._diag(`pair ${ex.pairId}: key confirmation MISMATCH (our check ${ex.check}) — crossed exchanges, secret NOT saved; restarting the exchange from this side`, 'warn');
-            const pairId = ex.pairId;
-            setTimeout(() => {
-                if (this._destroyed) return;
-                this.enablePair(peerId, pairId).catch(() => {});
-            }, 750);
-        } else {
-            this._diag(`pair ${ex.pairId}: key confirmation MISMATCH (our check ${ex.check}) — crossed exchanges, secret NOT saved; waiting for the peer to restart the exchange`, 'warn');
-        }
+        this._diag(`pair ${ex.pairId}: key confirmation MISMATCH (our check ${ex.check}) — crossed exchanges, secret NOT saved; restarting the exchange (attempt ${retries + 1})`, 'warn');
+        const pairId = ex.pairId;
+        setTimeout(() => {
+            if (this._destroyed) return;
+            this.enablePair(peerId, pairId).catch(() => {});
+        }, 750);
     }
 
     /** The exchange is proven (or the peer is v1): persist and announce. */
@@ -758,6 +799,11 @@ export class RendezvousManager extends EventTarget {
         if (!pairId) return;
         if (status === 'connected') {
             this._clearDelay(pairId);
+            // Pairing frames ride no outbox: anything sent while the link
+            // was down is gone. If an exchange is still in flight for this
+            // peer, re-send its material now — a link flap mid-pairing used
+            // to starve the exchange until it expired with nothing saved.
+            this._serial(this._peerLocks, peerId, () => this._resumeExchangeLocked(peerId)).catch(() => {});
             const ep = this.episodes.get(pairId);
             if (ep && !ep.settled) {
                 this._settleEpisode(pairId, ep);
