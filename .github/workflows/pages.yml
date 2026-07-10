@@ -42,6 +42,9 @@ jobs:
       - name: Store/files acceptance (IndexedDB + OPFS)
         run: node tools/store-acceptance.mjs
 
+      - name: Export/import roundtrip (store/files in save bundle; P2P excluded)
+        run: node tools/export-roundtrip-acceptance.mjs
+
       - name: P2P acceptance (real WebRTC, self-contained)
         # Real-WebRTC negotiation is timing-sensitive under headless CI; retry a
         # few times so a transient hiccup doesn't block the deploy. A genuine

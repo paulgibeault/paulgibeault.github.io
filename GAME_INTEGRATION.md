@@ -85,6 +85,17 @@ silently dropped on import, so old keys won't survive a cross-device save.
   inflate every save file: write it with
   `Arcade.state.set('telemetry', data, { exportable: false })`. The flag is
   sticky per key until you set `{ exportable: true }`.
+- [ ] **Storage can fill up.** `Arcade.state.set(...)` returns `true`, or `false`
+  when the write was dropped (quota) — the value was **not** saved. For anything
+  the user would hate to lose, check the return and/or subscribe once:
+
+  ```js
+  Arcade.onStorageError(() => Arcade.ui.toast('Storage full — some data was not saved', { kind: 'error' }));
+  ```
+
+  `Arcade.storage.estimate()` returns `{ usage, quota }` if you need to show it.
+  (The launcher already calls `navigator.storage.persist()` on boot to keep the
+  origin's data from being evicted under pressure.)
 
 ### One-shot migration of legacy keys
 
@@ -146,6 +157,41 @@ Arcade.state.migrate('v1', () => {
     }
 });
 ```
+
+---
+
+## 3a. Async storage — for data that outgrows localStorage
+
+`Arcade.state` is synchronous, string-only, and shares the origin's ~5 MB
+localStorage budget with every other app. When you need more room or binary
+data (a photo, a document, a large pack library), use the async stores. Both are
+per-app, both ride the launcher save bundle, and both are Promise-based.
+
+- [ ] **Structured / bulky records** → `Arcade.store.open(name)` — a per-app
+  IndexedDB key/value store (distinct `name`s are isolated):
+
+  ```js
+  const packs = Arcade.store.open('packs');   // 'arcade.v1.<gameId>.store.packs'
+  await packs.set(pack.id, pack);
+  const one = await packs.get(pack.id);        // null if absent
+  const ids = await packs.keys();              // all keys
+  await packs.each((value, key) => { /* ... */ });
+  await packs.del(pack.id);
+  ```
+
+- [ ] **Binary blobs** (images, audio, files) → `Arcade.files`, backed by OPFS
+  where available and IndexedDB otherwise:
+
+  ```js
+  await Arcade.files.put('cover.jpg', blob);
+  const blob = await Arcade.files.get('cover.jpg');   // a Blob, or null
+  const list = await Arcade.files.list();             // [{ name, size }]
+  await Arcade.files.delete('cover.jpg');
+  ```
+
+Both are included in the launcher's export/import (schema v2) automatically — no
+`{ exportable }` bookkeeping needed. Keep small, hot key/value state in
+`Arcade.state` (sync, simplest); reach for these when it won't fit.
 
 ---
 
@@ -338,6 +384,34 @@ Arcade.ui.toast('Network down',   { kind: 'error', duration: 4000 });
 ```
 
 `kind` is `'info' | 'success' | 'warning' | 'error'`; `duration` defaults to 2500ms.
+
+---
+
+## 7b. Safe rendering — escape untrusted text
+
+All apps share the launcher's origin, so a script injected into one app can
+read/write **every** app's storage. Any string you didn't author yourself —
+a peer's name or message (`Arcade.peer.onMessage`), a pack/level name from an
+imported or shared file, an entry from `Arcade.scores` — is **untrusted** and
+must be escaped before it touches `innerHTML` or an HTML attribute.
+
+- [ ] Prefer `textContent` / `setAttribute` (they never parse HTML), or use the
+  SDK helpers when you must build markup strings:
+
+  ```js
+  // escape one value
+  el.innerHTML = '<span class="name">' + Arcade.html.escape(peer.name) + '</span>';
+
+  // or a whole fragment — the tagged template escapes every ${…} interpolation
+  el.innerHTML = Arcade.html`<li data-id="${msg.id}">${msg.text}</li>`;
+  ```
+
+- [ ] Validate ids/codes you use in selectors or attributes against a charset
+  (`/^[\w-]+$/`) so a hostile value can't break out of the attribute or the
+  `querySelector` string.
+
+This is a real, shipped-then-fixed bug class in this fleet (peer-id XSS in
+p2p-chat; shared-pack XSS in sowduku) — treat every off-device string as hostile.
 
 ---
 
@@ -545,6 +619,8 @@ A game is considered integrated when all of the following pass:
 - [ ] Changing the launcher's font scale visibly resizes text in the game without a reload.
 - [ ] Switching to launcher view and back fires `onSuspend` then `onResume`; the game pauses while hidden and resumes cleanly.
 - [ ] Setting *Keep in Memory* to `1` in the launcher menu, launching another game, then re-launching this game does a fresh load and restores user-visible progress (high score, current level, etc.) from `arcade.v1.<gameId>.*` localStorage.
+- [ ] Any off-device / imported / shared string the game renders (peer names & messages, imported pack/level names, score entries) is escaped via `Arcade.html.escape` / `textContent` — a value like `"><img src=x onerror=alert(1)>` renders inertly.
+- [ ] If the game uses `Arcade.store` / `Arcade.files`, a Launcher Save → Load round-trip restores that data too (it rides the schema-v2 bundle).
 - [ ] Standalone URL (`https://paulgibeault.github.io/<gameId>/`) still works exactly as before.
 - [ ] Service worker (if any) does not intercept requests for `/arcade-sdk.js` or other launcher assets (no `[Arcade SDK]` warning in console).
 
