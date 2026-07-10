@@ -194,6 +194,17 @@ function deviceIdForPeerId(peerId) {
 // explicit user decision (enableAutoReconnect).
 const fingerprintSuspects = new Set();
 
+// A deviceId is suspect if its fingerprint changed this session (RAM flag) OR a
+// prior change left a still-unconfirmed pending pin on the stored record. The
+// stored `pinPendingFingerprint` survives a reload — the RAM set does not — so
+// an imposter can't wait out a page refresh to have its declined fingerprint
+// silently become the trusted pin.
+function isFingerprintSuspect(deviceId, known) {
+    if (fingerprintSuspects.has(deviceId)) return true;
+    const rec = (known || readKnownPeers())[deviceId];
+    return !!(rec && rec.pinPendingFingerprint);
+}
+
 // deviceIds are machine-generated on the honest path: either a UUID
 // (crypto.randomUUID) or the 'dev-' fallback. Anything else is a peer making
 // ids up — reject before it can touch knownPeers or the reconnect machinery.
@@ -224,8 +235,13 @@ function recordPeerIdentity(deviceId, remoteName, fingerprint) {
     const fingerprintChanged = !!(prevFp && safeFp && prevFp !== safeFp);
     known[deviceId] = existing
         ? { ...existing, remoteName: safeRemoteName, lastConnectedAt: now, timesConnected: (existing.timesConnected || 0) + 1,
-            fingerprint: safeFp || prevFp || null,
-            ...(fingerprintChanged ? { fingerprintChangedAt: now } : {}) }
+            // On a fingerprint change, KEEP the trusted pin and stash the new
+            // fingerprint as pending until the user explicitly re-trusts
+            // (enableAutoReconnect). Persisting it here — not only in the RAM
+            // fingerprintSuspects set — is what stops a reload from laundering an
+            // imposter's declined fingerprint into the pin.
+            fingerprint: fingerprintChanged ? prevFp : (safeFp || prevFp || null),
+            ...(fingerprintChanged ? { fingerprintChangedAt: now, pinPendingFingerprint: safeFp } : {}) }
         : { name: safeRemoteName, remoteName: safeRemoteName, firstConnectedAt: now, lastConnectedAt: now, timesConnected: 1,
             fingerprint: safeFp };
     writeKnownPeers(known);
@@ -426,7 +442,7 @@ async function ensureAddon() {
                 // via onPeerIdentity's fingerprintChanged flag).
                 const known = readKnownPeers();
                 if (known[env.deviceId] && known[env.deviceId].autoReconnect && rdv
-                        && !fingerprintSuspects.has(env.deviceId)
+                        && !isFingerprintSuspect(env.deviceId, known)
                         && !autoPairMintedFor.has(d.peerId)) {
                     autoPairMintedFor.add(d.peerId);
                     rdv.enablePair(d.peerId, env.deviceId).catch(() => {});
@@ -488,9 +504,9 @@ async function ensureAddon() {
             if (!deviceId) return;
             const known = readKnownPeers();
             const flag = known[deviceId] && known[deviceId].autoReconnect;
-            if (flag === true && !fingerprintSuspects.has(deviceId)) {
+            if (flag === true && !isFingerprintSuspect(deviceId, known)) {
                 rdv.enablePair(peerId, deviceId).catch(() => {});
-            } else if (flag === undefined || (flag === true && fingerprintSuspects.has(deviceId))) {
+            } else if (flag === undefined || (flag === true && isFingerprintSuspect(deviceId, known))) {
                 // Undecided — or decided, but this link's fingerprint changed
                 // since the flag was stored. Either way the user re-confirms.
                 for (const fn of pairRequestListeners) {
@@ -712,9 +728,15 @@ export const ArcadeP2P = {
         const known = readKnownPeers();
         if (!known[deviceId]) return false;
         known[deviceId].autoReconnect = true;
+        // Explicit user decision — re-trust this device even if its fingerprint
+        // changed. Promote any pending fingerprint to the trusted pin so future
+        // sessions accept it without re-prompting.
+        if (known[deviceId].pinPendingFingerprint) {
+            known[deviceId].fingerprint = known[deviceId].pinPendingFingerprint;
+            delete known[deviceId].pinPendingFingerprint;
+            delete known[deviceId].fingerprintChangedAt;
+        }
         writeKnownPeers(known);
-        // Explicit user decision — re-trust this device even if its
-        // fingerprint changed this session.
         fingerprintSuspects.delete(deviceId);
         await ensureAddon(); // rdv is only populated once the addon has loaded
         const peerId = identityLinks.get(deviceId);

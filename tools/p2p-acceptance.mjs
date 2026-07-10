@@ -245,8 +245,12 @@ try {
         FP_RE.test(peerRecord.fingerprint || ''), (peerRecord.fingerprint || 'none').slice(0, 12) + '…');
     check('recorded deviceId differs from own (distinct devices)', peerDeviceId !== hostView.myId);
 
-    // 9. Pinning policy: same device announcing a DIFFERENT fingerprint later
-    //    must flag the change (notice) and re-record — never silently match.
+    // 9. Pinning policy: a DIFFERENT fingerprint later must raise the change
+    //    NOTICE, but must NOT overwrite the trusted pin — the new fingerprint is
+    //    held as `pinPendingFingerprint` until the user explicitly re-trusts.
+    //    This is what stops an imposter's *declined* fingerprint from being
+    //    laundered into the pin across a reload: the suspicion is persisted on
+    //    the record, not held only in the RAM fingerprintSuspects set.
     const policy = await H.evaluate(() => {
         const rec = window.__arcade.p2p._recordPeerIdentity;
         const fpA = 'AA:' + Array(31).fill('11').join(':');
@@ -256,12 +260,14 @@ try {
         const changed = rec('dev-policytest01', 'Pin Tester', fpB);
         const stored = JSON.parse(localStorage.getItem('arcade.v1._meta.knownPeers'))['dev-policytest01'];
         return { first: first.fingerprintChanged, same: same.fingerprintChanged,
-                 changed: changed.fingerprintChanged, storedFp: stored.fingerprint, changedAt: stored.fingerprintChangedAt };
+                 changed: changed.fingerprintChanged, storedFp: stored.fingerprint,
+                 pendingFp: stored.pinPendingFingerprint, changedAt: stored.fingerprintChangedAt };
     });
     check('first sighting records without a change flag', policy.first === false);
     check('re-announce with the same fingerprint stays quiet', policy.same === false);
-    check('changed fingerprint is flagged and re-recorded (TOFU-with-notice)',
-        policy.changed === true && policy.storedFp.startsWith('BB:') && !!policy.changedAt);
+    check('changed fingerprint flagged, trusted pin kept, new fp held pending (secure TOFU)',
+        policy.changed === true && policy.storedFp.startsWith('AA:')
+        && (policy.pendingFp || '').startsWith('BB:') && !!policy.changedAt);
 
     // 9b. Malformed deviceIds must be rejected before touching knownPeers —
     //     ids are peer-chosen, so only machine-generated shapes are trusted.

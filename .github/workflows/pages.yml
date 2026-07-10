@@ -1,8 +1,9 @@
-name: Deploy Pages
+name: CI & Deploy Pages
 
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -15,7 +16,44 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Gate: a broken PR fails here and never deploys. Runs on PRs and on push.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Syntax-check core JS
+        run: |
+          set -e
+          for f in arcade-sdk.js arcade-p2p.js arcade-known-peers.js arcade-diag.js \
+                   p2p/*.js tools/*.mjs; do
+            echo "checking $f"
+            node --check "$f"
+          done
+
+      - name: Install deps + browser
+        run: |
+          npm install
+          npx playwright install --with-deps chrome
+
+      - name: P2P acceptance (real WebRTC, self-contained)
+        run: node tools/p2p-acceptance.mjs
+
+      # NOTE: the full per-game §13 acceptance (tools/acceptance.mjs) and the
+      # --pool test need a launcher staged with catalog-registered games, which
+      # a bare checkout doesn't have. Wire them in here once a committed
+      # acceptance fixture is registered in the catalog (tracked in issue #40 /
+      # the starter-template work). Run locally meanwhile:
+      #   ./dev.sh ../si-syn ../hecknsic ../pi-game
+      #   npm run acceptance -- http://127.0.0.1:4791/si-syn/
+      #   npm run acceptance -- --pool http://127.0.0.1:4791/
+
   deploy:
+    needs: test
+    if: github.event_name != 'pull_request'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

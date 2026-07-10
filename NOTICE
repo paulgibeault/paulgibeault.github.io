@@ -1,0 +1,8 @@
+Paul's Arcade — sovereign local-first application framework
+Copyright 2026 Paul Gibeault
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product bundles a vendored copy of the peer-to-peer transport from
+paulgibeault/QRCodeP2P (same author), under p2p/. It is distributed here under
+the same Apache-2.0 license.
