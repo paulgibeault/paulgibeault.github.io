@@ -33,15 +33,14 @@
         render(s);
     });
 
-    Arcade.peer.onMessage((payload) => {
-        window.__got.push(payload);
-        logEl.textContent += 'recv: ' + JSON.stringify(payload) + '\n';
-    });
-
-    // Full delivery record — payload + attribution + meta (multiseat tests).
+    // __got (payloads, asserted by the two-launcher acceptance) and __rx
+    // (full delivery record for the multiseat acceptance) are maintained by
+    // ONE listener so the two logs can never disagree about a delivery.
     window.__rx = [];
     Arcade.peer.onMessage((payload, fromPeer, meta) => {
+        window.__got.push(payload);
         window.__rx.push({ payload, fromPeer, meta });
+        logEl.textContent += 'recv: ' + JSON.stringify(payload) + '\n';
     });
 
     // Roster events — one full-roster array per change (multiseat tests).

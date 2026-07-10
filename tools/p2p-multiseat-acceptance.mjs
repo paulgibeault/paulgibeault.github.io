@@ -367,6 +367,22 @@ try {
     const bStashLeak = await fB.evaluate(() => window.__rx.some(r => r.payload && r.payload.secret === 'stash-ride'));
     check('E1.5b: … B never received it', !bStashLeak);
 
+    // 14. E2 leave signal — a deliberate hang-up must REMOVE the seat from
+    //     the roster (removal is the documented leave signal), never pin it
+    //     'interrupted': the transport stashes the session, but no repair
+    //     episode is running and the peer is paused.
+    await H.evaluate((dev) => window.__arcade.p2p.hangUpKnownPeer(dev), A_dev);
+    await fH.waitForFunction((dev) => {
+        const ev = window.__rosterEvents;
+        const last = ev[ev.length - 1] || [];
+        return ev.length > 0 && !last.some(p => p.deviceId === dev);
+    }, A_dev, { timeout: 10000 });
+    const finalRoster = await fH.evaluate(() => window.__peers());
+    check("E2: hang-up removes A's seat from the roster (leave signal); B's stays connected",
+        !finalRoster.some(p => p.deviceId === A_dev)
+        && finalRoster.some(p => p.deviceId === B_dev && p.status === 'connected'),
+        JSON.stringify(finalRoster.map(p => [p.deviceId === B_dev ? 'B' : 'A', p.status])));
+
     await H.close(); await A.close(); await B.close();
 } catch (e) {
     console.error('\nFATAL:', e.message);

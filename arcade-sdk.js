@@ -163,7 +163,8 @@
     }
     // Per-peer roster (multi-peer API) — the launcher pushes the full list on
     // any join/leave/rename/status change; welcome.peers seeds it. Entries:
-    // { deviceId, name, status: 'connected'|'interrupted'|'idle', direct }.
+    // { deviceId, name, status: 'connected'|'interrupted', direct }. A seat
+    // that's truly gone leaves the list — removal is the leave signal.
     var peerRoster = [];
     function applyRoster(arr) {
         if (!Array.isArray(arr)) return false;
@@ -176,7 +177,7 @@
             next.push({
                 deviceId: rec.deviceId,
                 name: rec.name,
-                status: (p.status === 'interrupted' || p.status === 'idle') ? p.status : 'connected',
+                status: p.status === 'interrupted' ? 'interrupted' : 'connected',
                 direct: p.direct !== false
             });
         }
@@ -936,6 +937,10 @@
                 // Refuse rather than broadcast when the launcher can't
                 // target (missing cap) or the payload names a bad target —
                 // a private frame must never silently fan out.
+                // NOTE: true means "handed to the launcher", not delivered —
+                // an unknown or just-departed target is dropped launcher-
+                // side (postMessage is one-way, so its false can't reach
+                // us). A game that needs delivery guarantees uses acks.
                 if (typeof to !== 'string' || !to) return false;
                 if (peerCaps.indexOf('peer.sendTo') === -1) return false;
                 postToParent({ type: 'arcade:peer.send', payload: payload, to: to });
@@ -967,10 +972,14 @@
             return best ? { deviceId: best.deviceId, name: best.name } : null;
         },
         // Full peer roster: [{ deviceId, name, status, direct }], [] when no
-        // session (or on a launcher without the 'peer.roster' cap). status is
-        // 'connected' | 'interrupted' | 'idle'; direct is true when this
-        // device holds the direct link (for a joiner: exactly the host).
-        peers: function () { return rosterCopy(); },
+        // session or on a launcher without the 'peer.roster' cap (an old
+        // launcher's welcome seed would otherwise linger stale forever —
+        // nothing there ever pushes updates). status is 'connected' |
+        // 'interrupted'; a seat that's truly gone leaves the list. direct is
+        // true when this device holds the direct link (a joiner's host).
+        peers: function () {
+            return peerCaps.indexOf('peer.roster') === -1 ? [] : rosterCopy();
+        },
         // Fires with the full roster array on any join/leave/rename/status
         // change — one coarse event, not fine-grained add/remove.
         onPeersChange: makeSubscriber(listeners.peersChange),

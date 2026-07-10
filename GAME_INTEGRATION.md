@@ -494,12 +494,20 @@ Multi-seat rules (host + several joiners over "Invite another player"):
 - [ ] **Feature-detect, don't version-check**: gate targeted sends / roster /
       meta on `Arcade.peer.caps()` at lobby time. A session's host should
       announce the chosen wire mode in its own lobby frame so mixed-cap
-      tables degrade to a game-level fallback uniformly.
+      tables degrade to a game-level fallback uniformly. The platform guards
+      the worst mixed-version case itself: a joiner's targeted send returns
+      `false` when its HOST is on an older launcher (the host announces its
+      wire capabilities during the identity handshake), so a private frame
+      is never handed to a hub that would blind-relay it to every seat.
 - [ ] **Target private state; broadcast shared state.** `send(payload, { to })`
       guarantees a non-addressee joiner never *receives* the frame (real
-      routing privacy — no cooperative discard). It returns `false` — and
-      never falls back to broadcast — when the launcher can't target or the
-      target is unknown, so a private frame cannot leak by accident.
+      routing privacy — no cooperative discard). It never falls back to
+      broadcast: the SDK returns `false` when the launcher lacks the
+      `peer.sendTo` cap or `to` is malformed, and the launcher *silently
+      drops* (never fans out) a frame whose target is unknown, just departed,
+      or whose session host is too old to route it. `true` therefore means
+      "handed to the launcher", not "delivered" — a game that needs delivery
+      guarantees acknowledges at the game layer.
 - [ ] **`to` is routing, not secrecy from the host**: joiner→joiner targeted
       frames transit the host's bridge readable (inherent to the star
       topology, and correct for host-authoritative games). End-to-end

@@ -548,6 +548,14 @@ export class PeerManager extends EventTarget {
 
         const msg = (parsed && typeof parsed === 'object') ? parsed : { text: raw, from: peerId }; // legacy string fallback
 
+        // The hub is the ONLY node that stamps `relayed` — every frame the
+        // host receives arrived on a direct link from its origin, so an
+        // inbound relayed:true at the host is always forged. Strip it before
+        // it can reach the relay loop or local dispatch (a sender could
+        // otherwise launder its frames into "arrived through the hub" and
+        // defeat relay-tag attribution in the layer above).
+        if (this.isHost && msg.relayed) delete msg.relayed;
+
         // Reliability: dedup by link sequence, acknowledge what we've seen.
         if (typeof msg.seq === 'number') {
             if (msg.seq <= peerData.lastInSeq) {

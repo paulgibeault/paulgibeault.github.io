@@ -160,17 +160,22 @@ function randomDeviceId() {
     return 'dev-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
+// Memoized — immutable once minted, and the receive path now consults it on
+// every inbound frame (targeted routing), so no per-frame storage reads.
+let myDeviceIdCache = null;
 function getMyDeviceId() {
+    if (myDeviceIdCache) return myDeviceIdCache;
     try {
         let id = localStorage.getItem(DEVICE_ID_KEY);
         if (!id) {
             id = randomDeviceId();
             localStorage.setItem(DEVICE_ID_KEY, id);
         }
-        return id;
+        myDeviceIdCache = id;
     } catch (e) {
-        return randomDeviceId(); // storage unavailable — ephemeral fallback
+        myDeviceIdCache = randomDeviceId(); // storage unavailable — ephemeral fallback
     }
+    return myDeviceIdCache;
 }
 
 function getMyDeviceName() {
@@ -192,6 +197,19 @@ const identityLinks = new Map();  // deviceId → transport peerId of its DIRECT
 // relayed frames to their true sender instead of the relaying host.
 const indirectPeers = new Map(); // deviceId → relay `from` tag
 
+// Wire-level capabilities THIS bridge honors, announced in identity frames.
+// A joiner gates targeted sends on the HOST having announced 'peer.sendTo':
+// an older host would neither honor noRelay (it would blind-relay a private
+// frame to every seat) nor forward joiner→joiner targets — refusing locally
+// is the only way the sender can keep its privacy guarantee in a
+// mixed-version session. hostCaps is what the host link announced.
+const WIRE_CAPS = ['peer.sendTo'];
+let hostCaps = new Set();
+
+function identityFrame() {
+    return { arcade: 1, kind: 'identity', deviceId: getMyDeviceId(), name: getMyDeviceName(), caps: WIRE_CAPS };
+}
+
 function deviceIdForPeerId(peerId) {
     for (const [devId, pid] of identityLinks) {
         if (pid === peerId) return devId;
@@ -207,16 +225,26 @@ function deviceIdForRelayFrom(from) {
     return null;
 }
 
+// The device a frame's arrival link attributes it to: a relayed frame names
+// its relay tag's owner (the true sender, not the relaying host); a direct
+// frame names the link's identity binding. Shared by the game-message and
+// presence paths so attribution hardening can never drift between them.
+function linkSenderDeviceId(d) {
+    return d.relayed ? deviceIdForRelayFrom(d.from) : deviceIdForPeerId(d.peerId);
+}
+
 // A joiner's single direct link is by definition the host. Prefer the live
 // peers entry typed 'host'; during a stash-repair window (entry torn down,
-// outbox stashed) fall back to the identity binding, which survives teardown.
+// outbox stashed) the stash preserves the link type, so look there next.
 function hostLinkPeerId() {
     if (!addon || addon.peerNode.isHost) return null;
     for (const [pid, p] of addon.peerNode.peers) {
         if (p.type === 'host') return pid;
     }
-    const bound = [...identityLinks.values()];
-    return bound.length === 1 ? bound[0] : null;
+    for (const [pid, s] of addon.peerNode.sessionStash) {
+        if (s.type === 'host') return pid;
+    }
+    return null;
 }
 
 // Roster: the per-device view of every DIRECT link (a host sees all joiners;
@@ -239,7 +267,12 @@ function rosterSnapshot() {
         let status = null;
         if (p) {
             status = p.status === 'connected' ? 'connected' : 'interrupted';
-        } else if (addon.peerNode.sessionStash && addon.peerNode.sessionStash.has(peerId)) {
+        } else if (addon.peerNode.sessionStash && addon.peerNode.sessionStash.has(peerId)
+                && rdvReconnecting && !(known[deviceId] && known[deviceId].paused)) {
+            // A stashed session counts as a seat only while a rendezvous
+            // episode is actively repairing it. A stash with NO episode is a
+            // departure (remote bye, or a hang-up — `paused`), and departure
+            // must LEAVE the roster: games key "player gone" on removal.
             status = 'interrupted';
         }
         if (status) {
@@ -359,8 +392,9 @@ function setStatus(next) {
     ArcadeDiag.log('bridge', `status ${sdkStatus} → ${next}`);
     sdkStatus = next;
     // 'idle' means the session truly ended — indirect (through-the-host)
-    // addressing dies with it. Identities re-announce on the next session.
-    if (next === 'idle') indirectPeers.clear();
+    // addressing and the host's announced wire caps die with it. Identities
+    // re-announce on the next session.
+    if (next === 'idle') { indirectPeers.clear(); hostCaps = new Set(); }
     syncWakeLock();
     for (const fn of statusListeners) {
         try { fn(sdkStatus); } catch (e) {}
@@ -465,7 +499,7 @@ async function ensureAddon() {
                 if (peerId && !announcedTo.has(peerId)) {
                     announcedTo.add(peerId);
                     try {
-                        mp.send({ arcade: 1, kind: 'identity', deviceId: getMyDeviceId(), name: getMyDeviceName() });
+                        mp.send(identityFrame());
                     } catch (err) {}
                 }
             } else if (peerId && (status === 'disconnected' || status === 'failed' || status === 'closed')) {
@@ -491,9 +525,7 @@ async function ensureAddon() {
                 if (typeof env.gameId !== 'string') return;
                 // Relayed presence originated at another joiner — attribute
                 // it via the relay tag, not the link (which names the host).
-                const presDeviceId = d.relayed
-                    ? deviceIdForRelayFrom(d.from)
-                    : deviceIdForPeerId(d.peerId);
+                const presDeviceId = linkSenderDeviceId(d);
                 const knownNow = readKnownPeers();
                 const presName = (presDeviceId && knownNow[presDeviceId] && knownNow[presDeviceId].name)
                     || 'Unnamed device';
@@ -518,9 +550,16 @@ async function ensureAddon() {
                     // the addressee's direct link (stamping the true sender);
                     // any other arrival is an old host's blind relay of a
                     // targeted frame — drop it, never dispatch locally.
+                    // A sender with no completed identity is never forwarded:
+                    // an anonymous targeted frame would reach the addressee
+                    // attributable to nobody — and (before the fromDevice-key
+                    // check below existed) could read as host-authored.
                     if (isHub && identityLinks.has(env.to)) {
-                        env.fromDevice = deviceIdForPeerId(d.peerId);
-                        mp.sendTo(identityLinks.get(env.to), env);
+                        const senderDev = deviceIdForPeerId(d.peerId);
+                        if (senderDev) {
+                            env.fromDevice = senderDev;
+                            mp.sendTo(identityLinks.get(env.to), env);
+                        }
                     }
                     return;
                 }
@@ -528,15 +567,19 @@ async function ensureAddon() {
                 // the host's stamp; a transport-relayed broadcast resolves
                 // via its relay tag (the true sender, not the relaying
                 // host); a direct frame resolves via its identity binding.
+                // The mere PRESENCE of a fromDevice key marks a forward —
+                // even a null/malformed one must not fall through to the
+                // direct-link (host) attribution, or a forwarded frame could
+                // read as host-authored.
                 let fromDeviceId = null;
                 let hostForwarded = false;
-                if (d.relayed) {
-                    fromDeviceId = deviceIdForRelayFrom(d.from);
-                } else if (!isHub && typeof env.fromDevice === 'string') {
+                if (!isHub && !d.relayed && 'fromDevice' in env) {
                     hostForwarded = true;
-                    if (DEVICE_ID_RE.test(env.fromDevice)) fromDeviceId = env.fromDevice;
+                    if (typeof env.fromDevice === 'string' && DEVICE_ID_RE.test(env.fromDevice)) {
+                        fromDeviceId = env.fromDevice;
+                    }
                 } else {
-                    fromDeviceId = deviceIdForPeerId(d.peerId);
+                    fromDeviceId = linkSenderDeviceId(d);
                 }
                 // meta is derived, not carried: a frame is only dispatched
                 // when unaddressed ('all') or addressed to this device
@@ -555,12 +598,16 @@ async function ensureAddon() {
             const fp = d.relayed ? null : mp.peerNode.getPeerFingerprint(d.peerId);
             const detail = recordPeerIdentity(env.deviceId, env.name, fp);
             if (!detail) return; // malformed deviceId — bind nothing
-            if (d.relayed && typeof d.from === 'string' && env.deviceId !== getMyDeviceId()) {
+            if (d.relayed && !mp.peerNode.isHost && typeof d.from === 'string'
+                    && env.deviceId !== getMyDeviceId()) {
                 // Another joiner, reachable only through the host. The relay
                 // tag is host-stamped (the source link's peerId), so a joiner
                 // cannot claim someone else's tag — but it CAN claim someone
                 // else's deviceId; the tag binding at least keeps its frames
                 // attributed to the one link they actually arrive from.
+                // (The hub itself never takes this branch: it holds direct
+                // links to everyone, and the transport strips any forged
+                // inbound `relayed` flag before dispatch anyway.)
                 const firstSighting = !indirectPeers.has(env.deviceId);
                 indirectPeers.set(env.deviceId, d.from);
                 if (firstSighting) {
@@ -574,12 +621,19 @@ async function ensureAddon() {
                     // handler's own first-sighting re-announce (of us) finds
                     // nothing new on this side.
                     try {
-                        mp.send({ arcade: 1, kind: 'identity', deviceId: getMyDeviceId(), name: getMyDeviceName() });
+                        mp.send(identityFrame());
                     } catch (err) {}
                 }
             }
             if (!d.relayed) {
                 identityLinks.set(env.deviceId, d.peerId);
+                // On a joiner, the direct link IS the host — record which
+                // wire capabilities it announced (empty for an older host,
+                // which gates targeted sends off; see WIRE_CAPS).
+                if (!mp.peerNode.isHost) {
+                    hostCaps = new Set(Array.isArray(env.caps)
+                        ? env.caps.filter((c) => typeof c === 'string') : []);
+                }
                 // A direct identity binding is a roster join (or a rename —
                 // recordPeerIdentity above already upserted the name).
                 notifyRosterChange();
@@ -880,6 +934,13 @@ export const ArcadeP2P = {
             return true;
         }
         if (typeof to !== 'string' || to === getMyDeviceId()) return false;
+        // Every targeted frame a JOINER sends transits the host, which must
+        // honor noRelay (and forward joiner→joiner targets). An older host
+        // announced no wire caps — it would blind-relay the private frame to
+        // every seat — so refuse here; the game's caps()-negotiated fallback
+        // covers mixed-version tables. A host's own targeted sends travel
+        // only the addressee's direct link, so they need no such gate.
+        if (!addon.peerNode.isHost && !hostCaps.has('peer.sendTo')) return false;
         const env = { arcade: 1, gameId, payload, to };
         const directLink = identityLinks.get(to);
         if (directLink !== undefined) return addon.sendTo(directLink, env);

@@ -909,10 +909,6 @@
                     // with the full roster (arcade:welcome.peers seeds it).
                     broadcast({ type: 'arcade:peer.roster', peers });
                 });
-                // The Known Peers panel renames devices straight through
-                // arcade-known-peers.js — give it a hook to refresh roster
-                // names, since the bridge can't observe that write.
-                window.__arcade.p2pRefreshRoster = () => ArcadeP2P.refreshRoster();
                 ArcadeP2P.onPresence(({ gameId, deviceId, name, kind }) => {
                     // The remote launcher has <gameId> mounted and listening.
                     // If we do too, hand that game a ready event — and answer
@@ -1217,8 +1213,14 @@
                     // channel. The SDK already gates on status==='connected',
                     // so a null bridge here just means a stray message — drop.
                     if (p2pBridge) {
-                        p2pBridge.send(gameId, data.payload,
-                            typeof data.to === 'string' ? data.to : undefined);
+                        // A frame that carries a `to` is targeted. If the
+                        // value is malformed, refuse outright — coercing to
+                        // undefined would silently promote a PRIVATE frame
+                        // to a broadcast at the iframe trust boundary (the
+                        // SDK validates too, but the launcher cannot assume
+                        // the iframe runs our SDK).
+                        if ('to' in data && typeof data.to !== 'string') break;
+                        p2pBridge.send(gameId, data.payload, data.to);
                         // While a repair episode runs, every queued send comes
                         // back with a fresh queue-depth reading so the game
                         // can see how close it is to the replay cap.
@@ -1921,13 +1923,18 @@
             if (window.__arcade.showToast) window.__arcade.showToast(msg, opts);
         }
 
+        // Roster entries carry the stored name — after any knownPeers write
+        // this panel makes, tell the bridge (if loaded) so subscribed games
+        // see the change live. The bridge can't observe the storage write.
+        function refreshBridgeRoster() {
+            if (window.__arcade.p2p) window.__arcade.p2p.refreshRoster();
+        }
+
         function renamePeer(id, name) {
             const ok = renameKnownPeer(id, name);
             if (ok) {
                 render();
-                // Roster entries carry the stored name — tell the bridge (if
-                // loaded) so subscribed games see the rename live.
-                if (window.__arcade.p2pRefreshRoster) window.__arcade.p2pRefreshRoster();
+                refreshBridgeRoster();
             }
             return ok;
         }
@@ -2108,6 +2115,7 @@
                 if (!window.confirm('Forget "' + displayName + '"?')) return;
                 deleteKnownPeer(id);
                 render();
+                refreshBridgeRoster();
             });
             icons.appendChild(deleteBtn);
 
