@@ -23,6 +23,14 @@
  *   MqttCarrier     — minimal dependency-free MQTT 3.1.1 client over WSS,
  *                     for free public brokers (QoS 0 only; retries live in
  *                     the rendezvous episode layer, which republishes).
+ *   MultiCarrier    — fans one carrier interface out across several legs
+ *                     (one per broker): publish to every live leg,
+ *                     subscribe on all, drop duplicate deliveries. The
+ *                     rendezvous stays reachable while ANY one broker is
+ *                     reachable from BOTH devices — a single flaky free
+ *                     broker must never strand two paired devices again
+ *                     (test.mosquitto.org was down a whole evening,
+ *                     2026-07-09 field logs).
  */
 
 // ---------------------------------------------------------------------------
@@ -145,6 +153,70 @@ export const mqttCodec = {
         };
     }
 };
+
+// ---------------------------------------------------------------------------
+
+/**
+ * Fans the carrier interface out across several underlying carriers, one per
+ * broker. Sealed blobs and unlinkable topics make brokers interchangeable
+ * dead-drops, so redundancy is free correctness-wise: publishes go to EVERY
+ * leg with a live session, subscriptions are issued on every leg, and the
+ * same blob arriving via two brokers is delivered once (small per-topic
+ * recency window; the episode layer's nonce checks also dedup, this just
+ * keeps decrypt work and diagnostics quiet). connect() resolves on the
+ * FIRST leg to get a session — the rest keep dialing in the background.
+ */
+export class MultiCarrier {
+    constructor(carriers) {
+        this.carriers = carriers;
+        this.onSessionUp = null; // fan-in: any leg's (re)session fires it
+        this._recent = new Map(); // topic → {set, fifo} recently delivered payloads
+        for (const c of this.carriers) {
+            c.onSessionUp = () => {
+                if (this.onSessionUp) { try { this.onSessionUp(); } catch (e) {} }
+            };
+        }
+    }
+
+    connect() {
+        return Promise.race(this.carriers.map(c => c.connect()));
+    }
+
+    ensureAlive() {
+        for (const c of this.carriers) {
+            try { if (typeof c.ensureAlive === 'function') c.ensureAlive(); } catch (e) {}
+        }
+    }
+
+    async publish(topic, payload) {
+        let sent = 0;
+        for (const c of this.carriers) {
+            try { await c.publish(topic, payload); sent++; } catch (e) {}
+        }
+        // Same contract as a single carrier: the episode's retry schedule
+        // (and its "publish failed" diagnostic) owns the outage.
+        if (!sent) throw new Error('carrier not connected (no live broker)');
+    }
+
+    subscribe(topic, cb) {
+        const deliver = (payload) => {
+            let r = this._recent.get(topic);
+            if (!r) { r = { set: new Set(), fifo: [] }; this._recent.set(topic, r); }
+            if (r.set.has(payload)) return; // same blob via another broker
+            r.set.add(payload);
+            r.fifo.push(payload);
+            if (r.fifo.length > 64) r.set.delete(r.fifo.shift());
+            try { cb(payload); } catch (e) {}
+        };
+        const unsubs = this.carriers.map(c => c.subscribe(topic, deliver));
+        return () => unsubs.forEach(u => { try { u(); } catch (e) {} });
+    }
+
+    close() {
+        for (const c of this.carriers) { try { c.close(); } catch (e) {} }
+        this._recent.clear();
+    }
+}
 
 // ---------------------------------------------------------------------------
 

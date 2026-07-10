@@ -76,13 +76,22 @@
  */
 
 import { RendezvousManager, RDV_BUILD } from './p2p/rendezvous.js';
-import { MqttCarrier } from './p2p/rendezvous-carriers.js';
+import { MqttCarrier, MultiCarrier } from './p2p/rendezvous-carriers.js';
 import { readKnownPeers, writeKnownPeers, setKnownPeerPaused } from './arcade-known-peers.js';
 import { ArcadeDiag } from './arcade-diag.js';
 
-// Free public MQTT-over-WSS broker used as the untrusted dead-drop. It sees
-// only ciphertext on unlinkable rotating topics, and only during repair.
-const RDV_BROKER_URL = 'wss://test.mosquitto.org:8081/mqtt';
+// Free public MQTT-over-WSS brokers used as the untrusted dead-drop. They
+// see only ciphertext on unlinkable rotating topics, and only during repair.
+// ALL of them are used at once (publish to every live one, subscribe on
+// all): the rendezvous works while ANY single broker is reachable from both
+// devices. One broker was the whole story until test.mosquitto.org went
+// down for an evening and stranded two perfectly-paired devices
+// (2026-07-09 field logs).
+const RDV_BROKER_URLS = [
+    'wss://test.mosquitto.org:8081/mqtt',
+    'wss://broker.emqx.io:8084/mqtt',
+    'wss://broker.hivemq.com:8884/mqtt',
+];
 
 let rdv = null;
 let rdvReconnecting = false; // an episode is actively repairing a dead link
@@ -92,7 +101,10 @@ function rdvCarrierFactory() {
     if (typeof window !== 'undefined' && window.__arcadeRdvCarrierFactory) {
         return window.__arcadeRdvCarrierFactory();
     }
-    return new MqttCarrier({ url: RDV_BROKER_URL, onLog: (msg) => ArcadeDiag.log('mqtt', msg) });
+    return new MultiCarrier(RDV_BROKER_URLS.map((url) => {
+        const label = new URL(url).hostname.split('.').slice(-2)[0]; // mosquitto / emqx / hivemq
+        return new MqttCarrier({ url, onLog: (msg) => ArcadeDiag.log('mqtt', `[${label}] ${msg}`) });
+    }));
 }
 
 // Terminal link statuses have already been removed from the transport's peers

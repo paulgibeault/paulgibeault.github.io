@@ -95,7 +95,7 @@ import { ConnectionUtils } from './p2p-core.js';
 // this at boot: the FIRST question a connection log must answer is "which
 // build produced this?" — field sessions have been burned diagnosing bugs
 // that were already fixed but not actually loaded (stale caches).
-export const RDV_BUILD = 'v2.3 pair-confirm/serialized/flap-resend';
+export const RDV_BUILD = 'v2.4 pair-confirm/serialized/flap-resend/multi-broker';
 
 const DB_NAME = 'qrp2p-rendezvous';
 const DB_STORE = 'pairs';
