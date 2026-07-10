@@ -1,6 +1,6 @@
 /* arcade-p2p.js — launcher-side multiplayer bridge (ES module, lazy-loaded)
  *
- * Turns the vendored QRCodeP2P transport (p2p/) into the backbone behind
+ * Turns the in-repo P2P transport (p2p/, see p2p/README.md) into the backbone behind
  * Arcade.peer.*. Games never see any of this: they talk to the SDK, the SDK
  * talks arcade:peer.* postMessages to the launcher, and the launcher calls
  * this bridge. One connection per device, owned by the launcher, shared by

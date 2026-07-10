@@ -417,8 +417,8 @@ p2p-chat; shared-pack XSS in sowduku) — treat every off-device string as hosti
 
 ## 7a. Multiplayer — Arcade.peer (LIVE)
 
-The launcher owns a serverless WebRTC connection (vendored
-[QRCodeP2P](https://github.com/paulgibeault/QRCodeP2P), see `p2p/VENDORED.md`).
+The launcher owns a serverless WebRTC connection (the in-repo `p2p/`
+transport, see `p2p/README.md` and `p2p/PROTOCOL.md`).
 Players pair through the launcher's **Multiplayer** menu — QR codes and chat
 links, no signaling server. Games never touch any of that; the whole surface is:
 

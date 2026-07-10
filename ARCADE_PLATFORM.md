@@ -170,13 +170,13 @@ Fourteen message types total (see GAME_INTEGRATION.md §14 for the full summary 
 
 ## Multiplayer transport — serverless P2P backbone (IMPLEMENTED)
 
-The transport behind `Arcade.peer.*` is [QRCodeP2P](https://github.com/paulgibeault/QRCodeP2P) (v1.5.1+): WebRTC data channels with **no signaling server** — the offer/answer exchange travels through QR codes or chat links. Proven cross-engine (Chrome/Firefox/WebKit) with automated Playwright tests; see its `IMPLEMENTATION_NOTES.md` for the wire format and test matrix.
+The transport behind `Arcade.peer.*` lives in `p2p/` (v1.11, maintained in this repo — it originated in the now-archived QRCodeP2P project): WebRTC data channels with **no signaling server** — the offer/answer exchange travels through QR codes or chat links. Proven cross-engine (Chrome/Firefox/WebKit) with automated Playwright tests; see `p2p/PROTOCOL.md` for the wire format.
 
 **Implementation map (this repo):**
 
 | Piece | File | Notes |
 | ----- | ---- | ----- |
-| Vendored transport | `p2p/` | synced from QRCodeP2P via `tools/sync-p2p.sh`; QR libs vendored under `p2p/vendor/` so runtime never touches a CDN |
+| Transport | `p2p/` | maintained in-repo (see `p2p/README.md`); QR libs vendored under `p2p/vendor/` so runtime never touches a CDN |
 | Launcher bridge | `arcade-p2p.js` | lazy ES module: status mapping (transport → SDK vocabulary), `{arcade:1, gameId, payload}` envelope, per-game routing |
 | Launcher wiring | `index.html` platformController | Multiplayer menu item, `arcade:peer.send` → bridge, bridge status → `arcade:peer.status` broadcast, `#p2p-offer/answer` fragment boot |
 | Game-facing API | `arcade-sdk.js` `Arcade.peer.*` | unchanged — games needed zero edits |
@@ -203,7 +203,7 @@ The transport behind `Arcade.peer.*` is [QRCodeP2P](https://github.com/paulgibea
 
 `#p2p-offer=` / `#p2p-answer=` fragments are handled by the **launcher**, giving every game multiplayer through one stable URL. Fragments never reach the server and are stripped after ingestion. Games embedded in iframes are unaffected — the fragment routing lives in the top-level launcher page only.
 
-### Connection modes & platform caveats (from the QRCodeP2P test matrix)
+### Connection modes & platform caveats (from the transport's test matrix)
 
 | Mode | External touch | Works |
 | ---- | -------------- | ----- |
@@ -236,7 +236,7 @@ WebRTC can't skip the offer/answer ceremony — DTLS fingerprints must flow both
 
 ### Auto-reconnect — rendezvous (IMPLEMENTED, transport v1.10)
 
-The full protocol spec lives in `QRCodeP2P/PROTOCOL.md` (§7). Launcher wiring:
+The full protocol spec lives in `p2p/PROTOCOL.md` (§7). Launcher wiring:
 
 - **Opt-in per pair, both sides:** at first contact (after the naming prompt) the launcher asks whether to reconnect automatically; the flag lives in `knownPeers[deviceId].autoReconnect` and is toggleable per peer in the Multiplayer dialog (🔁/🚫). When both sides opt in, a pairing secret is derived over the live DTLS channel — and **re-derived on every later manual ceremony** (each physical meeting is a fresh trust event).
 - **What it does:** if the connection dies completely (grace expired, channel closed, both networks changed, browsers restarted), the transport re-signals through a public MQTT-over-WSS broker (`wss://test.mosquitto.org:8081/mqtt`). Everything published is end-to-end AEAD-sealed with per-pair keys; topics are unlinkable daily HMACs; epochs kill replays; keys ratchet on every successful reconnect. **Content** is therefore safe from the broker: it can only delay or drop, and the worst case is falling back to the one-tap manual re-pair. **Metadata** is not: the broker — and anyone subscribed to the public relay's topic space — learns both devices' IP addresses, the fact that some pair is rendezvousing, and when. If that linkage matters to you, don't opt in to auto-reconnect; manual QR/link pairing never touches a relay.
@@ -407,6 +407,6 @@ If a user reports lost data:
 
 1. **Iframe pool: bounded LRU.** Default cap of 2; user-tunable to any integer in `[1, gameCount]` via the launcher menu. Active game is never evicted. Persistent state survives via `arcade.v1.<gameId>.*` localStorage.
 2. **`arcade-sdk.js` hosted at `https://paulgibeault.github.io/arcade-sdk.js`** (this repo's GitHub Pages root). Single source of truth; same-origin with every game.
-3. **Multiplayer transport: QRCodeP2P (serverless WebRTC).** The launcher owns the single `PeerManager`; games only ever see `Arcade.peer.*`. Signaling travels via packed QR/chat-link payloads (link tennis primary, QR/screenshot fallbacks). Default ICE mode "Anywhere" (public STUN, required for Safari joiners); "Same Wi-Fi only" available for zero-external-touch play. `#p2p-offer=`/`#p2p-answer=` fragments are launcher-level routes.
+3. **Multiplayer transport: serverless WebRTC (`p2p/`).** The launcher owns the single `PeerManager`; games only ever see `Arcade.peer.*`. Signaling travels via packed QR/chat-link payloads (link tennis primary, QR/screenshot fallbacks). Default ICE mode "Anywhere" (public STUN, required for Safari joiners); "Same Wi-Fi only" available for zero-external-touch play. `#p2p-offer=`/`#p2p-answer=` fragments are launcher-level routes.
 4. **Trust posture: first-party fleet.** All catalog apps are trusted same-origin first-party code; storage namespacing is a cooperative convention, not a sandbox. Imported files and peer payloads remain untrusted. Cross-origin multi-tenant isolation + a capability model is a deferred v2 epic, not retrofitted into the same-origin model.
 5. **Async app storage: `Arcade.store` / `Arcade.files`.** Large/binary data lives in per-app IndexedDB/OPFS and rides the save bundle (schema v2). P2P key stores are excluded from export by allowlist.

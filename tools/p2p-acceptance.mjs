@@ -138,7 +138,8 @@ try {
     }
 
     // 2. Signaling ceremony at the transport level (stands in for QR / link
-    //    tennis, which the QRCodeP2P suite covers end-to-end).
+    //    tennis — the human-carried exchange, exercised manually via the
+    //    launcher's Multiplayer panel; see p2p/PROTOCOL.md §4).
     const packedOffer = await H.evaluate(async () => {
         const { ConnectionUtils } = await import('./p2p/p2p-core.js');
         const addon = window.__arcade.p2p._addon();
