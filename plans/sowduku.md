@@ -1,70 +1,65 @@
-# Plan — Sowdoku (`paulgibeault/sowduku`, gameId `sowduku`)
+# Plan — Sowdoku (`paulgibeault/sowduku`, gameId `sowduku`) — ⚠️ security work OUTSTANDING
 
-Source: platform integration review. Newly added to the catalog
-(`add-sowduku-catalog` / PR #14). gameId, repo slug, launcher URL, and image name
-all agree on `sowduku` — but integration is incomplete: the service worker caches
-the SDK, nothing pauses when hidden, and launcher art isn't square. Line numbers
-from the reviewed tree — re-confirm. NOTE: the local checkout dir is `sow-duku`;
-the GitHub repo/slug is `sowduku`.
+Local checkout dir is `sow-duku`; GitHub repo/slug is `sowduku`.
+The first review PR ([#2 `arcade-review-fixes`](https://github.com/paulgibeault/sowduku/pull/2),
+merged 2026-07-10) fixed **only SW caching + suspend handling**. A stored-XSS bug of the
+same class as p2p-chat's critical finding was never touched and **remains exploitable.**
+Verified in code 2026-07-10.
 
-## Bugs
+## ✅ Shipped (removed from this plan)
+- **SW caches `/arcade-sdk.js`** — fixed: scope-filtered to `/sowduku/`, `CACHE="sowdoku-shell-v4"` (`sw.js:5,54`, `634a539`).
+- **No suspend handling / `playMs` inflation** — fixed: `onSuspend` flushes, sets `suspended`, `audioCtx.suspend()`, `clearInterval` (`index.html:1660-1671`, `2b0d8ba`). The C2 persist-churn leak is moot now that the tick interval is cleared on suspend.
+- **`sget`/`sset` fallback shim** removed (`6a714a6`).
+- **`audioVolume` honored** (`index.html:958`, `a5ae44a`); **Pages artifact trimmed** (`c23590b`).
 
-### 1. Service worker caches `/arcade-sdk.js` — HIGH
-- **Where:** `sw.js:52` bypasses only *cross-origin* requests, but the SDK is loaded
-  root-relative same-origin (`index.html:25`); the cache-first branch
-  (`sw.js:55-63`) caches `/arcade-sdk.js` and serves it stale forever.
-- **Problem:** freezes the platform SDK for every installed user; second load fires
-  the SDK's `[Arcade SDK]` warning. Violates GAME_INTEGRATION.md §10/§13.
-- **Fix:** `if (url.pathname === '/arcade-sdk.js' ||
-  !url.pathname.startsWith('/sowduku/')) return;` (the scope-prefix form also
-  future-proofs and stays correct in the dev harness). Bump `CACHE` to purge
-  poisoned installs. (Aligns with framework B1.)
+---
 
-### 2. No suspend handling → `playMs` inflates while hidden — HIGH
-- **Where:** no `onSuspend`/`onResume` anywhere; the 1 Hz `setInterval`
-  (`index.html:1654`) runs forever, and `flushTick` gates on
-  `document.visibilityState === 'visible'` (`:1650`) — which stays `'visible'` when
-  the launcher merely hides the iframe.
-- **Problem:** play-time keeps accruing in the launcher or another game, corrupting
-  the history metrics the game features.
-- **Fix:** on `onSuspend` — `flushTick()`, set a `suspended` flag checked in
-  `flushTick`, `persist()`, `audioCtx.suspend()`, clear the interval; on `onResume`
-  — `lastTick = Date.now()`, restart. Or delete the tick machinery and use
-  `Arcade.session.start({ persistKey })`, reading `elapsedMs()` into `metrics.playMs`.
-  (Motivates framework B2/B3.)
+## Remaining work
 
-### 3. Launcher art is not square — MED (§11)
-- `images/sowduku.png` is 1023×746; §11 requires square ≥512×512. Reconcile the
-  unmerged `add-sowduku-catalog` logo commits (`1bfe692`, `527dd74`) and ship a
-  square image (launcher-repo PR).
+### 1. Stored XSS — HIGH, CRITICAL CLASS (top priority) — NOT DONE
+- **Where:** field name `(f.name||f.code)` and `f.code` → `innerHTML` (`index.html:2789-2792`);
+  pack name `p.name` (`:2813`, `:2970`); `rec.code` (`:3078`). No `escapeHtml` helper exists;
+  the only escaping is an ad-hoc quote-replace on an input **value** (`:3069`) that covers none
+  of these four sinks.
+- **Why it matters:** pack/field names round-trip through save export→import and the UI invites
+  sharing packs ("paste into campaigns.js"). A shared malicious pack executes script in the
+  same-origin iframe → full `arcade.v1.*` read/write for every game + the launcher. Identical
+  class to p2p-chat's already-fixed critical bug.
+- **Fix:** add an `escapeHtml` helper (copy p2p-chat's `app.js:16-20`) and escape every dynamic
+  name/code at each `innerHTML` sink, **or** render via `textContent` (as hecknsic/pi-game do).
+- **Accept:** a pack whose name is `"><img src=x onerror=alert(1)>` renders inertly.
 
-### 4. Local checkout dir vs slug breaks dev/acceptance — MED
-- `dev.sh` mounts by directory basename, so `./dev.sh ../sow-duku` stages at
-  `/sow-duku/` while the launcher button points at `/sowduku/` → local launch 404s
-  and `acceptance.mjs` can't run against the documented URL.
-- **Fix (game side):** rename the local checkout `sow-duku` → `sowduku`, then run
-  `./dev.sh ../sowduku` + `npm run acceptance -- http://127.0.0.1:4791/sowduku/`.
-  (Framework B10 fixes this at the harness level.)
+### 2. Missing migration sentinel — LOW — NOT DONE
+- No `Arcade.state.migrate(...)` anywhere; this is the acceptance probe the other 6 games have.
+  Add a no-op `Arcade.state.migrate('v1', () => {})` in `init()`.
 
-## Cleanup
+### 3. Reduced-motion — LOW (verify first) — NOT DONE
+- Honors only OS `@media (prefers-reduced-motion)` (`index.html:456`), never reads
+  `Arcade.settings.reducedMotion()`. The SDK's injected `data-reduced-motion` kill-switch (B8)
+  **likely already neutralizes the CSS animations** — confirm; if covered, downgrade to a
+  one-line README note. Residual is only JS/transform-driven motion + standalone.
 
-### 5. Delete the storage fallback shim; use `Arcade.state` directly — LOW
-- `sget`/`sset` (`index.html:756-768`) duplicate the `arcade.v1.sowduku.` prefix as a
-  string for a `file://` case §2 declares unsupported. Two sources of truth + divergent
-  parse behavior. Remove; the SDK guarantees standalone operation.
+### 4. Launcher art not square — MED (launcher-repo work) — NOT DONE
+- `images/sowduku.png` (launcher repo) must be square ≥512×512; local `game.png` is 1520×2000.
+  Tracked as launcher issue [#26](https://github.com/paulgibeault/paulgibeault.github.io/issues/26).
 
-### 6. Migrate hand-rolled stats to `Arcade.stats` — LOW
-- `stats` blob (`index.html:1472,1616`) maps 1:1 onto `Arcade.stats.getOrInit/update`.
-  (The keyed `hiScores`-by-board-code store is a fair reason to wait for framework B5.)
+### 5. Checkout dir vs slug — MED (local dev) — NOT DONE
+- Local dir is still `sow-duku`; `dev.sh` mounts by basename → `/sow-duku/` while the launcher
+  button points at `/sowduku/`. Rename the checkout to `sowduku` (framework B10 also detects
+  gameId from `index.html` now, which mitigates this at the harness level).
 
-### 7. Honor reducedMotion + audioVolume; add sentinel; misc — LOW
-- CSS animations disabled only via `@media (prefers-reduced-motion)` (`index.html:456`);
-  also key off the SDK's motion hook (framework B8) or `Arcade.settings.reducedMotion()`.
-- Multiply WebAudio gain peaks by `Arcade.settings.audioVolume()` (`:975-1007`).
-- Add a no-op `Arcade.state.migrate('v1', () => {})` if acceptance checks the sentinel.
-- Document the fixed light-palette theme opt-out in README (§5).
-- Subscribe `onSuspend` to `audioCtx.suspend()`.
-- Trim the Pages artifact (exclude `PLAN.md`, mockups, `scripts/`).
+### 6. Migrate hand-rolled stats to `Arcade.stats` — LOW — NOT DONE
+- `getStats()` blob (`index.html:1472`) maps 1:1 onto `Arcade.stats.getOrInit/update`. Tracked
+  as [sowduku #3](https://github.com/paulgibeault/sowduku/issues/3). (Keyed `hiScores`-by-board-code
+  can stay; SDK B5 keyed bests now exist if you want to move it too.)
+
+---
+
+## Actions
+- **File a new sowduku issue (#4)** led by the **stored XSS** (§1) + the migration sentinel (§2);
+  ship as a follow-up PR. This is the single highest-value remaining game-side item in the fleet.
+- Close the paired integration issue [sowduku #1](https://github.com/paulgibeault/sowduku/issues/1)
+  (its PR merged) — but **only after** noting the XSS was out of its scope and is now tracked in #4.
 
 ## Priority
-1 → 2 → 3 → 4 → 5 → 6 → 7.
+1 (XSS) → 2 (sentinel) → 4 (square art) → 5 (dir) → 3 (reduced-motion, verify) → 6 (stats).
