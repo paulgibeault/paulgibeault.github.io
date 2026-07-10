@@ -136,10 +136,14 @@ function applyStatus(mp) {
         idleHoldTimer = setTimeout(() => {
             idleHoldTimer = null;
             setStatus(aggregateStatus(mp));
+            notifyRosterChange();
         }, 1500);
         return;
     }
     setStatus(next);
+    // Every path that can change a link's status funnels through here, so the
+    // per-peer roster rides the same trigger (it dedupes internally).
+    notifyRosterChange();
 }
 
 const META_PREFIX = 'arcade.v1._meta.';
@@ -185,6 +189,58 @@ function deviceIdForPeerId(peerId) {
         if (pid === peerId) return devId;
     }
     return null;
+}
+
+// Roster: the per-device view of every DIRECT link (a host sees all joiners;
+// a joiner sees exactly the host). Status folds the transport vocabulary to
+// what games act on — 'connected' or 'interrupted' — because an identity-
+// bound link that isn't cleanly up is by definition a session being repaired
+// (renegotiating, or terminally down with its outbox stashed awaiting
+// rendezvous adoption). Entries leave the roster only when the session is
+// truly gone.
+const rosterListeners = []; // fn([{deviceId, name, status, direct}])
+let rosterTimer = null;
+let lastRosterJson = null;
+
+function rosterSnapshot() {
+    if (!addon) return [];
+    const known = readKnownPeers();
+    const out = [];
+    for (const [deviceId, peerId] of identityLinks) {
+        const p = addon.peerNode.peers.get(peerId);
+        let status = null;
+        if (p) {
+            status = p.status === 'connected' ? 'connected' : 'interrupted';
+        } else if (addon.peerNode.sessionStash && addon.peerNode.sessionStash.has(peerId)) {
+            status = 'interrupted';
+        }
+        if (status) {
+            out.push({
+                deviceId,
+                name: (known[deviceId] && known[deviceId].name) || 'Unnamed device',
+                status,
+                direct: true
+            });
+        }
+    }
+    return out;
+}
+
+// Coalesces bursts (a status event and its rdv echo land in the same tick)
+// and dedupes by full snapshot — a status flip on one entry must fire, mere
+// re-triggers must not.
+function notifyRosterChange() {
+    if (rosterTimer) return;
+    rosterTimer = setTimeout(() => {
+        rosterTimer = null;
+        const roster = rosterSnapshot();
+        const json = JSON.stringify(roster);
+        if (json === lastRosterJson) return;
+        lastRosterJson = json;
+        for (const fn of rosterListeners) {
+            try { fn(roster.map((e) => ({ ...e }))); } catch (err) {}
+        }
+    }, 0);
 }
 
 // deviceIds whose direct-link fingerprint changed this session. A peer-chosen
@@ -427,6 +483,9 @@ async function ensureAddon() {
             if (!detail) return; // malformed deviceId — bind nothing
             if (!d.relayed) {
                 identityLinks.set(env.deviceId, d.peerId);
+                // A direct identity binding is a roster join (or a rename —
+                // recordPeerIdentity above already upserted the name).
+                notifyRosterChange();
                 // A completed handshake means this connection is live on
                 // purpose — clear any leftover hang-up flag. (The status
                 // handler's clear above misses FRESH ceremonies, because at
@@ -604,19 +663,33 @@ export const ArcadeP2P = {
 
     /**
      * Live remote devices whose identity handshake completed:
-     * [{deviceId, name}]. Used to seed a freshly-mounted game's roster.
+     * [{deviceId, name, status, direct}]. Used to seed a freshly-mounted
+     * game's roster (welcome.peers) — same shape as onRosterChange pushes.
      */
     connectedPeers() {
-        if (!addon) return [];
-        const known = readKnownPeers();
-        const out = [];
-        for (const [deviceId, peerId] of identityLinks) {
-            const p = addon.peerNode.peers.get(peerId);
-            if (p && (p.status === 'connected' || p.status === 'interrupted')) {
-                out.push({ deviceId, name: (known[deviceId] && known[deviceId].name) || 'Unnamed device' });
-            }
-        }
-        return out;
+        return rosterSnapshot();
+    },
+
+    /**
+     * Subscribe to roster changes — one coarse event with the full roster
+     * (same shape as connectedPeers()) on any join/leave/rename/per-peer
+     * status change. Returns unsubscribe.
+     */
+    onRosterChange(fn) {
+        rosterListeners.push(fn);
+        return () => {
+            const i = rosterListeners.indexOf(fn);
+            if (i >= 0) rosterListeners.splice(i, 1);
+        };
+    },
+
+    /**
+     * Re-derive the roster and notify subscribers if it changed. For events
+     * the bridge can't observe itself — today: a local rename in the Known
+     * Peers panel, which writes storage the roster names read from.
+     */
+    refreshRoster() {
+        notifyRosterChange();
     },
 
     /**

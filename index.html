@@ -904,6 +904,15 @@
                     }
                     prevPeerStatus = status;
                 });
+                ArcadeP2P.onRosterChange((peers) => {
+                    // Per-peer roster for multi-seat games — one coarse event
+                    // with the full roster (arcade:welcome.peers seeds it).
+                    broadcast({ type: 'arcade:peer.roster', peers });
+                });
+                // The Known Peers panel renames devices straight through
+                // arcade-known-peers.js — give it a hook to refresh roster
+                // names, since the bridge can't observe that write.
+                window.__arcade.p2pRefreshRoster = () => ArcadeP2P.refreshRoster();
                 ArcadeP2P.onPresence(({ gameId, deviceId, name, kind }) => {
                     // The remote launcher has <gameId> mounted and listening.
                     // If we do too, hand that game a ready event — and answer
@@ -1910,7 +1919,12 @@
 
         function renamePeer(id, name) {
             const ok = renameKnownPeer(id, name);
-            if (ok) render();
+            if (ok) {
+                render();
+                // Roster entries carry the stored name — tell the bridge (if
+                // loaded) so subscribed games see the rename live.
+                if (window.__arcade.p2pRefreshRoster) window.__arcade.p2pRefreshRoster();
+            }
             return ok;
         }
         function relativeTime(iso) {

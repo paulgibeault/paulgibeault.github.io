@@ -135,6 +135,7 @@
 
     var listeners = {
         peerStatus: [],
+        peersChange: [],
         peerMessage: [],
         peerReady: [],
         peerQueue: [],
@@ -159,6 +160,33 @@
         };
         remotePeers[deviceId] = rec;
         return rec;
+    }
+    // Per-peer roster (multi-peer API) — the launcher pushes the full list on
+    // any join/leave/rename/status change; welcome.peers seeds it. Entries:
+    // { deviceId, name, status: 'connected'|'interrupted'|'idle', direct }.
+    var peerRoster = [];
+    function applyRoster(arr) {
+        if (!Array.isArray(arr)) return false;
+        var next = [];
+        for (var i = 0; i < arr.length; i++) {
+            var p = arr[i];
+            if (!p || typeof p !== 'object') continue;
+            var rec = noteRemotePeer(p.deviceId, p.name); // validates deviceId, keeps remote() coherent
+            if (!rec) continue;
+            next.push({
+                deviceId: rec.deviceId,
+                name: rec.name,
+                status: (p.status === 'interrupted' || p.status === 'idle') ? p.status : 'connected',
+                direct: p.direct !== false
+            });
+        }
+        peerRoster = next;
+        return true;
+    }
+    function rosterCopy() {
+        return peerRoster.map(function (p) {
+            return { deviceId: p.deviceId, name: p.name, status: p.status, direct: p.direct };
+        });
     }
     // Last-known transport replay-queue snapshot (pushed by the launcher —
     // meaningful during 'interrupted' episodes).
@@ -555,12 +583,7 @@
                 if (Array.isArray(data.caps)) {
                     peerCaps = data.caps.filter(function (c) { return typeof c === 'string'; });
                 }
-                if (Array.isArray(data.peers)) {
-                    for (var pi = 0; pi < data.peers.length; pi++) {
-                        var p = data.peers[pi];
-                        if (p && typeof p === 'object') noteRemotePeer(p.deviceId, p.name);
-                    }
-                }
+                applyRoster(data.peers);
                 if (applySettings(data.settings)) fire(listeners.settingsChange, snapshotSettings());
                 resolveReady();
                 break;
@@ -573,6 +596,9 @@
                 break;
             case 'arcade:peer.status':
                 if (typeof data.status === 'string') setPeerStatus(data.status);
+                break;
+            case 'arcade:peer.roster':
+                if (applyRoster(data.peers)) fire(listeners.peersChange, rosterCopy());
                 break;
             case 'arcade:peer.identity':
                 noteRemotePeer(data.deviceId, data.name);
@@ -908,6 +934,7 @@
             } catch (e) { return null; }
         },
         // Most recently seen remote device ({ deviceId, name }) or null.
+        // Single-peer convenience — multi-peer games should use peers().
         remote: function () {
             var best = null;
             for (var k in remotePeers) {
@@ -915,6 +942,14 @@
             }
             return best ? { deviceId: best.deviceId, name: best.name } : null;
         },
+        // Full peer roster: [{ deviceId, name, status, direct }], [] when no
+        // session (or on a launcher without the 'peer.roster' cap). status is
+        // 'connected' | 'interrupted' | 'idle'; direct is true when this
+        // device holds the direct link (for a joiner: exactly the host).
+        peers: function () { return rosterCopy(); },
+        // Fires with the full roster array on any join/leave/rename/status
+        // change — one coarse event, not fine-grained add/remove.
+        onPeersChange: makeSubscriber(listeners.peersChange),
         // Fires when the remote device has THIS game mounted and listening —
         // fn({ deviceId, name }). May fire more than once per session (both
         // sides announce); treat it as an idempotent "peer is ready" signal.
