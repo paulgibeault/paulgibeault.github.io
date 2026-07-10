@@ -1,4 +1,4 @@
-const CACHE_NAME = 'paul-arcade-v23';
+const CACHE_NAME = 'paul-arcade-v24';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',

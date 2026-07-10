@@ -224,6 +224,15 @@ async function identityDbPut(key, value) {
 // send()/broadcast()); 'signal' payloads are shape-validated before touching
 // any RTCPeerConnection API. Renegotiation grants a peer nothing it did not
 // already have — it can only renegotiate the one link it is an endpoint of.
+//
+// TARGETED SENDS (v1.11): sendTo(peerId, text) is the public single-link
+// send. App frames may carry `noRelay: true` — the host's relay loop skips
+// such frames, so a targeted frame sent to the host is never fanned out to
+// the other clients. Targeted frames ride the same per-link outbox (and the
+// session stash of a dead-but-repairing link), so exactly-once replay across
+// blips and rendezvous repairs applies to them unchanged. The transport
+// knows nothing about WHO a target is beyond its transient peerId — any
+// higher-level addressing (stable device identity) lives in the layer above.
 export class PeerManager extends EventTarget {
     constructor(options = {}) {
         super();
@@ -539,6 +548,14 @@ export class PeerManager extends EventTarget {
 
         const msg = (parsed && typeof parsed === 'object') ? parsed : { text: raw, from: peerId }; // legacy string fallback
 
+        // The hub is the ONLY node that stamps `relayed` — every frame the
+        // host receives arrived on a direct link from its origin, so an
+        // inbound relayed:true at the host is always forged. Strip it before
+        // it can reach the relay loop or local dispatch (a sender could
+        // otherwise launder its frames into "arrived through the hub" and
+        // defeat relay-tag attribution in the layer above).
+        if (this.isHost && msg.relayed) delete msg.relayed;
+
         // Reliability: dedup by link sequence, acknowledge what we've seen.
         if (typeof msg.seq === 'number') {
             if (msg.seq <= peerData.lastInSeq) {
@@ -565,7 +582,10 @@ export class PeerManager extends EventTarget {
         // it is the key under which this inbound channel is registered.
         // (Inbound frames are always from a remote client, never the host, so
         // there is no host-origin frame to exclude here.)
-        if (this.isHost) {
+        //
+        // Frames marked `noRelay` are targeted (v1.11) — the sender aimed
+        // them at this device alone, so the hub must not fan them out.
+        if (this.isHost && !msg.noRelay) {
             this.peers.forEach((destData, destId) => {
                 if (destId !== peerId) this._sendAppTo(destId, { text: msg.text, from: peerId, relayed: true });
             });
@@ -679,6 +699,26 @@ export class PeerManager extends EventTarget {
      * already in flight), so a suspended peer misses nothing.
      * Returns true if the message was sent or queued on a live link.
      */
+    // Serializes an app frame for the wire. Whitelist, not passthrough:
+    // only the fields every peer understands may travel, so a sender cannot
+    // smuggle arbitrary keys into another peer's message handler.
+    _appWire(msg, seq) {
+        const frame = { text: msg.text, from: msg.from, seq };
+        if (msg.relayed) frame.relayed = true;
+        if (msg.noRelay) frame.noRelay = true;
+        return JSON.stringify(frame);
+    }
+
+    // Appends an app frame to a stashed (dead-but-repairing) session's
+    // outbox so the post-adoption resync replays it. Same cap as live links.
+    _stashAppend(stash, msg) {
+        const seq = ++stash.outSeq;
+        stash.outbox.push({ seq, wire: this._appWire(msg, seq) });
+        if (stash.outbox.length > this.options.outboxLimit) {
+            stash.outbox.splice(0, stash.outbox.length - this.options.outboxLimit);
+        }
+    }
+
     _sendAppTo(peerId, msg) {
         const peerData = this.peers.get(peerId);
         if (!peerData) return false;
@@ -686,9 +726,7 @@ export class PeerManager extends EventTarget {
         if (!open && peerData.status !== 'interrupted') return false;
 
         const seq = ++peerData.outSeq;
-        const wire = JSON.stringify(msg.relayed
-            ? { text: msg.text, from: msg.from, seq, relayed: true }
-            : { text: msg.text, from: msg.from, seq });
+        const wire = this._appWire(msg, seq);
         peerData.outbox.push({ seq, wire });
         if (peerData.outbox.length > this.options.outboxLimit) {
             peerData.outbox.splice(0, peerData.outbox.length - this.options.outboxLimit);
@@ -745,16 +783,30 @@ export class PeerManager extends EventTarget {
         // nothing. Bounded by the same outbox cap.
         this.sessionStash.forEach((stash, pId) => {
             if (pId === excludePeerId) return;
-            const seq = ++stash.outSeq;
-            stash.outbox.push({ seq, wire: JSON.stringify(msg.relayed
-                ? { text: msg.text, from: msg.from, seq, relayed: true }
-                : { text: msg.text, from: msg.from, seq }) });
-            if (stash.outbox.length > this.options.outboxLimit) {
-                stash.outbox.splice(0, stash.outbox.length - this.options.outboxLimit);
-            }
+            this._stashAppend(stash, msg);
             sent = true;
         });
         return sent;
+    }
+
+    /**
+     * Public single-link send (v1.11). Wraps `text` like send() but delivers
+     * to ONE peer, with the frame marked `noRelay` (default) so a receiving
+     * host never fans it out. Rides the same per-link outbox as broadcast —
+     * queued while 'interrupted', appended to the session stash while a
+     * dead link awaits rendezvous adoption — so replay is exactly-once.
+     * Returns true when sent or queued, false when the peerId is unknown.
+     */
+    sendTo(peerId, text, { noRelay = true } = {}) {
+        const msg = { text, from: this.myId };
+        if (noRelay) msg.noRelay = true;
+        if (this.peers.has(peerId)) return this._sendAppTo(peerId, msg);
+        const stash = this.sessionStash.get(peerId);
+        if (stash) {
+            this._stashAppend(stash, msg);
+            return true;
+        }
+        return false;
     }
 
     send(text) {

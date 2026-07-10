@@ -121,6 +121,10 @@
     var handshakeTimer = null;
 
     var peerStatus = 'unavailable';
+    // Launcher capability flags (welcome.caps) — additive feature detection
+    // so a game never hard-depends on a launcher feature mid-rollout.
+    // Empty when standalone or on an older launcher.
+    var peerCaps = [];
     var settings = {
         fontScale: 1,
         theme: 'dark',
@@ -131,6 +135,7 @@
 
     var listeners = {
         peerStatus: [],
+        peersChange: [],
         peerMessage: [],
         peerReady: [],
         peerQueue: [],
@@ -155,6 +160,34 @@
         };
         remotePeers[deviceId] = rec;
         return rec;
+    }
+    // Per-peer roster (multi-peer API) — the launcher pushes the full list on
+    // any join/leave/rename/status change; welcome.peers seeds it. Entries:
+    // { deviceId, name, status: 'connected'|'interrupted', direct }. A seat
+    // that's truly gone leaves the list — removal is the leave signal.
+    var peerRoster = [];
+    function applyRoster(arr) {
+        if (!Array.isArray(arr)) return false;
+        var next = [];
+        for (var i = 0; i < arr.length; i++) {
+            var p = arr[i];
+            if (!p || typeof p !== 'object') continue;
+            var rec = noteRemotePeer(p.deviceId, p.name); // validates deviceId, keeps remote() coherent
+            if (!rec) continue;
+            next.push({
+                deviceId: rec.deviceId,
+                name: rec.name,
+                status: p.status === 'interrupted' ? 'interrupted' : 'connected',
+                direct: p.direct !== false
+            });
+        }
+        peerRoster = next;
+        return true;
+    }
+    function rosterCopy() {
+        return peerRoster.map(function (p) {
+            return { deviceId: p.deviceId, name: p.name, status: p.status, direct: p.direct };
+        });
     }
     // Last-known transport replay-queue snapshot (pushed by the launcher —
     // meaningful during 'interrupted' episodes).
@@ -548,24 +581,36 @@
                 framed = true;
                 parentOrigin = e.origin;
                 setPeerStatus(typeof data.peerStatus === 'string' ? data.peerStatus : 'idle');
-                if (Array.isArray(data.peers)) {
-                    for (var pi = 0; pi < data.peers.length; pi++) {
-                        var p = data.peers[pi];
-                        if (p && typeof p === 'object') noteRemotePeer(p.deviceId, p.name);
-                    }
+                if (Array.isArray(data.caps)) {
+                    peerCaps = data.caps.filter(function (c) { return typeof c === 'string'; });
                 }
+                applyRoster(data.peers);
                 if (applySettings(data.settings)) fire(listeners.settingsChange, snapshotSettings());
                 resolveReady();
                 break;
-            case 'arcade:peer.message':
+            case 'arcade:peer.message': {
                 if (data.payload && typeof data.payload === 'object' && data.payload.__arcadeBlob) {
                     handleBlobChunk(data.payload.__arcadeBlob, data.fromPeer);
                     break;
                 }
-                fire(listeners.peerMessage, data.payload, data.fromPeer);
+                // meta = { relayed, to }: relayed=true means the frame did
+                // NOT come from this device's direct link partner (host
+                // relay or host-bridge forward) — a cheap spoof check for
+                // frames that claim host authority. to distinguishes
+                // targeted ('me') from broadcast ('all') delivery. Old
+                // launchers send no meta — defaults are the broadcast shape.
+                var m = (data.meta && typeof data.meta === 'object') ? data.meta : {};
+                fire(listeners.peerMessage, data.payload, data.fromPeer, {
+                    relayed: m.relayed === true,
+                    to: m.to === 'me' ? 'me' : 'all'
+                });
                 break;
+            }
             case 'arcade:peer.status':
                 if (typeof data.status === 'string') setPeerStatus(data.status);
+                break;
+            case 'arcade:peer.roster':
+                if (applyRoster(data.peers)) fire(listeners.peersChange, rosterCopy());
                 break;
             case 'arcade:peer.identity':
                 noteRemotePeer(data.deviceId, data.name);
@@ -878,11 +923,29 @@
     var peerApi = {
         status: function () { return peerStatus; },
         onStatus: makeSubscriber(listeners.peerStatus),
-        send: function (payload) {
+        caps: function () { return Object.freeze(peerCaps.slice()); },
+        send: function (payload, opts) {
             // 'interrupted' = live session being repaired by the transport —
             // sends are queued and replayed on recovery (exactly-once), so
             // games can keep playing straight through a connection blip.
             if (!framed || (peerStatus !== 'connected' && peerStatus !== 'interrupted')) return false;
+            var to = opts && opts.to;
+            if (to !== undefined) {
+                // Targeted send — routing, not secrecy: joiner→joiner frames
+                // transit the host bridge readable. What it guarantees is
+                // that a non-addressee joiner never RECEIVES the frame.
+                // Refuse rather than broadcast when the launcher can't
+                // target (missing cap) or the payload names a bad target —
+                // a private frame must never silently fan out.
+                // NOTE: true means "handed to the launcher", not delivered —
+                // an unknown or just-departed target is dropped launcher-
+                // side (postMessage is one-way, so its false can't reach
+                // us). A game that needs delivery guarantees uses acks.
+                if (typeof to !== 'string' || !to) return false;
+                if (peerCaps.indexOf('peer.sendTo') === -1) return false;
+                postToParent({ type: 'arcade:peer.send', payload: payload, to: to });
+                return true;
+            }
             postToParent({ type: 'arcade:peer.send', payload: payload });
             return true;
         },
@@ -900,6 +963,7 @@
             } catch (e) { return null; }
         },
         // Most recently seen remote device ({ deviceId, name }) or null.
+        // Single-peer convenience — multi-peer games should use peers().
         remote: function () {
             var best = null;
             for (var k in remotePeers) {
@@ -907,6 +971,18 @@
             }
             return best ? { deviceId: best.deviceId, name: best.name } : null;
         },
+        // Full peer roster: [{ deviceId, name, status, direct }], [] when no
+        // session or on a launcher without the 'peer.roster' cap (an old
+        // launcher's welcome seed would otherwise linger stale forever —
+        // nothing there ever pushes updates). status is 'connected' |
+        // 'interrupted'; a seat that's truly gone leaves the list. direct is
+        // true when this device holds the direct link (a joiner's host).
+        peers: function () {
+            return peerCaps.indexOf('peer.roster') === -1 ? [] : rosterCopy();
+        },
+        // Fires with the full roster array on any join/leave/rename/status
+        // change — one coarse event, not fine-grained add/remove.
+        onPeersChange: makeSubscriber(listeners.peersChange),
         // Fires when the remote device has THIS game mounted and listening —
         // fn({ deviceId, name }). May fire more than once per session (both
         // sides announce); treat it as an idempotent "peer is ready" signal.

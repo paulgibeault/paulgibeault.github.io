@@ -33,14 +33,26 @@
         render(s);
     });
 
-    Arcade.peer.onMessage((payload) => {
+    // __got (payloads, asserted by the two-launcher acceptance) and __rx
+    // (full delivery record for the multiseat acceptance) are maintained by
+    // ONE listener so the two logs can never disagree about a delivery.
+    window.__rx = [];
+    Arcade.peer.onMessage((payload, fromPeer, meta) => {
         window.__got.push(payload);
+        window.__rx.push({ payload, fromPeer, meta });
         logEl.textContent += 'recv: ' + JSON.stringify(payload) + '\n';
     });
 
+    // Roster events — one full-roster array per change (multiseat tests).
+    window.__rosterEvents = [];
+    Arcade.peer.onPeersChange((peers) => window.__rosterEvents.push(peers));
+
     // Test hooks
     window.__send = (payload) => Arcade.peer.send(payload);
+    window.__sendTo = (payload, to) => Arcade.peer.send(payload, { to });
     window.__peerStatus = () => Arcade.peer.status();
+    window.__caps = () => Arcade.peer.caps();
+    window.__peers = () => Arcade.peer.peers();
 </script>
 </body>
 </html>

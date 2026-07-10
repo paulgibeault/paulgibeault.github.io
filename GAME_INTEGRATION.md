@@ -424,15 +424,21 @@ links, no signaling server. Games never touch any of that; the whole surface is:
 
 ```js
 Arcade.peer.status();              // 'unavailable' | 'idle' | 'connecting' | 'connected' | 'interrupted'
-Arcade.peer.onStatus(s => ...);    // gate multiplayer UI on this
-Arcade.peer.send({ move: 'e4' });  // JSON-safe payload; false unless connected/interrupted
-Arcade.peer.onMessage((payload, fromPeer) => ...);  // fromPeer = sender's stable deviceId
+Arcade.peer.onStatus(s => ...);    // gate multiplayer UI on this (AGGREGATE across all links)
+Arcade.peer.caps();                // launcher capability flags: feature-detect additive features
+                                   // ('peer.sendTo', 'peer.roster', 'peer.meta'); [] standalone
+Arcade.peer.send({ move: 'e4' });  // broadcast; JSON-safe payload; false unless connected/interrupted
+Arcade.peer.send(hand, { to });    // targeted: only deviceId `to` receives it (cap 'peer.sendTo')
+Arcade.peer.onMessage((payload, fromPeer, meta) => ...);  // fromPeer = sender's stable deviceId;
+                                   // meta = { relayed, to: 'me'|'all' } (cap 'peer.meta')
 
 Arcade.peer.self();                // { deviceId, name } for THIS device (null before first pairing)
-Arcade.peer.remote();              // most recently seen remote device, or null
+Arcade.peer.remote();              // most recently seen remote device, or null (single-peer helper)
+Arcade.peer.peers();               // [{ deviceId, name, status, direct }] — the multi-peer roster
+Arcade.peer.onPeersChange(r => ...);  // full roster on any join/leave/rename/status change
 Arcade.peer.onReady(({ deviceId }) => ...);  // remote has THIS game mounted & listening
 
-Arcade.peer.sendBlob(file, { onProgress });  // chunked large payloads; Promise
+Arcade.peer.sendBlob(file, { onProgress });  // chunked large payloads; Promise (broadcast only)
 Arcade.peer.onBlob((blob, { name, size, fromPeer }) => ...);
 
 Arcade.peer.queue();               // { depth, limit, overflowed } — replay-queue visibility
@@ -483,9 +489,46 @@ Rules of the road:
 - [ ] Don't cache `status()` at init: a game mounted mid-session receives
       `'connected'` in its welcome, and live transitions arrive via `onStatus`.
 
+Multi-seat rules (host + several joiners over "Invite another player"):
+
+- [ ] **Feature-detect, don't version-check**: gate targeted sends / roster /
+      meta on `Arcade.peer.caps()` at lobby time. A session's host should
+      announce the chosen wire mode in its own lobby frame so mixed-cap
+      tables degrade to a game-level fallback uniformly. The platform guards
+      the worst mixed-version case itself: a joiner's targeted send returns
+      `false` when its HOST is on an older launcher (the host announces its
+      wire capabilities during the identity handshake), so a private frame
+      is never handed to a hub that would blind-relay it to every seat.
+- [ ] **Target private state; broadcast shared state.** `send(payload, { to })`
+      guarantees a non-addressee joiner never *receives* the frame (real
+      routing privacy — no cooperative discard). It never falls back to
+      broadcast: the SDK returns `false` when the launcher lacks the
+      `peer.sendTo` cap or `to` is malformed, and the launcher *silently
+      drops* (never fans out) a frame whose target is unknown, just departed,
+      or whose session host is too old to route it. `true` therefore means
+      "handed to the launcher", not "delivered" — a game that needs delivery
+      guarantees acknowledges at the game layer.
+- [ ] **`to` is routing, not secrecy from the host**: joiner→joiner targeted
+      frames transit the host's bridge readable (inherent to the star
+      topology, and correct for host-authoritative games). End-to-end
+      sealing against the host is a game-layer concern.
+- [ ] **Per-seat status comes from `peers()`**, not `status()`: the aggregate
+      stays `'connected'` while ANY link is up, so a 4-player table must key
+      its "reconnecting…" chips on roster entries flipping to
+      `'interrupted'`. Roster entries hold `'connected' | 'interrupted'`; a
+      seat that's truly gone leaves the roster (that's the leave signal).
+      `direct: true` marks the device your link actually terminates at — for
+      a joiner, exactly the host, so the host needs no lobby frame to be
+      identified.
+- [ ] **Spoof check via `meta.relayed`**: a frame claiming host authority
+      that arrives with `relayed: true` did NOT come from your direct link
+      partner — treat it as another joiner talking, not the host. Targeted
+      frames arrive with `meta.to === 'me'`; broadcasts with `'all'`.
+
 Try it: mount `tools/fixtures/p2p-test-game/` on two devices via the launcher
 and watch the message log; `node tools/p2p-acceptance.mjs` runs the automated
-two-launcher version headlessly.
+two-launcher version headlessly, and `node tools/p2p-multiseat-acceptance.mjs`
+the host + two joiners version (targeted sends, roster, meta).
 
 ---
 
@@ -662,17 +705,21 @@ acts on messages from iframes it mounted via the pool.
 
 ```
 child  → parent: arcade:hello              { gameId, version }
-parent → child:  arcade:welcome            { version, peerStatus, peers, settings }
+parent → child:  arcade:welcome            { version, caps, peerStatus, peers, settings }
+                                           // caps: capability flags (absent ⇒ []); peers
+                                           // entries: { deviceId, name, status, direct }
 parent → child:  arcade:settings.changed   { settings }
 parent → child:  arcade:state.replaced     { }                      // after file import
 parent → child:  arcade:lifecycle.suspend  { }                      // iframe hidden, or about to be evicted
 parent → child:  arcade:lifecycle.resume   { }                      // iframe shown
-parent → child:  arcade:peer.status        { status }
-parent → child:  arcade:peer.message       { payload, fromPeer }    // fromPeer = sender deviceId
-parent → child:  arcade:peer.identity      { deviceId, name }       // roster update
+parent → child:  arcade:peer.status        { status }               // aggregate across links
+parent → child:  arcade:peer.message       { payload, fromPeer, meta }  // fromPeer = sender deviceId;
+                                           // meta = { relayed, to: 'me'|'all' }
+parent → child:  arcade:peer.roster        { peers }                // full roster on any change
+parent → child:  arcade:peer.identity      { deviceId, name }       // roster update (legacy single-peer)
 parent → child:  arcade:peer.ready         { deviceId, name }       // remote same-game listening
 parent → child:  arcade:peer.queue         { depth, limit, overflowed }
-child  → parent: arcade:peer.send          { payload }
+child  → parent: arcade:peer.send          { payload, to? }         // to = target deviceId (targeted)
 child  → parent: arcade:ui.toast           { message, kind, duration }
 ```
 

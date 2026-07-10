@@ -75,13 +75,25 @@ Arcade.loop(fn)                       // managed rAF loop: { start, stop, kick, 
 Arcade.peer.status()                  // 'unavailable' | 'idle' | 'connecting' | 'connected' | 'interrupted'
                                       // 'interrupted' = live session self-repairing (v1.7):
                                       // sends queue + replay; don't reset game state
-Arcade.peer.onStatus(fn)
-Arcade.peer.send(payload)
-Arcade.peer.onMessage(fn)             // fn(payload, fromPeer) — fromPeer is the sending
-                                      // device's stable deviceId once identity completes
+Arcade.peer.onStatus(fn)              // aggregate status (all links folded into one value)
+Arcade.peer.caps()                    // launcher capability flags (frozen array; [] standalone
+                                      // or on an older launcher) — feature-detect additive
+                                      // features: 'peer.sendTo', 'peer.roster', 'peer.meta'
+Arcade.peer.send(payload)             // broadcast to every connected peer
+Arcade.peer.send(payload, { to })     // targeted: only that deviceId receives it; returns
+                                      // false (never broadcasts) when the launcher lacks the
+                                      // 'peer.sendTo' cap or `to` is malformed. Routing, not
+                                      // secrecy: joiner→joiner frames transit the host bridge
+Arcade.peer.onMessage(fn)             // fn(payload, fromPeer, meta) — fromPeer is the sending
+                                      // device's stable deviceId once identity completes;
+                                      // meta = { relayed, to: 'me'|'all' } (cap 'peer.meta')
 Arcade.peer.self() / remote()         // stable device identities ({ deviceId, name } | null)
+Arcade.peer.peers()                   // full roster [{ deviceId, name, status, direct }] —
+                                      // the multi-peer API (cap 'peer.roster'); direct=true
+                                      // marks this device's own link (a joiner's host)
+Arcade.peer.onPeersChange(fn)         // fn(rosterArray) on any join/leave/rename/status change
 Arcade.peer.onReady(fn)               // remote device has THIS game mounted and listening
-Arcade.peer.sendBlob(blob, { onProgress }) / onBlob(fn)  // chunked large payloads
+Arcade.peer.sendBlob(blob, { onProgress }) / onBlob(fn)  // chunked large payloads (broadcast)
 Arcade.peer.queue() / onQueue(fn)     // replay-queue { depth, limit, overflowed }
 
 // SETTINGS — launcher pushes its current values, SDK auto-applies CSS vars/attrs
@@ -125,7 +137,8 @@ All messages namespaced `arcade:` to avoid collision.
 ```
 child → parent:  { type: 'arcade:hello',   gameId, version: 2 }
 parent → child:  { type: 'arcade:welcome', version: 2, peerStatus: 'idle',
-                   peers: [{ deviceId, name }, ...],   // live remote devices (roster seed)
+                   caps: ['peer.sendTo', 'peer.roster', 'peer.meta'],  // capability flags (absent ⇒ [])
+                   peers: [{ deviceId, name, status, direct }, ...],   // live remote devices (roster seed)
                    settings: { fontScale, theme, reducedMotion, audioVolume, handedness } }
 ```
 
@@ -134,10 +147,12 @@ If no `welcome` arrives within ~300ms, SDK locks into standalone mode.
 ### Multiplayer & lifecycle
 
 ```
-child  → parent: { type: 'arcade:peer.send',         payload }
-parent → child:  { type: 'arcade:peer.message',      payload, fromPeer }   // fromPeer = sender deviceId
+child  → parent: { type: 'arcade:peer.send',         payload, to? }        // to = target deviceId (targeted send)
+parent → child:  { type: 'arcade:peer.message',      payload, fromPeer, meta }  // fromPeer = sender deviceId;
+                                                                           // meta = { relayed, to: 'me'|'all' }
 parent → child:  { type: 'arcade:peer.status',       status }
-parent → child:  { type: 'arcade:peer.identity',     deviceId, name }      // roster update
+parent → child:  { type: 'arcade:peer.roster',       peers }               // full roster on any change
+parent → child:  { type: 'arcade:peer.identity',     deviceId, name }      // roster update (legacy single-peer)
 parent → child:  { type: 'arcade:peer.ready',        deviceId, name }      // remote same-game listening
 parent → child:  { type: 'arcade:peer.queue',        depth, limit, overflowed } // replay-queue visibility
 parent → child:  { type: 'arcade:state.replaced' }               // after file import
@@ -147,7 +162,7 @@ parent → child:  { type: 'arcade:lifecycle.resume' }              // iframe sh
 child  → parent: { type: 'arcade:ui.toast',          message, kind, duration }
 ```
 
-Thirteen message types total (see GAME_INTEGRATION.md §14 for the full summary table). The launcher routes peer messages by `gameId` so multiple games could in principle multiplex one connection, though the current design assumes one foreground game at a time. Between launchers, presence frames (`{arcade:1, kind:'presence'|'presence-ack', gameId}`) announce that a game is mounted and listening; the receiving launcher surfaces them to the matching game as `arcade:peer.ready`.
+Fourteen message types total (see GAME_INTEGRATION.md §14 for the full summary table). The launcher routes peer messages by `gameId` so multiple games could in principle multiplex one connection, though the current design assumes one foreground game at a time. Between launchers, presence frames (`{arcade:1, kind:'presence'|'presence-ack', gameId}`) announce that a game is mounted and listening; the receiving launcher surfaces them to the matching game as `arcade:peer.ready`.
 
 **Legacy compatibility shim:** a small number of older games (e.g. hecknsic) shipped their own postMessage-backed `localStorage` override before the SDK existed. The launcher still answers that game's `'ls-proxy-request'`/`'ls-proxy-response'` protocol (namespaced into `arcade.v1.<gameId>.ls.<key>`) purely so those games don't hang — this is launcher-side legacy support, not part of the `arcade:` protocol, and new games should use `Arcade.state.*` directly rather than rolling a shim of their own.
 

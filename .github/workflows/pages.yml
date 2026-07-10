@@ -60,6 +60,18 @@ jobs:
           echo "p2p-acceptance failed after 3 attempts"
           exit 1
 
+      - name: P2P multiseat acceptance (host + two joiners; targeted sends, roster, meta)
+        run: |
+          for i in 1 2 3; do
+            echo "::group::p2p-multiseat attempt $i"
+            if node tools/p2p-multiseat-acceptance.mjs; then echo "::endgroup::"; exit 0; fi
+            echo "::endgroup::"
+            echo "attempt $i failed; retrying in 3s"
+            sleep 3
+          done
+          echo "p2p-multiseat failed after 3 attempts"
+          exit 1
+
       # NOTE: the full per-game §13 acceptance (tools/acceptance.mjs) and the
       # --pool test need a launcher staged with catalog-registered games, which
       # a bare checkout doesn't have. Wire them in here once a committed
