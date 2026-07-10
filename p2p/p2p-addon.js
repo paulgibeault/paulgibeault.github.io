@@ -96,6 +96,18 @@ export class P2PAddon extends EventTarget {
         }
         this.peerNode.send(data);
     }
+
+    /**
+     * Single-link send (v1.11) — delivers to one peerId only, marked
+     * noRelay so a receiving host never fans it out. Returns false when
+     * the peerId is unknown to the transport.
+     */
+    sendTo(peerId, data) {
+        if (typeof data !== 'string') {
+            data = JSON.stringify(data);
+        }
+        return this.peerNode.sendTo(peerId, data);
+    }
 }
 
 // Make globally available as an alternative to module importing
