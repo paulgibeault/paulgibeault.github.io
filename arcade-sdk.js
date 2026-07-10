@@ -912,11 +912,24 @@
         status: function () { return peerStatus; },
         onStatus: makeSubscriber(listeners.peerStatus),
         caps: function () { return Object.freeze(peerCaps.slice()); },
-        send: function (payload) {
+        send: function (payload, opts) {
             // 'interrupted' = live session being repaired by the transport —
             // sends are queued and replayed on recovery (exactly-once), so
             // games can keep playing straight through a connection blip.
             if (!framed || (peerStatus !== 'connected' && peerStatus !== 'interrupted')) return false;
+            var to = opts && opts.to;
+            if (to !== undefined) {
+                // Targeted send — routing, not secrecy: joiner→joiner frames
+                // transit the host bridge readable. What it guarantees is
+                // that a non-addressee joiner never RECEIVES the frame.
+                // Refuse rather than broadcast when the launcher can't
+                // target (missing cap) or the payload names a bad target —
+                // a private frame must never silently fan out.
+                if (typeof to !== 'string' || !to) return false;
+                if (peerCaps.indexOf('peer.sendTo') === -1) return false;
+                postToParent({ type: 'arcade:peer.send', payload: payload, to: to });
+                return true;
+            }
             postToParent({ type: 'arcade:peer.send', payload: payload });
             return true;
         },

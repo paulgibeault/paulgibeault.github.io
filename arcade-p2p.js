@@ -184,11 +184,39 @@ const remoteByeListeners = [];    // fn({deviceId, name}) — peer hung up on pu
 const presenceListeners = [];     // fn({gameId, deviceId, name, kind}) — remote game mounted/listening
 const identityLinks = new Map();  // deviceId → transport peerId of its DIRECT link
 
+// Devices known only THROUGH the host (star topology): other joiners, whose
+// identity frames arrive host-relayed. Maps deviceId → the relay `from` tag,
+// which the host stamps with the source LINK's peerId (unforgeable by the
+// sender — see the transport's relay loop). Used to (a) admit a joiner's
+// targeted send to another joiner (routed via the host), and (b) attribute
+// relayed frames to their true sender instead of the relaying host.
+const indirectPeers = new Map(); // deviceId → relay `from` tag
+
 function deviceIdForPeerId(peerId) {
     for (const [devId, pid] of identityLinks) {
         if (pid === peerId) return devId;
     }
     return null;
+}
+
+function deviceIdForRelayFrom(from) {
+    if (typeof from !== 'string') return null;
+    for (const [devId, tag] of indirectPeers) {
+        if (tag === from) return devId;
+    }
+    return null;
+}
+
+// A joiner's single direct link is by definition the host. Prefer the live
+// peers entry typed 'host'; during a stash-repair window (entry torn down,
+// outbox stashed) fall back to the identity binding, which survives teardown.
+function hostLinkPeerId() {
+    if (!addon || addon.peerNode.isHost) return null;
+    for (const [pid, p] of addon.peerNode.peers) {
+        if (p.type === 'host') return pid;
+    }
+    const bound = [...identityLinks.values()];
+    return bound.length === 1 ? bound[0] : null;
 }
 
 // Roster: the per-device view of every DIRECT link (a host sees all joiners;
@@ -324,12 +352,15 @@ let addonPromise = null;
 let sdkStatus = 'idle';
 
 const statusListeners = [];
-const messageListeners = []; // fn(gameId, payload)
+const messageListeners = []; // fn(gameId, payload, fromDeviceId, meta)
 
 function setStatus(next) {
     if (next === sdkStatus) return;
     ArcadeDiag.log('bridge', `status ${sdkStatus} → ${next}`);
     sdkStatus = next;
+    // 'idle' means the session truly ended — indirect (through-the-host)
+    // addressing dies with it. Identities re-announce on the next session.
+    if (next === 'idle') indirectPeers.clear();
     syncWakeLock();
     for (const fn of statusListeners) {
         try { fn(sdkStatus); } catch (e) {}
@@ -458,7 +489,11 @@ async function ensureAddon() {
                 // The remote launcher says a game with this gameId is mounted
                 // and listening over there.
                 if (typeof env.gameId !== 'string') return;
-                const presDeviceId = deviceIdForPeerId(d.peerId);
+                // Relayed presence originated at another joiner — attribute
+                // it via the relay tag, not the link (which names the host).
+                const presDeviceId = d.relayed
+                    ? deviceIdForRelayFrom(d.from)
+                    : deviceIdForPeerId(d.peerId);
                 const knownNow = readKnownPeers();
                 const presName = (presDeviceId && knownNow[presDeviceId] && knownNow[presDeviceId].name)
                     || 'Unnamed device';
@@ -472,15 +507,62 @@ async function ensureAddon() {
                 // A game's message. Route by gameId, attributing the sending
                 // device when its identity handshake has completed.
                 if (typeof env.gameId !== 'string') return;
-                const fromDeviceId = deviceIdForPeerId(d.peerId);
+                const isHub = mp.peerNode.isHost;
+                // `fromDevice` is a HOST-stamped attribution on frames the
+                // host bridge forwards joiner→joiner. A sender-supplied value
+                // must never survive the hub, or a joiner could impersonate
+                // any device on frames the host passes along.
+                if (isHub) delete env.fromDevice;
+                if (typeof env.to === 'string' && env.to !== getMyDeviceId()) {
+                    // Addressed to someone else. As the hub, forward it down
+                    // the addressee's direct link (stamping the true sender);
+                    // any other arrival is an old host's blind relay of a
+                    // targeted frame — drop it, never dispatch locally.
+                    if (isHub && identityLinks.has(env.to)) {
+                        env.fromDevice = deviceIdForPeerId(d.peerId);
+                        mp.sendTo(identityLinks.get(env.to), env);
+                    }
+                    return;
+                }
+                // Attribution, in trust order: a host-forwarded frame carries
+                // the host's stamp; a transport-relayed broadcast resolves
+                // via its relay tag (the true sender, not the relaying
+                // host); a direct frame resolves via its identity binding.
+                let fromDeviceId = null;
+                let hostForwarded = false;
+                if (d.relayed) {
+                    fromDeviceId = deviceIdForRelayFrom(d.from);
+                } else if (!isHub && typeof env.fromDevice === 'string') {
+                    hostForwarded = true;
+                    if (DEVICE_ID_RE.test(env.fromDevice)) fromDeviceId = env.fromDevice;
+                } else {
+                    fromDeviceId = deviceIdForPeerId(d.peerId);
+                }
+                // meta is derived, not carried: a frame is only dispatched
+                // when unaddressed ('all') or addressed to this device
+                // ('me'); relayed covers both transport relays and
+                // host-bridge forwards — "did NOT arrive from my direct
+                // link partner", which is what spoof checks care about.
+                const meta = {
+                    relayed: !!d.relayed || hostForwarded,
+                    to: typeof env.to === 'string' ? 'me' : 'all'
+                };
                 for (const fn of messageListeners) {
-                    try { fn(env.gameId, env.payload, fromDeviceId); } catch (err) {}
+                    try { fn(env.gameId, env.payload, fromDeviceId, meta); } catch (err) {}
                 }
                 return;
             }
             const fp = d.relayed ? null : mp.peerNode.getPeerFingerprint(d.peerId);
             const detail = recordPeerIdentity(env.deviceId, env.name, fp);
             if (!detail) return; // malformed deviceId — bind nothing
+            if (d.relayed && typeof d.from === 'string' && env.deviceId !== getMyDeviceId()) {
+                // Another joiner, reachable only through the host. The relay
+                // tag is host-stamped (the source link's peerId), so a joiner
+                // cannot claim someone else's tag — but it CAN claim someone
+                // else's deviceId; the tag binding at least keeps its frames
+                // attributed to the one link they actually arrive from.
+                indirectPeers.set(env.deviceId, d.from);
+            }
             if (!d.relayed) {
                 identityLinks.set(env.deviceId, d.peerId);
                 // A direct identity binding is a roster join (or a rename —
@@ -623,9 +705,12 @@ export const ArcadeP2P = {
     },
 
     /**
-     * Subscribe to inbound game messages: fn(gameId, payload, fromDeviceId).
-     * fromDeviceId is the sending device's stable id (null until its identity
-     * handshake completes — a beat after 'connected').
+     * Subscribe to inbound game messages: fn(gameId, payload, fromDeviceId,
+     * meta). fromDeviceId is the sending device's stable id (null until its
+     * identity handshake completes — a beat after 'connected'). meta is
+     * { relayed, to }: relayed=true when the frame did NOT arrive from this
+     * device's direct link partner (transport relay or host-bridge forward);
+     * to is 'me' for targeted frames, 'all' for broadcasts.
      */
     onMessage(fn) {
         messageListeners.push(fn);
@@ -762,15 +847,32 @@ export const ArcadeP2P = {
     },
 
     /**
-     * Send a game's payload to the remote peer, wrapped in the launcher
-     * envelope. Returns false when there is no live session. During an
-     * 'interrupted' session the transport queues the message and replays it
-     * on recovery (exactly-once), so games can keep sending through a blip.
+     * Send a game's payload, wrapped in the launcher envelope. No `to` —
+     * broadcast to every connected peer, exactly as before. With `to` (a
+     * deviceId) — targeted: delivered on that device's direct link, or (a
+     * joiner addressing another joiner) via the host bridge, which forwards
+     * down the addressee's link; non-addressees never RECEIVE the frame.
+     * Returns false when there is no live session, or when `to` is unknown /
+     * its identity exchange hasn't completed — a private frame is never
+     * silently downgraded to broadcast. During an 'interrupted' session the
+     * transport queues and replays on recovery (exactly-once), targeted or
+     * not.
      */
-    send(gameId, payload) {
+    send(gameId, payload, to) {
         if (!addon || (sdkStatus !== 'connected' && sdkStatus !== 'interrupted')) return false;
-        addon.send({ arcade: 1, gameId, payload });
-        return true;
+        if (to === undefined) {
+            addon.send({ arcade: 1, gameId, payload });
+            return true;
+        }
+        if (typeof to !== 'string' || to === getMyDeviceId()) return false;
+        const env = { arcade: 1, gameId, payload, to };
+        const directLink = identityLinks.get(to);
+        if (directLink !== undefined) return addon.sendTo(directLink, env);
+        if (!addon.peerNode.isHost && indirectPeers.has(to)) {
+            const hostLink = hostLinkPeerId();
+            if (hostLink) return addon.sendTo(hostLink, env);
+        }
+        return false;
     },
 
     /**

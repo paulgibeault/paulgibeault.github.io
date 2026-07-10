@@ -985,17 +985,20 @@
                     showToast(name + ' hung up. Call them back from Multiplayer anytime.');
                     if (window.__arcade.renderKnownPeers) window.__arcade.renderKnownPeers();
                 });
-                ArcadeP2P.onMessage((targetGameId, payload, fromDeviceId) => {
+                ArcadeP2P.onMessage((targetGameId, payload, fromDeviceId, meta) => {
                     // Route by the sender's gameId — both devices run the same
                     // game for a session, so target == sender's id. Messages
                     // for unmounted games are dropped (game not running here).
                     // fromPeer carries the sending device's stable id once its
                     // identity handshake completed ('peer' for the brief
                     // window before it, and for older peers that never send one).
+                    // meta { relayed, to } lets games distinguish broadcast
+                    // from targeted delivery and sanity-check frame origins.
                     postToIframe(targetGameId, {
                         type: 'arcade:peer.message',
                         payload: payload,
-                        fromPeer: fromDeviceId || 'peer'
+                        fromPeer: fromDeviceId || 'peer',
+                        meta: meta
                     });
                 });
                 p2pBridge = ArcadeP2P;
@@ -1214,7 +1217,8 @@
                     // channel. The SDK already gates on status==='connected',
                     // so a null bridge here just means a stray message — drop.
                     if (p2pBridge) {
-                        p2pBridge.send(gameId, data.payload);
+                        p2pBridge.send(gameId, data.payload,
+                            typeof data.to === 'string' ? data.to : undefined);
                         // While a repair episode runs, every queued send comes
                         // back with a fresh queue-depth reading so the game
                         // can see how close it is to the replay cap.
