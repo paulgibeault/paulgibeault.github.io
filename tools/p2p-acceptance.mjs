@@ -172,9 +172,18 @@ try {
             window.__arcade.showGame('p2p-test-game', 'tools/fixtures/p2p-test-game/index.html', 'P2P Test');
         });
     }
-    const frameOf = (page) => page.frames().find(f => f.url().includes('p2p-test-game'));
-    await H.waitForFunction(`window.frames.length > 0`);
-    const fH = frameOf(H), fJ = frameOf(J);
+    // Poll for the fixture frame: attachment and URL assignment lag the
+    // showGame() call, and a frames() snapshot taken too early returns
+    // undefined on slow CI runners (same helper as the multiseat script).
+    async function fixtureFrame(page) {
+        for (let i = 0; i < 100; i++) {
+            const f = page.frames().find(fr => fr.url().includes('p2p-test-game'));
+            if (f) return f;
+            await new Promise(r => setTimeout(r, 100));
+        }
+        throw new Error('fixture frame never attached');
+    }
+    const fH = await fixtureFrame(H), fJ = await fixtureFrame(J);
     await fH.waitForFunction(`window.__peerStatus && window.__peerStatus() === 'connected'`, null, { timeout: 10000 });
     await fJ.waitForFunction(`window.__peerStatus && window.__peerStatus() === 'connected'`, null, { timeout: 10000 });
     check('game sees peer.status connected via SDK handshake alone', true);
