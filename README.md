@@ -24,7 +24,7 @@ Current lineup: Moon Lit, Pi Game, Silicon Syndicate, HecknSic, Cozy Solitaire.
 │  • Arcade.peer.* — the entire multiplayer surface a game sees│
 ├─────────────────────────────────────────────────────────────┤
 │ arcade-p2p.js + p2p/ — the launcher's WebRTC bridge           │
-│  • vendored from QRCodeP2P, no signaling server               │
+│  • in-repo transport, no signaling server                     │
 │  • known peers, identity pinning, auto-reconnect (rendezvous) │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -54,10 +54,10 @@ transport and launcher-aware settings/lifecycle hints.
   constraints, PWA/service-worker scoping, and the automated acceptance
   runner (`tools/acceptance.mjs`). Read this when integrating a game.
 
-- **[QRCodeP2P PROTOCOL.md](https://github.com/paulgibeault/QRCodeP2P/blob/main/PROTOCOL.md)**
-  — the wire-format spec for the multiplayer transport vendored into
-  `p2p/` (kept in sync via `tools/sync-p2p.sh`; see `p2p/VENDORED.md` for
-  the synced commit). Summary:
+- **[p2p/PROTOCOL.md](p2p/PROTOCOL.md)**
+  — the wire-format spec for the multiplayer transport, maintained in-repo
+  beside its implementation in `p2p/` (see `p2p/README.md` for provenance —
+  it originated in the now-archived QRCodeP2P repo). Summary:
   - Two browsers connect over WebRTC with **no signaling server** — the one
     unavoidable round trip (offer out, answer back) travels through a QR
     scan or a chat link, packed down to ~110–180 characters of pure SDP
@@ -106,7 +106,7 @@ npm run p2p-acceptance                                   # two headless launcher
 | `index.html` | The launcher: iframe pool, settings, save/load, Multiplayer panel |
 | `arcade-sdk.js` | `window.Arcade` — the SDK every game loads |
 | `arcade-p2p.js` | Launcher-side bridge to the vendored P2P transport |
-| `p2p/` | Vendored [QRCodeP2P](https://github.com/paulgibeault/QRCodeP2P) transport (synced, not hand-edited) |
+| `p2p/` | The P2P transport + its protocol spec (maintained here; formerly vendored from the archived QRCodeP2P repo) |
 | `profile.html` | Portfolio page — mirrors the game list shown in the launcher |
 | `dev.sh` | Local same-origin dev harness for launcher + games |
 | `tools/` | Playwright-based acceptance runners for games and P2P |

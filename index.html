@@ -862,7 +862,7 @@
         window.__arcade.showGame = showGame; // deep links + acceptance tests
 
         // ---- multiplayer bridge (lazy) ----
-        // The P2P transport (vendored QRCodeP2P, see p2p/VENDORED.md) loads on
+        // The P2P transport (in-repo, see p2p/README.md) loads on
         // first touch: Multiplayer menu click, or a #p2p-offer/#p2p-answer
         // fragment at startup. Until then zero P2P bytes are parsed. Games
         // talk only to the SDK; this is the launcher end of arcade:peer.*.

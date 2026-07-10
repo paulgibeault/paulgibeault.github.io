@@ -1,9 +1,9 @@
 import { ConnectionUtils } from './p2p-core.js';
 
 // Shown in the modal header. Users are told to compare this across devices
-// when a connection fails, so it must track the vendored transport version
-// (see VENDORED.md / upstream PROTOCOL.md) — single constant, no other copies.
-const UI_VERSION_LABEL = 'v1.9';
+// when a connection fails, so it must track the transport version
+// (see README.md / PROTOCOL.md) — single constant, no other copies.
+const UI_VERSION_LABEL = 'v1.11';
 
 export class P2PUIManager {
     constructor(peerNode) {
