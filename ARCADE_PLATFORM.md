@@ -35,8 +35,20 @@ Arcade.state.onChange(key, fn)
 Arcade.state.migrate(version, fn)     // runs fn exactly once per (gameId, version)
 Arcade.state.adopt(legacyKey, newKey?, { json? })  // read → namespaced write → delete original
 Arcade.global.get(key)                // localStorage 'arcade.v1.global.<key>'
-Arcade.global.set(key, value)
+Arcade.global.set(key, value)         // set() returns true, or false on quota failure
 Arcade.onStateReplaced(fn)            // fires after a launcher import — re-read state
+Arcade.onStorageError(fn)             // a localStorage write was dropped (quota) — warn the user
+Arcade.storage.estimate()             // { usage, quota } (async); persisted(); persist()
+
+// ASYNC STORAGE — large/binary per-app data (IndexedDB KV + OPFS blobs); all
+// Promises. Rides the launcher save bundle (schema v2); P2P keys never do.
+const kv = Arcade.store.open('notes') // per-app KV DB 'arcade.v1.<gameId>.store.notes'
+kv.get(k) / set(k, v) / del(k) / keys() / each(fn) / clear()
+Arcade.files.put(name, blob) / get(name) / list() / delete(name)   // blobs (OPFS/IDB)
+
+// HTML — escape peer/user text before it reaches innerHTML (stored-XSS guard)
+Arcade.html.escape(str)               // → HTML-escaped string
+Arcade.html`<b>${userText}</b>`       // tagged template auto-escapes interpolations
 
 // PLAYER, SCORES, STATS — shared identity + leaderboard/stat helpers
 Arcade.player.name() / setName(s)     // sticky display name, arcade.v1.global.playerName
@@ -242,13 +254,27 @@ The launcher menu's Network section is a single "Multiplayer" item (`#connection
 
 ## Storage convention
 
-| Scope         | Key shape                          | Owner                                       |
-| ------------- | ---------------------------------- | ------------------------------------------- |
-| Per-game      | `arcade.v1.<gameId>.<key>`         | Game writes; launcher reads only for export |
-| Global        | `arcade.v1.global.<key>`           | Any game or launcher                        |
-| Launcher meta | `arcade.v1._meta.<key>`            | Launcher only                               |
+| Scope          | Key / DB shape                          | Owner                                       |
+| -------------- | --------------------------------------- | ------------------------------------------- |
+| Per-game       | `arcade.v1.<gameId>.<key>`              | Game writes; launcher reads only for export |
+| Global         | `arcade.v1.global.<key>`                | Any game or launcher                        |
+| Launcher meta  | `arcade.v1._meta.<key>`                 | Launcher only                               |
+| Per-game KV    | IndexedDB `arcade.v1.<gameId>.store.<name>` | `Arcade.store` — large/structured data  |
+| Per-game blobs | OPFS dir `arcade.v1.<gameId>` / IDB `arcade.v1.<gameId>.files` | `Arcade.files` — binary  |
 
-The `arcade.v1.` prefix is the **only** thing the export/import logic trusts. Keys without it are ignored on export and rejected on import (prevents poisoning unrelated localStorage entries on the origin).
+The `arcade.v1.` prefix is the **only** thing the export/import logic trusts. Keys/databases without it are ignored on export and rejected on import (prevents poisoning unrelated storage on the origin). The async stores/blobs ride the save bundle too (schema v2); the P2P key stores (`qrp2p-*`) never match the prefix and are never exported.
+
+---
+
+## Trust model — first-party fleet
+
+The platform's current posture is a **first-party fleet**: every catalog app is authored by the same owner, all apps are same-origin with the launcher, and storage namespacing (`arcade.v1.<gameId>.*`) is a **cooperative convention, not a security sandbox**. A same-origin app *can* technically read another app's storage or reach the launcher — this is acceptable precisely because all apps are trusted first-party code.
+
+Two things remain **untrusted** even under this posture, and keep their hard guards:
+- **Imported save files** — treated as hostile input (allowlist, checksum, per-key validation, staged commit; see below).
+- **Peer-supplied payloads** — names/ids/messages from a remote device must be escaped before rendering (`Arcade.html.escape`) and validated before use.
+
+True multi-tenant isolation (untrusted third-party apps on a sandboxed sub-origin, a capability/permission model, storage brokered over postMessage) is a deliberate **v2 epic**, deferred so it isn't back-doored into the same-origin model. See the fleet issue tracker.
 
 ---
 
@@ -282,7 +308,7 @@ Save and load are the only places where data loss is possible. The plan treats t
 ```json
 {
   "format": "pauls-arcade-save",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "exportedAt": "2026-04-28T12:00:00.000Z",
   "appVersion": "1.0.0",
   "checksum": "sha256:<hex>",
@@ -290,13 +316,20 @@ Save and load are the only places where data loss is possible. The plan treats t
     "arcade.v1.pi-game.highScore": "42",
     "arcade.v1.global.theme": "\"dark\"",
     "...": "..."
+  },
+  "stores": {
+    "arcade.v1.sowduku.store.packs": { "pack-1": { "name": "…" } }
+  },
+  "files": {
+    "arcade.v1.notes-app": [ { "name": "photo.jpg", "type": "image/jpeg", "size": 20481, "b64": "…" } ]
   }
 }
 ```
 
-- `format` and `schemaVersion` make the file self-describing and forward-compatible.
-- `checksum` is computed over a canonical (sorted-key) serialization of `data` using SubtleCrypto's `sha256`. Detects corruption and partial writes.
-- Values are stored as their raw `localStorage` string form — no double-parsing, no type drift.
+- `format` and `schemaVersion` make the file self-describing and forward-compatible. **Schema 2** adds `stores` (Arcade.store IndexedDB KV) and `files` (Arcade.files blobs, base64). **Schema-1 files still import** (localStorage only).
+- `checksum` is sha256 over a canonical (recursively sorted-key) serialization; for v2 it covers `data` + `stores` + `files` together. Detects corruption and partial writes.
+- `data` values are raw `localStorage` strings — no double-parsing, no type drift. `stores` values are JSON; `files` blobs are base64 with their MIME type.
+- The P2P key stores (`qrp2p-*`) are **never** enumerated — device identity/pairing secrets never leave the device.
 - File is pretty-printed so it's human-inspectable in a text editor.
 
 ### Save (export) — failure modes handled
@@ -310,17 +343,17 @@ Save and load are the only places where data loss is possible. The plan treats t
 
 The launcher treats imported files as **untrusted input**. Every step has a validation gate.
 
-1. **File picker constraints** — `<input type="file" accept="application/json,.json">` and a server-side-of-the-client check that `File.size < 5 MB` (a real save is kilobytes; anything larger is suspicious).
+1. **File picker constraints** — `<input type="file" accept="application/json,.json">` and a size check (`File.size < 64 MB`; localStorage-only saves are kilobytes, but a save with embedded `files` blobs can be larger).
 2. **Read with `FileReader`**, wrapped in try/catch with explicit `onerror` handling.
 3. **Parse defensively** — `JSON.parse` inside try/catch. Reject on any throw.
 4. **Schema validation** — verify:
-   - Top-level shape (`format === 'pauls-arcade-save'`, `schemaVersion === 1`, `data` is a plain object).
-   - Every key in `data` matches `/^arcade\.v1\.[a-z0-9_-]+(\.[a-zA-Z0-9_.-]+)+$/`. Anything else is dropped with a warning, never written.
-   - Every value is a string (localStorage's only supported value type).
-   - Total payload size after re-serialization fits in available `localStorage` quota (best-effort estimate — try a probe write).
-5. **Checksum verification** — recompute sha256 over the canonical form of `data`; reject if mismatched.
+   - Top-level shape (`format === 'pauls-arcade-save'`, `schemaVersion` in `[1, SAVE_SCHEMA]`, `data` is a plain object).
+   - Every key in `data` matches `/^arcade\.v1\.[a-z0-9_-]+(\.[a-zA-Z0-9_.-]+)+$/`. Anything else is dropped with a warning, never written. `stores` DB names and `files` names are validated the same way against their own regexes; dunder segments are rejected.
+   - Every `data` value is a string (localStorage's only supported value type).
+   - Total localStorage payload fits available quota (best-effort probe write).
+5. **Checksum verification** — recompute sha256 over the canonical form: `data` for v1, or `data` + `stores` + `files` for v2; reject if mismatched.
 6. **Auto-backup before applying** — the launcher exports the *current* state to a downloaded file *automatically* (`pauls-arcade-autobackup-<timestamp>.json`) before touching anything. This is the single most important fault-tolerance feature: even if the import file is corrupt and the user clicks through every warning, the prior state is on their disk.
-7. **Stage, then commit** — build the full set of write operations in memory; only after every key validates do we begin writing. If any write throws (quota exceeded mid-way), abort and restore from the in-memory snapshot of the prior values.
+7. **Stage, then commit** — build the full set of localStorage write operations in memory; only after every key validates do we begin writing. If any write throws (quota exceeded mid-way), abort and restore from the in-memory snapshot of the prior values. The async `stores`/`files` are written *after* the localStorage commit (IndexedDB/OPFS can't share the synchronous rollback) — best-effort, with the Gate-6 auto-backup as the safety net if one fails.
 8. **Confirmation UI** — before applying, show a summary: "This will replace 23 keys (4 games + global). Current state will be auto-saved to your Downloads folder first. Continue?"
 9. **Notify games** — after successful commit, broadcast `arcade:state.replaced` to all mounted iframes; the storage event fires automatically too, so listeners catch it via either path.
 
@@ -345,7 +378,7 @@ If a user reports lost data:
 
 ## Open follow-ons (not in initial scope)
 
-- **IndexedDB migration** for storage if any single game outgrows localStorage's ~5 MB ceiling.
+- ~~**IndexedDB migration** for storage if any single game outgrows localStorage's ~5 MB ceiling.~~ **Shipped** — `Arcade.store` (async IndexedDB KV) and `Arcade.files` (OPFS/IDB blobs); both ride the save bundle.
 - **Last-N auto-backups in IndexedDB** as a secondary recovery channel.
 - **SDK version negotiation** — the handshake already carries `version`; bump and branch when the protocol changes.
 - **Certificate-pinned reconnect** — cache an `RTCCertificate` in IndexedDB so a previously-paired device's DTLS fingerprint is verifiable across sessions, as a foundation for shorter reconnect payloads. Named/recognized known peers (see "Known peers" above) already cover the naming half of this; the ceremony itself is still a full offer/answer round trip.
@@ -360,3 +393,5 @@ If a user reports lost data:
 1. **Iframe pool: bounded LRU.** Default cap of 2; user-tunable to any integer in `[1, gameCount]` via the launcher menu. Active game is never evicted. Persistent state survives via `arcade.v1.<gameId>.*` localStorage.
 2. **`arcade-sdk.js` hosted at `https://paulgibeault.github.io/arcade-sdk.js`** (this repo's GitHub Pages root). Single source of truth; same-origin with every game.
 3. **Multiplayer transport: QRCodeP2P (serverless WebRTC).** The launcher owns the single `PeerManager`; games only ever see `Arcade.peer.*`. Signaling travels via packed QR/chat-link payloads (link tennis primary, QR/screenshot fallbacks). Default ICE mode "Anywhere" (public STUN, required for Safari joiners); "Same Wi-Fi only" available for zero-external-touch play. `#p2p-offer=`/`#p2p-answer=` fragments are launcher-level routes.
+4. **Trust posture: first-party fleet.** All catalog apps are trusted same-origin first-party code; storage namespacing is a cooperative convention, not a sandbox. Imported files and peer payloads remain untrusted. Cross-origin multi-tenant isolation + a capability model is a deferred v2 epic, not retrofitted into the same-origin model.
+5. **Async app storage: `Arcade.store` / `Arcade.files`.** Large/binary data lives in per-app IndexedDB/OPFS and rides the save bundle (schema v2). P2P key stores are excluded from export by allowlist.

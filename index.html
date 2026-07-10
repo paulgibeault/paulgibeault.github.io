@@ -712,8 +712,11 @@
             return true;
         }
         const SAVE_FORMAT = 'pauls-arcade-save';
-        const SAVE_SCHEMA = 1;
-        const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
+        // Schema 2 adds `stores` (Arcade.store IndexedDB) and `files`
+        // (Arcade.files OPFS/IDB blobs). v1 (localStorage-only) files still import.
+        const SAVE_SCHEMA = 2;
+        // Blobs (base64, ~33% inflation) can make a full-fidelity save large.
+        const MAX_IMPORT_BYTES = 64 * 1024 * 1024;
         const PROBE_KEY = KEY_PREFIX + '_meta.probe';
 
         // Dev-mode tracing — when arcade.v1._meta.dev === 'true' (set by ?dev=1
@@ -1307,6 +1310,231 @@
             return 'sha256:' + hex;
         }
 
+        // ---- async per-app storage (Arcade.store / Arcade.files) ----
+        // The SDK keeps large/binary app data in per-app IndexedDB databases
+        // (arcade.v1.<gameId>.store.<name> and arcade.v1.<gameId>.files) and
+        // OPFS dirs (arcade.v1.<gameId>). The launcher enumerates them so a
+        // save bundle is a full-fidelity backup, not just localStorage. The
+        // allowlist regexes below never match the P2P key stores (qrp2p-*),
+        // so device identity/pairing secrets are never exported.
+        const STORE_DB_RE = /^arcade\.v1\.[a-z0-9_-]+\.store\.[a-z0-9_-]{1,64}$/i;
+        const FILE_GID_RE = /^arcade\.v1\.[a-z0-9_-]+$/i;
+        const FILE_NAME_RE = /^[a-z0-9._-]{1,128}$/i;
+
+        function hasDunderSegment(s) {
+            return s.split('.').some((seg) => DUNDER_SEGMENTS.has(seg));
+        }
+
+        // Recursive key-sorted stringify → a deterministic canonical form so the
+        // checksum is stable regardless of property order.
+        function stableStringify(v) {
+            if (v === null || typeof v !== 'object') return JSON.stringify(v);
+            if (Array.isArray(v)) return '[' + v.map(stableStringify).join(',') + ']';
+            const keys = Object.keys(v).sort();
+            return '{' + keys.map((k) => JSON.stringify(k) + ':' + stableStringify(v[k])).join(',') + '}';
+        }
+        async function checksumBundle(data, stores, files) {
+            const canonical = stableStringify({ data: data, stores: stores, files: files });
+            const buf = new TextEncoder().encode(canonical);
+            const hash = await crypto.subtle.digest('SHA-256', buf);
+            const bytes = new Uint8Array(hash);
+            let hex = '';
+            for (let i = 0; i < bytes.length; i++) hex += bytes[i].toString(16).padStart(2, '0');
+            return 'sha256:' + hex;
+        }
+
+        // Minimal IndexedDB helpers (the SDK's stores all use a single 'kv'
+        // object store; opening with this upgrade is compatible).
+        function idbOpen(name) {
+            return new Promise((resolve, reject) => {
+                const req = indexedDB.open(name, 1);
+                req.onupgradeneeded = () => {
+                    const db = req.result;
+                    if (!db.objectStoreNames.contains('kv')) db.createObjectStore('kv');
+                };
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject(req.error);
+            });
+        }
+        function idbAll(db) {
+            return new Promise((resolve, reject) => {
+                const tx = db.transaction('kv', 'readonly');
+                const s = tx.objectStore('kv');
+                const keysReq = s.getAllKeys();
+                const valsReq = s.getAll();
+                tx.oncomplete = () => {
+                    const out = [];
+                    for (let i = 0; i < keysReq.result.length; i++) {
+                        out.push({ key: keysReq.result[i], value: valsReq.result[i] });
+                    }
+                    resolve(out);
+                };
+                tx.onerror = () => reject(tx.error);
+            });
+        }
+        function idbPut(db, key, value) {
+            return new Promise((resolve, reject) => {
+                const tx = db.transaction('kv', 'readwrite');
+                tx.objectStore('kv').put(value, key);
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+        }
+        function blobToB64(blob) {
+            return new Promise((resolve, reject) => {
+                const r = new FileReader();
+                r.onerror = () => reject(new Error('blob read failed'));
+                r.onload = () => {
+                    const s = String(r.result);
+                    const i = s.indexOf(',');
+                    resolve(i >= 0 ? s.slice(i + 1) : '');
+                };
+                r.readAsDataURL(blob);
+            });
+        }
+        function b64ToBlob(b64, type) {
+            const bin = atob(b64);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            return new Blob([bytes], { type: type || 'application/octet-stream' });
+        }
+        // indexedDB.databases() is Chromium/Safari-only (absent in Firefox).
+        // Store enumeration needs it; without it we still export localStorage
+        // and (deterministically-named) OPFS files, just not IndexedDB stores.
+        async function listArcadeDbNames() {
+            if (!indexedDB.databases) return null;
+            try {
+                const dbs = await indexedDB.databases();
+                return dbs.map((d) => d && d.name).filter(Boolean);
+            } catch (e) { return null; }
+        }
+        function opfsRoot() {
+            if (navigator.storage && navigator.storage.getDirectory) return navigator.storage.getDirectory();
+            return Promise.resolve(null);
+        }
+        async function gatherGameIds(data, dbNames) {
+            const ids = new Set();
+            for (const k of Object.keys(data || {})) {
+                const m = /^arcade\.v1\.([a-z0-9_-]+)\./i.exec(k);
+                if (m && m[1] !== '_meta' && m[1] !== 'global') ids.add(m[1]);
+            }
+            for (const n of (dbNames || [])) {
+                const m = /^arcade\.v1\.([a-z0-9_-]+)\.(?:store\.|files$)/i.exec(n);
+                if (m) ids.add(m[1]);
+            }
+            const root = await opfsRoot();
+            if (root && root.values) {
+                try {
+                    for await (const h of root.values()) {
+                        const m = /^arcade\.v1\.([a-z0-9_-]+)$/i.exec(h.name);
+                        if (h.kind === 'directory' && m) ids.add(m[1]);
+                    }
+                } catch (e) {}
+            }
+            return ids;
+        }
+        async function collectStores(dbNames) {
+            const out = {};
+            if (!dbNames) return out;
+            for (const name of dbNames) {
+                if (!STORE_DB_RE.test(name)) continue;
+                try {
+                    const db = await idbOpen(name);
+                    const rows = await idbAll(db);
+                    db.close();
+                    const kv = {};
+                    for (const r of rows) {
+                        try { JSON.stringify(r.value); kv[String(r.key)] = r.value; } catch (e) { /* skip non-JSON */ }
+                    }
+                    out[name] = kv;
+                } catch (e) {}
+            }
+            return out;
+        }
+        async function collectFiles(gameIds, dbNames) {
+            const out = {};
+            const root = await opfsRoot();
+            const dbSet = dbNames ? new Set(dbNames) : null;
+            for (const gid of gameIds) {
+                const dir = 'arcade.v1.' + gid;
+                const items = [];
+                if (root) {
+                    try {
+                        const d = await root.getDirectoryHandle(dir, { create: false });
+                        for await (const h of d.values()) {
+                            if (h.kind !== 'file') continue;
+                            const f = await h.getFile();
+                            items.push({ name: h.name, type: f.type || '', size: f.size, b64: await blobToB64(f) });
+                        }
+                    } catch (e) {}
+                }
+                // IDB fallback backend — only open if it actually exists (avoid
+                // creating empty DBs); when we can't enumerate, try anyway.
+                if (!dbSet || dbSet.has(dir + '.files')) {
+                    try {
+                        const db = await idbOpen(dir + '.files');
+                        const rows = await idbAll(db);
+                        db.close();
+                        for (const r of rows) {
+                            const rec = r.value || {};
+                            if (rec.blob instanceof Blob) {
+                                items.push({ name: String(r.key), type: rec.type || rec.blob.type || '', size: rec.size || rec.blob.size, b64: await blobToB64(rec.blob) });
+                            }
+                        }
+                    } catch (e) {}
+                }
+                if (items.length) out[dir] = items;
+            }
+            return out;
+        }
+        async function writeStores(stores) {
+            let count = 0;
+            for (const name of Object.keys(stores || {})) {
+                if (!STORE_DB_RE.test(name) || hasDunderSegment(name)) continue;
+                const kv = stores[name];
+                if (!kv || typeof kv !== 'object' || Array.isArray(kv)) continue;
+                try {
+                    const db = await idbOpen(name);
+                    for (const k of Object.keys(kv)) { await idbPut(db, k, kv[k]); count++; }
+                    db.close();
+                } catch (e) {}
+            }
+            return count;
+        }
+        async function writeFiles(files) {
+            let count = 0;
+            const root = await opfsRoot();
+            for (const dir of Object.keys(files || {})) {
+                if (!FILE_GID_RE.test(dir) || hasDunderSegment(dir)) continue;
+                const items = Array.isArray(files[dir]) ? files[dir] : [];
+                for (const it of items) {
+                    if (!it || typeof it.name !== 'string' || !FILE_NAME_RE.test(it.name) || typeof it.b64 !== 'string') continue;
+                    let blob;
+                    try { blob = b64ToBlob(it.b64, it.type); } catch (e) { continue; }
+                    let wrote = false;
+                    if (root) {
+                        try {
+                            const d = await root.getDirectoryHandle(dir, { create: true });
+                            const fh = await d.getFileHandle(it.name, { create: true });
+                            const w = await fh.createWritable();
+                            await w.write(blob); await w.close();
+                            wrote = true;
+                        } catch (e) {}
+                    }
+                    if (!wrote) {
+                        try {
+                            const db = await idbOpen(dir + '.files');
+                            await idbPut(db, it.name, { blob: blob, size: blob.size, type: blob.type });
+                            db.close();
+                            wrote = true;
+                        } catch (e) {}
+                    }
+                    if (wrote) count++;
+                }
+            }
+            return count;
+        }
+
         function collectArcadeKeys() {
             // Save-export governance: the SDK's state.set(key, v,
             // {exportable:false}) lists local-only keys (telemetry, caches)
@@ -1366,24 +1594,31 @@
         }
 
         async function buildBundle(data) {
+            const dbNames = await listArcadeDbNames();
+            const gameIds = await gatherGameIds(data, dbNames);
+            const stores = await collectStores(dbNames);
+            const files = await collectFiles(gameIds, dbNames);
             return {
                 format: SAVE_FORMAT,
                 schemaVersion: SAVE_SCHEMA,
                 exportedAt: new Date().toISOString(),
                 appVersion: '1.0.0',
-                checksum: await checksumData(data),
-                data: data
+                checksum: await checksumBundle(data, stores, files),
+                data: data,
+                stores: stores,
+                files: files
             };
+        }
+
+        function countFiles(files) {
+            let n = 0;
+            for (const k of Object.keys(files || {})) n += (files[k] || []).length;
+            return n;
         }
 
         // ---- save (export) ----
         async function exportSave() {
             const data = collectArcadeKeys();
-            const keyCount = Object.keys(data).length;
-            if (keyCount === 0) {
-                showToast('Nothing to save — no arcade.v1.* keys found.', { error: true });
-                return;
-            }
             let bundle;
             try {
                 bundle = await buildBundle(data);
@@ -1391,8 +1626,16 @@
                 showToast('Save failed: could not serialize data.', { error: true });
                 return;
             }
+            const keyCount = Object.keys(data).length;
+            const storeCount = Object.keys(bundle.stores).length;
+            const fileCount = countFiles(bundle.files);
+            if (keyCount === 0 && storeCount === 0 && fileCount === 0) {
+                showToast('Nothing to save — no arcade data found.', { error: true });
+                return;
+            }
             const ok = downloadJSON('pauls-arcade-save-' + isoStamp() + '.json', bundle);
-            if (ok) showToast('Saved ' + keyCount + ' keys to your Downloads folder.');
+            const extra = (storeCount || fileCount) ? ' + ' + storeCount + ' stores, ' + fileCount + ' files' : '';
+            if (ok) showToast('Saved ' + keyCount + ' keys' + extra + ' to your Downloads folder.');
             else showToast('Save failed: browser blocked the download.', { error: true });
         }
 
@@ -1434,7 +1677,7 @@
         async function importSaveFile(file) {
             // Gate 1: size
             if (!file || file.size > MAX_IMPORT_BYTES) {
-                showToast('File rejected: size exceeds 5 MB.', { error: true });
+                showToast('File rejected: size exceeds 64 MB.', { error: true });
                 return;
             }
             // Gate 2: read
@@ -1445,15 +1688,19 @@
             let parsed;
             try { parsed = JSON.parse(text); }
             catch (e) { showToast('Not valid JSON.', { error: true }); return; }
-            // Gate 4: shape
+            // Gate 4: shape — accept schema v1 (localStorage-only) through the
+            // current SAVE_SCHEMA (adds stores/files).
             if (!parsed || typeof parsed !== 'object'
                 || parsed.format !== SAVE_FORMAT
-                || parsed.schemaVersion !== SAVE_SCHEMA
+                || !(parsed.schemaVersion >= 1 && parsed.schemaVersion <= SAVE_SCHEMA)
                 || !parsed.data || typeof parsed.data !== 'object'
                 || Array.isArray(parsed.data)) {
                 showToast('File is not a valid arcade save.', { error: true });
                 return;
             }
+            const isV2 = parsed.schemaVersion >= 2;
+            const parsedStores = (isV2 && parsed.stores && typeof parsed.stores === 'object' && !Array.isArray(parsed.stores)) ? parsed.stores : {};
+            const parsedFiles = (isV2 && parsed.files && typeof parsed.files === 'object' && !Array.isArray(parsed.files)) ? parsed.files : {};
             // Gate 5: per-key allowlist + value type
             const cleanData = {};
             const droppedKeys = [];
@@ -1469,10 +1716,15 @@
                 showToast('Save contained no valid arcade keys.', { error: true });
                 return;
             }
-            // Gate 6: checksum (over the file's data — we verify what was signed,
-            // not what we filtered, to detect tampering with the original file)
+            // Gate 6: checksum (over the file's original sections — we verify
+            // what was signed, not what we filtered, to detect tampering). v1
+            // uses the flat-data checksum; v2 covers data + stores + files.
             let expected;
-            try { expected = await checksumData(parsed.data); }
+            try {
+                expected = isV2
+                    ? await checksumBundle(parsed.data, parsedStores, parsedFiles)
+                    : await checksumData(parsed.data);
+            }
             catch (e) { showToast('Could not verify checksum.', { error: true }); return; }
             if (typeof parsed.checksum !== 'string' || parsed.checksum !== expected) {
                 showToast('Checksum mismatch — file may be corrupt.', { error: true });
@@ -1481,8 +1733,13 @@
             // Gate 7: confirm with user. Import merges: keys in the file
             // overwrite their current values, keys NOT in the file are kept
             // — the copy must say so.
+            const storeEntryCount = Object.keys(parsedStores).reduce((n, s) => n + Object.keys(parsedStores[s] || {}).length, 0);
+            const importFileCount = countFiles(parsedFiles);
+            const asyncSummary = (storeEntryCount || importFileCount)
+                ? 'It will also restore ' + storeEntryCount + ' stored records and ' + importFileCount + ' files.\n' : '';
             const summary = 'This will import ' + cleanKeys.length + ' arcade keys from the file, '
                 + 'overwriting their current values. Saved data not in the file is kept as-is.\n'
+                + asyncSummary
                 + (droppedKeys.length ? droppedKeys.length + ' invalid keys will be ignored.\n' : '')
                 + '\nYour current state will be auto-saved to your Downloads folder first.\nContinue?';
             if (!window.confirm(summary)) return;
@@ -1515,10 +1772,24 @@
                 showToast('Write failed mid-import — prior state restored.', { error: true });
                 return;
             }
+            // Async storage (stores/files) is written AFTER the localStorage
+            // commit. It can't share the synchronous snapshot/rollback above, so
+            // it's best-effort — the auto-backup taken at Gate 8 is the safety
+            // net if a write fails midway.
+            let asyncNote = '';
+            if (isV2) {
+                try {
+                    const sc = await writeStores(parsedStores);
+                    const fc = await writeFiles(parsedFiles);
+                    if (sc || fc) asyncNote = ' (+' + sc + ' records, ' + fc + ' files)';
+                } catch (e) {
+                    asyncNote = ' — note: some app data could not be restored (your auto-backup has the original)';
+                }
+            }
             // Notify mounted iframes; same-origin storage events also fire
             // automatically, so listeners catch the change via either path.
             broadcast({ type: 'arcade:state.replaced' });
-            showToast('Imported ' + cleanKeys.length + ' keys successfully.');
+            showToast('Imported ' + cleanKeys.length + ' keys' + asyncNote + ' successfully.');
         }
 
         btnSave.addEventListener('click', () => { exportSave(); });
