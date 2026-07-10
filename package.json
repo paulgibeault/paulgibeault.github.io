@@ -8,7 +8,8 @@
   "scripts": {
     "acceptance": "node tools/acceptance.mjs",
     "p2p-acceptance": "node tools/p2p-acceptance.mjs",
-    "p2p-reconnect": "node tools/p2p-reconnect-acceptance.mjs"
+    "p2p-reconnect": "node tools/p2p-reconnect-acceptance.mjs",
+    "store-acceptance": "node tools/store-acceptance.mjs"
   },
   "devDependencies": {
     "playwright": "^1.50.0"

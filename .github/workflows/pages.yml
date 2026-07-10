@@ -34,10 +34,13 @@ jobs:
             node --check "$f"
           done
 
-      - name: Install deps + browser
+      - name: Install deps + browsers
         run: |
           npm install
-          npx playwright install --with-deps chrome
+          npx playwright install --with-deps chromium chrome
+
+      - name: Store/files acceptance (IndexedDB + OPFS)
+        run: node tools/store-acceptance.mjs
 
       - name: P2P acceptance (real WebRTC, self-contained)
         # Real-WebRTC negotiation is timing-sensitive under headless CI; retry a
