@@ -561,7 +561,22 @@ async function ensureAddon() {
                 // cannot claim someone else's tag — but it CAN claim someone
                 // else's deviceId; the tag binding at least keeps its frames
                 // attributed to the one link they actually arrive from.
+                const firstSighting = !indirectPeers.has(env.deviceId);
                 indirectPeers.set(env.deviceId, d.from);
+                if (firstSighting) {
+                    // Identity gossip: this device announced itself when ITS
+                    // link connected — a joiner arriving later never heard
+                    // it. First sighting of a newcomer ⇒ re-broadcast our
+                    // identity once; the host relays it to them, making
+                    // session knowledge symmetric (they can target us and
+                    // attribute our broadcasts). Converges in one round:
+                    // their identity is already recorded here, so their
+                    // handler's own first-sighting re-announce (of us) finds
+                    // nothing new on this side.
+                    try {
+                        mp.send({ arcade: 1, kind: 'identity', deviceId: getMyDeviceId(), name: getMyDeviceName() });
+                    } catch (err) {}
+                }
             }
             if (!d.relayed) {
                 identityLinks.set(env.deviceId, d.peerId);
@@ -1124,7 +1139,13 @@ export const ArcadeP2P = {
     _rdv() { return rdv; },
 
     /** Test hook — identity/pinning policy, exercised directly by acceptance. */
-    _recordPeerIdentity: recordPeerIdentity
+    _recordPeerIdentity: recordPeerIdentity,
+
+    /** Test hook — deviceId → direct-link peerId snapshot. */
+    _identityLinks() { return Object.fromEntries(identityLinks); },
+
+    /** Test hook — deviceId → relay-tag snapshot (through-the-host peers). */
+    _indirectPeers() { return Object.fromEntries(indirectPeers); }
 };
 
 export default ArcadeP2P;
