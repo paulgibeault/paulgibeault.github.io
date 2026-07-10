@@ -110,6 +110,8 @@ const FAST_RDV = `(() => {
     window.__rdvEv = window.__rdvEv || [];
     for (const t of ['pair-established', 'reconnecting', 'reconnected', 'recovered-inband', 'gave-up', 'remote-bye'])
         r.addEventListener(t, () => window.__rdvEv.push(t));
+    window.__rdvDiag = window.__rdvDiag || [];
+    r.addEventListener('diagnostic', (e) => window.__rdvDiag.push((e.detail || {}).msg || ''));
 })()`;
 
 async function launcherPage(label, context) {
@@ -505,6 +507,20 @@ try {
         const [checkH, checkJ] = await Promise.all([keyCheckOf(s.H), keyCheckOf(s.J)]);
         check('both sides persisted a secret', !!checkH && !!checkJ, `H=${checkH} J=${checkJ}`);
         check('both sides committed the SAME key', !!checkH && checkH === checkJ, `H=${checkH} J=${checkJ}`);
+
+        // The stored secret must be the one the LAST commit announced — a
+        // resumePair()/pausePair() read-modify-write racing the commit used
+        // to write the OLD record back over it (field log: committed
+        // caa65318, then rang on bbb4d9a9 forever).
+        const lastCommitted = (page) => page.evaluate(() => {
+            const lines = (window.__rdvDiag || []).filter(m => m.includes('secret established'));
+            const m = /key check ([0-9a-f]{8})/.exec(lines[lines.length - 1] || '');
+            return m ? m[1] : null;
+        });
+        const [logH, logJ] = await Promise.all([lastCommitted(s.H), lastCommitted(s.J)]);
+        check('stored secret matches the last committed one (no write-back clobber)',
+            !!logH && logH === checkH && logJ === checkJ,
+            `H log=${logH} db=${checkH}; J log=${logJ} db=${checkJ}`);
 
         // Same room, end to end: kill the link quietly and demand a heal.
         await s.H.evaluate(() => {
