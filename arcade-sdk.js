@@ -587,13 +587,24 @@
                 if (applySettings(data.settings)) fire(listeners.settingsChange, snapshotSettings());
                 resolveReady();
                 break;
-            case 'arcade:peer.message':
+            case 'arcade:peer.message': {
                 if (data.payload && typeof data.payload === 'object' && data.payload.__arcadeBlob) {
                     handleBlobChunk(data.payload.__arcadeBlob, data.fromPeer);
                     break;
                 }
-                fire(listeners.peerMessage, data.payload, data.fromPeer);
+                // meta = { relayed, to }: relayed=true means the frame did
+                // NOT come from this device's direct link partner (host
+                // relay or host-bridge forward) — a cheap spoof check for
+                // frames that claim host authority. to distinguishes
+                // targeted ('me') from broadcast ('all') delivery. Old
+                // launchers send no meta — defaults are the broadcast shape.
+                var m = (data.meta && typeof data.meta === 'object') ? data.meta : {};
+                fire(listeners.peerMessage, data.payload, data.fromPeer, {
+                    relayed: m.relayed === true,
+                    to: m.to === 'me' ? 'me' : 'all'
+                });
                 break;
+            }
             case 'arcade:peer.status':
                 if (typeof data.status === 'string') setPeerStatus(data.status);
                 break;
