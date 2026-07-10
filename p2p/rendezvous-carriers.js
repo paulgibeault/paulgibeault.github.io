@@ -111,8 +111,22 @@ export const mqttCodec = {
      * packets [{type, topic?, payload?}] and buffers partials internally.
      */
     makeParser() {
+        // Untrusted public brokers let anyone PUBLISH to any topic, so the
+        // stream is attacker-controlled. Legitimate sealed rendezvous blobs are
+        // ≤~2 KB; cap declared packet length well above that and DISCARD anything
+        // larger without ever buffering it, so a giant-length PUBLISH can't drive
+        // unbounded memory growth below the decrypt layer. `skip` remembers how
+        // many bytes of an in-progress oversized packet still to drop, keeping
+        // the stream frame-synced across chunk boundaries.
+        const MAX_PACKET_BYTES = 16 * 1024;
         let buf = new Uint8Array(0);
+        let skip = 0;
         return function feed(chunk) {
+            if (skip > 0) {
+                if (chunk.length <= skip) { skip -= chunk.length; return []; }
+                chunk = chunk.subarray(skip);
+                skip = 0;
+            }
             const merged = new Uint8Array(buf.length + chunk.length);
             merged.set(buf, 0);
             merged.set(chunk, buf.length);
@@ -128,6 +142,15 @@ export const mqttCodec = {
                     if ((buf[i] & 0x80) === 0) { ok = true; i++; break; }
                 }
                 if (!ok) break; // varint incomplete
+                if (len > MAX_PACKET_BYTES) {
+                    // Oversized/hostile packet: consume and discard its bytes
+                    // without retaining them; skip any part not yet received.
+                    const total = i + len;
+                    if (buf.length >= total) { buf = buf.slice(total); continue; }
+                    skip = total - buf.length;
+                    buf = new Uint8Array(0);
+                    break;
+                }
                 if (buf.length < i + len) break; // packet incomplete
                 const type = buf[0] & 0xf0;
                 const body = buf.subarray(i, i + len);

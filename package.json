@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "description": "Tooling for the Paul's Arcade launcher repo. The launcher itself is plain static HTML; this manifest exists only for dev tooling (Playwright-based acceptance runner).",
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "acceptance": "node tools/acceptance.mjs",

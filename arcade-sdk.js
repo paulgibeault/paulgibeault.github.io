@@ -61,6 +61,15 @@
  *   // Launcher-mediated UI
  *   Arcade.ui.toast(message, { kind, duration })
  *
+ *   // Safe rendering — escape peer/user text before it reaches innerHTML
+ *   Arcade.html.escape(str)                       → HTML-escaped string
+ *   Arcade.html`<b>${userText}</b>`               auto-escapes interpolations
+ *
+ *   // Storage durability
+ *   Arcade.state.set(key, value)                  → true | false (quota)
+ *   Arcade.onStorageError(fn)                      fired when a write is dropped
+ *   Arcade.storage.estimate() / persisted() / persist()
+ *
  *   // Top-N leaderboard per category
  *   Arcade.scores.add(category, { score, name?, key?, meta? }, { order? })
  *                                  order: 'desc' (default) | 'asc' (times)
@@ -211,16 +220,49 @@
         if (raw === null) return null;
         try { return JSON.parse(raw); } catch (e) { return null; }
     }
+    // Storage-error hook: a quota-denied (or otherwise failed) write fires these
+    // so an app can warn the user instead of losing data silently. Declared
+    // before writeJSON because writeJSON references it.
+    var storageErrorListeners = [];
+    function fireStorageError(key, err) {
+        for (var i = 0; i < storageErrorListeners.length; i++) {
+            // A listener throwing must not mask the underlying write failure.
+            try { storageErrorListeners[i]({ key: key, error: err }); } catch (e) {}
+        }
+    }
     function writeJSON(k, v) {
         try {
             if (v === undefined) localStorage.removeItem(k);
             else localStorage.setItem(k, JSON.stringify(v));
             return true;
-        } catch (e) { return false; }
+        } catch (e) { fireStorageError(k, e); return false; }
     }
     function removeKey(k) {
         try { localStorage.removeItem(k); } catch (e) {}
     }
+
+    // HTML-escape helper + auto-escaping tagged template. Any peer- or
+    // user-authored text interpolated into innerHTML must pass through one of
+    // these: Arcade.html.escape(str), or Arcade.html`<b>${userText}</b>`.
+    function escapeHtml(s) {
+        return String(s).replace(/[&<>"']/g, function (c) {
+            switch (c) {
+                case '&': return '&amp;';
+                case '<': return '&lt;';
+                case '>': return '&gt;';
+                case '"': return '&quot;';
+                default:  return '&#39;';
+            }
+        });
+    }
+    function htmlTemplate(strings) {
+        var out = String(strings[0]);
+        for (var i = 1; i < arguments.length; i++) {
+            out += escapeHtml(arguments[i]) + String(strings[i]);
+        }
+        return out;
+    }
+    htmlTemplate.escape = escapeHtml;
 
     function isPlainObject(o) {
         return o !== null && typeof o === 'object' && !Array.isArray(o);
@@ -694,12 +736,14 @@
         set: function (key, value, opts) {
             ensureGameId();
             var k = gameKey(key);
-            if (writeJSON(k, value)) {
+            var ok = writeJSON(k, value);
+            if (ok) {
                 if (opts && typeof opts.exportable === 'boolean') {
                     setKeyExportable(k, opts.exportable);
                 }
                 fireKeyChange(k, value);
             }
+            return ok; // false on quota failure (Arcade.onStorageError also fires)
         },
         remove: function (key) {
             ensureGameId();
@@ -788,7 +832,9 @@
         get: function (key) { return readJSON(globalKeyName(key)); },
         set: function (key, value) {
             var k = globalKeyName(key);
-            if (writeJSON(k, value)) fireKeyChange(k, value);
+            var ok = writeJSON(k, value);
+            if (ok) fireKeyChange(k, value);
+            return ok;
         },
         remove: function (key) {
             var k = globalKeyName(key);
@@ -1344,6 +1390,32 @@
         return loop;
     }
 
+    // ─── Storage introspection & durability ───────────────────────
+    // Thin promise wrappers over the StorageManager API (absent on some
+    // browsers → resolve to safe defaults). persist() asks the browser not to
+    // evict this origin's data under storage pressure — the launcher calls it
+    // on boot; apps may call it too.
+    var storageApi = {
+        estimate: function () {
+            if (navigator.storage && navigator.storage.estimate) {
+                return navigator.storage.estimate();
+            }
+            return Promise.resolve({ usage: undefined, quota: undefined });
+        },
+        persisted: function () {
+            if (navigator.storage && navigator.storage.persisted) {
+                return navigator.storage.persisted();
+            }
+            return Promise.resolve(false);
+        },
+        persist: function () {
+            if (navigator.storage && navigator.storage.persist) {
+                return navigator.storage.persist();
+            }
+            return Promise.resolve(false);
+        }
+    };
+
     // ─── Public surface ───────────────────────────────────────────
     var api = {
         init: init,
@@ -1357,14 +1429,26 @@
         settings: settingsApi,
         peer: peerApi,
         ui: uiApi,
+        html: htmlTemplate,
         scores: scoresApi,
         stats: statsApi,
         session: sessionApi,
+        storage: storageApi,
         loop: function (fn) { ensureGameId(); return createLoop(fn); },
         onSuspend: makeSubscriber(listeners.suspend),
         onResume: makeSubscriber(listeners.resume),
         onStateReplaced: makeSubscriber(listeners.stateReplaced),
-        onSettingsChange: makeSubscriber(listeners.settingsChange)
+        onSettingsChange: makeSubscriber(listeners.settingsChange),
+        // Fired when a localStorage write fails (typically quota). Returns an
+        // unsubscribe fn. Data was NOT saved — warn the user / shed load.
+        onStorageError: function (fn) {
+            if (typeof fn !== 'function') return function () {};
+            storageErrorListeners.push(fn);
+            return function () {
+                var i = storageErrorListeners.indexOf(fn);
+                if (i >= 0) storageErrorListeners.splice(i, 1);
+            };
+        }
     };
 
     Object.defineProperty(window, 'Arcade', {

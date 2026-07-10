@@ -18,7 +18,10 @@ GitHub issue in the corresponding repository.
 | `paulgibeault/cozy-solitaire` | [cozy-solitaire.md](cozy-solitaire.md) | [#7](https://github.com/paulgibeault/cozy-solitaire/issues/7) | Idle clock freeze, standalone flush, dead code |
 | `paulgibeault/sowduku` | [sowduku.md](sowduku.md) | [#1](https://github.com/paulgibeault/sowduku/issues/1) | SW caches the SDK, no suspend handling, non-square art, dir/slug |
 
-## Two systemic themes (fix once in the framework)
+## Two systemic themes (fix once in the framework) — ✅ both framework fixes shipped
+
+> Both root-cause framework fixes below (§B1 SW hygiene, §B2–B4 lifecycle) are **now shipped in
+> the SDK/launcher** and every game consumes them. Retained here for context.
 
 **A. Service workers.** Three games break the platform three ways (moon-lit
 nukes origin caches; hecknsic + sowduku cache the same-origin SDK). Root cause:
@@ -34,13 +37,39 @@ wrong. Root causes are framework-shaped: standalone never fires suspend/resume;
 rAF/timer helper. Framework fix in [framework-launcher.md](framework-launcher.md)
 §B2–B4.
 
-## Priority (across all repos)
+> **Forward-looking:** [`framework-evolution.md`](framework-evolution.md) — evaluation of the
+> framework as a *sovereign local-first application platform* (the "why" + full gap analysis).
+> [`implementation-roadmap.md`](implementation-roadmap.md) — the **active build plan**: batch-1
+> framework work (quick-wins + security + `Arcade.store`/`files`), then app refactors; everything
+> deferred is filed as detailed issues **#28–#43**. `fleet-hardening-plan.md` remains the
+> security/bug tracker.
 
-1. p2p-chat stored XSS
-2. moon-lit origin-wide SW/cache nuke
-3. Launcher inbound `postMessage` origin check
-4. `__proto__` import-regex + `deepMerge` hardening
-5. Known Peers `loadP2P` scope bug (dead feature)
-6. SW SDK-caching in hecknsic + sowduku
-7. Rendezvous fingerprint-gated pair rebind
-8. Remove TEMP p2p-chat launcher button; square sowduku art
+## Status — 2026-07-10 (code-verified)
+
+**Done.** All 8 items in the original priority list below are shipped and merged, along with
+every per-game review PR (`arcade-review-fixes`, 2026-07-10) and framework-launcher Part A (9/9)
+and most of Part B (11/13). See each plan for the merged-commit evidence.
+
+<details><summary>Original priority list (all ✅ done)</summary>
+
+1. ✅ p2p-chat stored XSS — `sanitizeId()` (p2p-chat #2)
+2. ✅ moon-lit origin-wide SW/cache nuke — loopback-gated (moon-lit #21)
+3. ✅ Launcher inbound `postMessage` origin check (framework A1)
+4. ✅ `__proto__` import-regex + `deepMerge` hardening (framework A2)
+5. ✅ Known Peers `loadP2P` scope bug (framework A3)
+6. ✅ SW SDK-caching in hecknsic + sowduku (hecknsic #39, sowduku #2)
+7. ✅ Rendezvous fingerprint-gated pair rebind (framework A4)
+8. ✅ TEMP p2p-chat launcher button removed; ⏳ square sowduku art still open (launcher #26)
+
+</details>
+
+## Remaining work (priority order) — see `fleet-hardening-plan.md` for detail
+
+1. **sowduku stored XSS + migration sentinel** — still exploitable (Part C1). Top priority.
+2. **Framework P2P security checklist #21** (Part A, phases A1–A5) — none implemented.
+3. **CI test gate** (Part D1) — highest leverage; do early.
+4. **Part D2/D3, Part B** (SDK cache-bust, acceptance negative-assert, envelope validator,
+   mqtt-codec test, B13 refactor, B11 ls-proxy retirement — now unblocked).
+5. **Docs & issue hygiene** (Part E): close the 7 paired integration issues (PRs merged),
+   version reconcile, doc corrections.
+6. Low-priority per-game cleanups (toasts/stats/enhancements) — tracked in each game's issue.

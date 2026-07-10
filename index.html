@@ -1548,6 +1548,15 @@
             }
         }
 
+        // Ask the browser to persist this origin's data so it isn't evicted
+        // under storage pressure — the sovereignty guarantee that user data
+        // stays put. Best-effort; may be auto-granted, prompt, or be ignored.
+        if (navigator.storage && navigator.storage.persist) {
+            navigator.storage.persisted()
+                .then(already => already || navigator.storage.persist())
+                .catch(() => {});
+        }
+
         const installBtn = document.getElementById('install-btn');
         const installSection = document.getElementById('menu-install-section');
         let deferredPrompt;
