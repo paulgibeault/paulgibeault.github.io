@@ -70,6 +70,11 @@
  *   Arcade.onStorageError(fn)                      fired when a write is dropped
  *   Arcade.storage.estimate() / persisted() / persist()
  *
+ *   // Async per-app storage (large data — IndexedDB / OPFS; all Promises)
+ *   const kv = Arcade.store.open('notes');        per-app KV store
+ *   kv.set(k, v) / get(k) / del(k) / keys() / each(fn) / clear()
+ *   Arcade.files.put(name, blob) / get(name) / list() / delete(name)
+ *
  *   // Top-N leaderboard per category
  *   Arcade.scores.add(category, { score, name?, key?, meta? }, { order? })
  *                                  order: 'desc' (default) | 'asc' (times)
@@ -1390,6 +1395,177 @@
         return loop;
     }
 
+    // ─── Async per-app storage (Arcade.store) ─────────────────────
+    // localStorage is synchronous, string-only, and shares one small (~5 MB)
+    // origin budget across the launcher and every app — fine for game state,
+    // useless for a notes/photo/document app. Arcade.store is a promise-based
+    // key/value store backed by a per-app IndexedDB database, so it holds far
+    // more and never blocks the main thread. Each named store is its own
+    // database (arcade.v1.<gameId>.store.<name>) with a single 'kv' object
+    // store, which avoids dynamic object-store creation entirely.
+    function idbRequest(req) {
+        return new Promise(function (resolve, reject) {
+            req.onsuccess = function () { resolve(req.result); };
+            req.onerror = function () { reject(req.error); };
+        });
+    }
+    function openKvDb(dbName) {
+        return new Promise(function (resolve, reject) {
+            if (!window.indexedDB) { reject(new Error('IndexedDB unavailable')); return; }
+            var req = indexedDB.open(dbName, 1);
+            req.onupgradeneeded = function () {
+                var db = req.result;
+                if (!db.objectStoreNames.contains('kv')) db.createObjectStore('kv');
+            };
+            req.onsuccess = function () { resolve(req.result); };
+            req.onerror = function () { reject(req.error); };
+        });
+    }
+    function kvTx(dbName, mode, fn) {
+        return openKvDb(dbName).then(function (db) {
+            return new Promise(function (resolve, reject) {
+                var tx = db.transaction('kv', mode);
+                var store = tx.objectStore('kv');
+                var result;
+                Promise.resolve(fn(store)).then(function (r) { result = r; }, reject);
+                tx.oncomplete = function () { db.close(); resolve(result); };
+                tx.onerror = function () { db.close(); reject(tx.error); };
+                tx.onabort = function () { db.close(); reject(tx.error); };
+            });
+        });
+    }
+    var STORE_NAME_RE = /^[a-z0-9_-]{1,64}$/i;
+    function storeDbName(name) {
+        var n = (name === undefined || name === null) ? 'default' : String(name);
+        if (!STORE_NAME_RE.test(n)) throw new Error('Arcade.store.open: name must match /^[a-z0-9_-]{1,64}$/');
+        return KEY_PREFIX + gameId + '.store.' + n;
+    }
+    var storeApi = {
+        // open(name?) → a handle whose get/set/del/keys/each/clear all return
+        // promises. Distinct names are fully isolated stores.
+        open: function (name) {
+            ensureGameId();
+            var dbName = storeDbName(name);
+            return {
+                get: function (key) {
+                    return kvTx(dbName, 'readonly', function (s) { return idbRequest(s.get(String(key))); })
+                        .then(function (v) { return v === undefined ? null : v; });
+                },
+                set: function (key, value) {
+                    return kvTx(dbName, 'readwrite', function (s) { return idbRequest(s.put(value, String(key))); })
+                        .then(function () { return true; });
+                },
+                del: function (key) {
+                    return kvTx(dbName, 'readwrite', function (s) { return idbRequest(s['delete'](String(key))); })
+                        .then(function () { return true; });
+                },
+                keys: function () {
+                    return kvTx(dbName, 'readonly', function (s) { return idbRequest(s.getAllKeys()); });
+                },
+                each: function (fn) {
+                    return kvTx(dbName, 'readonly', function (s) {
+                        return new Promise(function (resolve, reject) {
+                            var req = s.openCursor();
+                            req.onsuccess = function () {
+                                var cur = req.result;
+                                if (!cur) { resolve(); return; }
+                                try { fn(cur.value, cur.key); } catch (e) {}
+                                cur['continue']();
+                            };
+                            req.onerror = function () { reject(req.error); };
+                        });
+                    });
+                },
+                clear: function () {
+                    return kvTx(dbName, 'readwrite', function (s) { return idbRequest(s.clear()); })
+                        .then(function () { return true; });
+                }
+            };
+        }
+    };
+
+    // ─── Async per-app blob storage (Arcade.files) ────────────────
+    // For binary/large content (images, documents). Prefers OPFS (a real
+    // per-origin file system) under a per-app directory; falls back to storing
+    // Blobs in a per-app IndexedDB when OPFS is unavailable. Same promise API
+    // either way.
+    var FILE_NAME_RE = /^[a-z0-9._-]{1,128}$/i;
+    function fileDirName() { return KEY_PREFIX + gameId; }
+    function opfsAvailable() {
+        return !!(navigator.storage && navigator.storage.getDirectory);
+    }
+    function opfsDir() {
+        return navigator.storage.getDirectory().then(function (root) {
+            return root.getDirectoryHandle(fileDirName(), { create: true });
+        });
+    }
+    function filesDbName() { return KEY_PREFIX + gameId + '.files'; }
+    var filesApi = {
+        put: function (name, blob) {
+            ensureGameId();
+            var n = String(name);
+            if (!FILE_NAME_RE.test(n)) return Promise.reject(new Error('Arcade.files: name must match /^[a-z0-9._-]{1,128}$/'));
+            if (!(blob instanceof Blob)) blob = new Blob([blob]);
+            if (opfsAvailable()) {
+                return opfsDir().then(function (dir) {
+                    return dir.getFileHandle(n, { create: true }).then(function (fh) {
+                        return fh.createWritable().then(function (w) {
+                            return w.write(blob).then(function () { return w.close(); });
+                        });
+                    });
+                }).then(function () { return true; });
+            }
+            return kvTx(filesDbName(), 'readwrite', function (s) {
+                return idbRequest(s.put({ blob: blob, size: blob.size, type: blob.type }, n));
+            }).then(function () { return true; });
+        },
+        get: function (name) {
+            ensureGameId();
+            var n = String(name);
+            if (opfsAvailable()) {
+                return opfsDir().then(function (dir) {
+                    return dir.getFileHandle(n, { create: false }).then(function (fh) { return fh.getFile(); });
+                }).catch(function () { return null; });
+            }
+            return kvTx(filesDbName(), 'readonly', function (s) { return idbRequest(s.get(n)); })
+                .then(function (rec) { return rec ? rec.blob : null; })
+                .catch(function () { return null; });
+        },
+        list: function () {
+            ensureGameId();
+            if (opfsAvailable()) {
+                return opfsDir().then(function (dir) {
+                    var out = [];
+                    // values() is an async iterator of FileSystemHandles.
+                    return (async function () {
+                        for await (var h of dir.values()) {
+                            if (h.kind === 'file') {
+                                var f = await h.getFile();
+                                out.push({ name: h.name, size: f.size });
+                            }
+                        }
+                        return out;
+                    })();
+                }).catch(function () { return []; });
+            }
+            return kvTx(filesDbName(), 'readonly', function (s) {
+                return Promise.all([idbRequest(s.getAllKeys()), idbRequest(s.getAll())]).then(function (r) {
+                    return r[0].map(function (k, i) { return { name: k, size: (r[1][i] && r[1][i].size) || 0 }; });
+                });
+            }).catch(function () { return []; });
+        },
+        'delete': function (name) {
+            ensureGameId();
+            var n = String(name);
+            if (opfsAvailable()) {
+                return opfsDir().then(function (dir) { return dir.removeEntry(n); })
+                    .then(function () { return true; }).catch(function () { return false; });
+            }
+            return kvTx(filesDbName(), 'readwrite', function (s) { return idbRequest(s['delete'](n)); })
+                .then(function () { return true; }).catch(function () { return false; });
+        }
+    };
+
     // ─── Storage introspection & durability ───────────────────────
     // Thin promise wrappers over the StorageManager API (absent on some
     // browsers → resolve to safe defaults). persist() asks the browser not to
@@ -1433,6 +1609,8 @@
         scores: scoresApi,
         stats: statsApi,
         session: sessionApi,
+        store: storeApi,
+        files: filesApi,
         storage: storageApi,
         loop: function (fn) { ensureGameId(); return createLoop(fn); },
         onSuspend: makeSubscriber(listeners.suspend),

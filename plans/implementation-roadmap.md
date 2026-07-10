@@ -64,6 +64,11 @@ Order chosen so each PR is independently shippable and bisectable.
 
 ## Phase 1 — Storage foundation (the gate for non-game apps) · `arcade-sdk.js`, `index.html`
 
+> **Status 2026-07-10:** P1.1 (`Arcade.store`) and P1.2 (`Arcade.files`) IMPLEMENTED on branch
+> `framework/phase1-storage` (stacked on phase0), with `tools/store-acceptance.mjs` green (IndexedDB
+> KV isolation + OPFS blob round-trip) and wired into CI. **P1.3 (export wiring + move P2P key
+> stores + trust-boundary doc) still TODO** — see issue #43 and the export-overhaul issue #29.
+
 ### P1.1 — `Arcade.store` (async per-app KV over IndexedDB)
 - `Arcade.store.open(name?) → { get, set, del, keys, each, clear }` (promise-based), backed by a
   per-app IndexedDB database `arcade.v1.<appId>` (default store `kv`). Namespaced like the existing
