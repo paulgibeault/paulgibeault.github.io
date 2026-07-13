@@ -221,7 +221,126 @@ try {
     const survived = await frame2.evaluate(() => Arcade.state.get('written'));
     check('state survives launcher reload + remount', survived && survived.n === 7, JSON.stringify(survived));
 
-    // ── 8. Direct-mode regression: fixture standalone still owns its storage ──
+    // ── 8. Blob failure observability (#41): integrity / abort / old-sender ──
+    // Chunks are injected from the launcher page (source === window.parent,
+    // pinned origin), exactly the path real peer messages arrive on.
+    const frame3 = page.frames().find(f => f.url().includes(GAME_PATH));
+    await frame3.evaluate(() => {
+        window.__blobs = []; window.__blobErrs = [];
+        Arcade.peer.onBlob((blob, meta) => blob.text().then(t => window.__blobs.push({ text: t, name: meta.name, id: meta.id })));
+        Arcade.peer.onBlobError((e) => window.__blobErrs.push(e));
+    });
+    const inject = (payload) => page.evaluate((p) => {
+        const entry = [...document.querySelectorAll('iframe')].find(f => f.src.includes('/bridge-test/'));
+        entry.contentWindow.postMessage({ type: 'arcade:peer.message', payload: p, fromPeer: 'test-peer' }, '*');
+    }, payload);
+
+    // Two-chunk blob with the correct whole-blob hash → delivered.
+    const enc = (s) => Buffer.from(s, 'utf8').toString('base64');
+    const crypto = await import('node:crypto');
+    const okSha = crypto.createHash('sha256').update('helloworld').digest('hex');
+    await inject({ __arcadeBlob: { id: 'ok1', seq: 0, total: 2, size: 10, mime: 'text/plain', name: 'ok.txt', bytes: enc('hello'), sha: okSha } });
+    await inject({ __arcadeBlob: { id: 'ok1', seq: 1, total: 2, size: 10, mime: 'text/plain', name: 'ok.txt', bytes: enc('world'), sha: okSha } });
+    // Wrong hash → integrity error, blob never delivered.
+    const badSha = '0'.repeat(64);
+    await inject({ __arcadeBlob: { id: 'bad1', seq: 0, total: 1, size: 5, mime: 'text/plain', name: 'bad.txt', bytes: enc('hello'), sha: badSha } });
+    // Explicit abort mid-transfer → aborted error.
+    await inject({ __arcadeBlob: { id: 'ab1', seq: 0, total: 2, size: 10, mime: 'text/plain', name: 'ab.txt', bytes: enc('hello'), sha: okSha } });
+    await inject({ __arcadeBlobAbort: { id: 'ab1' } });
+    // Old-sender compat: no sha field → delivered unchecked.
+    await inject({ __arcadeBlob: { id: 'old1', seq: 0, total: 1, size: 5, mime: 'text/plain', name: 'old.txt', bytes: enc('plain') } });
+
+    let blobState = null;
+    for (let i = 0; i < 40; i++) {
+        blobState = await frame3.evaluate(() => ({ blobs: window.__blobs, errs: window.__blobErrs }));
+        if (blobState.blobs.length >= 2 && blobState.errs.length >= 2) break;
+        await page.waitForTimeout(50);
+    }
+    const okBlob = blobState.blobs.find(b => b.id === 'ok1');
+    const oldBlob = blobState.blobs.find(b => b.id === 'old1');
+    const integrityErr = blobState.errs.find(e => e.id === 'bad1');
+    const abortErr = blobState.errs.find(e => e.id === 'ab1');
+    check('blob: hash-verified transfer delivers', !!okBlob && okBlob.text === 'helloworld', JSON.stringify(blobState.blobs));
+    check('blob: integrity mismatch → onBlobError, not delivery', !!integrityErr && integrityErr.reason === 'integrity'
+        && !blobState.blobs.some(b => b.id === 'bad1'), JSON.stringify(blobState.errs));
+    check('blob: sender abort → onBlobError(aborted)', !!abortErr && abortErr.reason === 'aborted' && abortErr.received === 1 && abortErr.total === 2, JSON.stringify(abortErr));
+    check('blob: hashless (old-sender) transfer still delivers', !!oldBlob && oldBlob.text === 'plain');
+
+    // ── 9. Blob receive TTL (#41): stalled transfer errors out ──
+    // Fresh page with a fake clock so the 60s TTL elapses instantly.
+    {
+        const clockPage = await browser.newPage();
+        await clockPage.clock.install();
+        await clockPage.goto(BASE + '/', { waitUntil: 'load' });
+        await clockPage.evaluate((src) => window.__arcade.showGame('bridge-test', src, 'Bridge Test'), GAME_PATH);
+        let cf = null;
+        for (let i = 0; i < 100 && !cf; i++) {
+            cf = clockPage.frames().find(f => f.url().includes(GAME_PATH));
+            if (!cf) { await clockPage.clock.runFor(50); await clockPage.waitForTimeout(20); }
+        }
+        // Drive the fake clock past the SDK's 2s bridged handshake window if
+        // the welcome hasn't landed yet, then wait for ready.
+        await clockPage.clock.runFor(3000);
+        await cf.evaluate(() => window.Arcade.ready);
+        await cf.evaluate(() => {
+            window.__blobErrs = [];
+            Arcade.peer.onBlobError((e) => window.__blobErrs.push(e));
+        });
+        await clockPage.evaluate((p) => {
+            const entry = [...document.querySelectorAll('iframe')].find(f => f.src.includes('/bridge-test/'));
+            entry.contentWindow.postMessage({ type: 'arcade:peer.message', payload: p, fromPeer: 'test-peer' }, '*');
+        }, { __arcadeBlob: { id: 'stall1', seq: 0, total: 3, size: 15, mime: '', name: 'stall.bin', bytes: enc('hello') } });
+        await clockPage.waitForTimeout(100);          // let the chunk land on real time
+        await clockPage.clock.runFor(90 * 1000);      // TTL + sweeper interval
+        let ttlErrs = [];
+        for (let i = 0; i < 40; i++) {
+            ttlErrs = await cf.evaluate(() => window.__blobErrs);
+            if (ttlErrs.length) break;
+            await clockPage.clock.runFor(15 * 1000);
+            await clockPage.waitForTimeout(25);
+        }
+        const ttlErr = ttlErrs.find(e => e.id === 'stall1');
+        check('blob: stalled transfer times out via TTL (no silent wedge)', !!ttlErr && ttlErr.reason === 'timeout' && ttlErr.received === 1 && ttlErr.total === 3, JSON.stringify(ttlErrs));
+        await clockPage.close();
+    }
+
+    // ── 10. Eviction suspend-hint (#41): flush runs before teardown ──
+    {
+        const evictPage = await browser.newPage();
+        await evictPage.goto(BASE + '/', { waitUntil: 'load' });
+        // Default pool cap is 2 — mount A, then B, then C evicts A (LRU,
+        // non-active). A's suspend handler flushes a write through the
+        // bridge; under the old synchronous about:blank it never ran.
+        const mount = async (gid) => {
+            await evictPage.evaluate(([g, src]) => window.__arcade.showGame(g, src, g), [gid, GAME_PATH + '?gid=' + gid]);
+            let f = null;
+            for (let i = 0; i < 100 && !f; i++) {
+                f = evictPage.frames().find(fr => fr.url().includes('gid=' + gid));
+                if (!f) await evictPage.waitForTimeout(50);
+            }
+            await f.evaluate(() => window.Arcade.ready);
+            return f;
+        };
+        const fa = await mount('evict-a');
+        await fa.evaluate(() => {
+            Arcade.onSuspend(() => { Arcade.state.set('flushedAtSuspend', Date.now()); });
+        });
+        await mount('evict-b');
+        await mount('evict-c'); // evicts evict-a
+        let flushed = null;
+        for (let i = 0; i < 40 && !flushed; i++) {
+            flushed = await evictPage.evaluate(() => localStorage.getItem('arcade.v1.evict-a.flushedAtSuspend'));
+            if (!flushed) await evictPage.waitForTimeout(50);
+        }
+        check('eviction: suspend-time flush lands before teardown', !!flushed, String(flushed));
+        await evictPage.waitForTimeout(500); // > RETIRE_GRACE_MS
+        const frameGone = await evictPage.evaluate(() =>
+            ![...document.querySelectorAll('iframe')].some(f => f.src.includes('gid=evict-a')));
+        check('eviction: frame actually torn down after the grace', frameGone);
+        await evictPage.close();
+    }
+
+    // ── 11. Direct-mode regression: fixture standalone still owns its storage ──
     const solo = await browser.newPage();
     await solo.goto(BASE + GAME_PATH, { waitUntil: 'load' });
     const soloCtx = await solo.evaluate(async () => {

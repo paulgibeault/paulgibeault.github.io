@@ -49,6 +49,7 @@
  *   // Lifecycle — launcher iframe pool when framed, page visibility
  *   // standalone; both sources are merged into one deduplicated stream.
  *   Arcade.onSuspend(fn) / onResume(fn) / onStateReplaced(fn)
+ *   Arcade.onFramedChange(fn)      framed flipped after ready (late welcome)
  *   Arcade.context.suspended                      current effective state
  *   (<html data-arcade-suspended="true|false"> mirrors it for CSS/late code)
  *
@@ -71,6 +72,8 @@
  *   Arcade.peer.self() / remote()                 stable device identities
  *   Arcade.peer.onReady(fn)                       remote same-game listening
  *   Arcade.peer.sendBlob(blob, { onProgress }) / onBlob(fn)
+ *   Arcade.peer.onBlobError(fn)   failed incoming transfer: { id, name,
+ *                                 reason: 'timeout'|'aborted'|'integrity', ... }
  *   Arcade.peer.queue() / onQueue(fn)             replay-queue visibility
  *
  *   // Launcher-mediated UI
@@ -176,10 +179,12 @@
         peerReady: [],
         peerQueue: [],
         peerBlob: [],
+        peerBlobError: [],
         stateReplaced: [],
         settingsChange: [],
         suspend: [],
-        resume: []
+        resume: [],
+        framedChange: []
     };
 
     // Remote peer roster — seeded from the launcher's welcome, kept fresh by
@@ -601,10 +606,66 @@
     // base64 chunks wrapped in { __arcadeBlob: {...} } envelopes. Chunk
     // payloads are intercepted before onMessage listeners, so games only see
     // whole blobs via onBlob.
+    //
+    // FAILURE OBSERVABILITY (#41): a transfer used to be able to wedge
+    // silently — chunks dropped by the transport's replay-queue overflow (or
+    // a session-stash drop) left blobRx holding an incomplete entry forever.
+    // Three guards now make every failure visible via onBlobError:
+    //   - integrity: the sender ships the blob's SHA-256 in every chunk;
+    //     the assembled blob is hashed and a mismatch is an error, never a
+    //     silently-wrong delivery. (Absent on chunks from older SDKs — then
+    //     the check is skipped, wire-compatible both ways.)
+    //   - abort frames: a sender whose transfer dies mid-loop tells the
+    //     receiver ({ __arcadeBlobAbort: { id } }), best-effort.
+    //   - receive TTL: an incomplete entry that hasn't seen a chunk for
+    //     BLOB_RX_TTL_MS is dropped with a 'timeout' error — the backstop
+    //     for everything the sender can't signal.
     var BLOB_CHUNK_BYTES = 48 * 1024;
     var BLOB_MAX_CHUNKS = 2048; // ~96 MB — reject anything claiming more
+    var BLOB_RX_TTL_MS = 60 * 1000;
     var blobSendCounter = 0;
-    var blobRx = {}; // id -> { chunks, received, total, mime, name }
+    var blobRx = {}; // id -> { chunks, received, total, mime, name, sha, lastAt, fromPeer }
+    var blobRxSweeper = null;
+
+    function fireBlobError(id, st, reason, fromPeer) {
+        fire(listeners.peerBlobError, {
+            id: id,
+            name: st ? st.name : '',
+            reason: reason, // 'timeout' | 'aborted' | 'integrity'
+            received: st ? st.received : 0,
+            total: st ? st.total : 0,
+            fromPeer: fromPeer || (st ? st.fromPeer : undefined)
+        });
+    }
+    function blobRxSweep() {
+        var now = Date.now();
+        var live = 0;
+        for (var id in blobRx) {
+            var st = blobRx[id];
+            if (now - st.lastAt > BLOB_RX_TTL_MS) {
+                delete blobRx[id];
+                fireBlobError(id, st, 'timeout');
+            } else {
+                live++;
+            }
+        }
+        if (!live && blobRxSweeper) { clearInterval(blobRxSweeper); blobRxSweeper = null; }
+    }
+    function ensureBlobSweeper() {
+        if (!blobRxSweeper) blobRxSweeper = setInterval(blobRxSweep, 15 * 1000);
+    }
+    function sha256Hex(buf) {
+        // Resolves null where SubtleCrypto is unavailable (http:// dev hosts
+        // other than localhost) — integrity is then skipped, not failed.
+        try {
+            return crypto.subtle.digest('SHA-256', buf).then(function (h) {
+                var b = new Uint8Array(h);
+                var s = '';
+                for (var i = 0; i < b.length; i++) s += (b[i] < 16 ? '0' : '') + b[i].toString(16);
+                return s;
+            }, function () { return null; });
+        } catch (e) { return Promise.resolve(null); }
+    }
 
     function bytesToBase64(bytes) {
         var bin = '';
@@ -631,8 +692,12 @@
                 received: 0,
                 total: meta.total,
                 mime: typeof meta.mime === 'string' ? meta.mime.slice(0, 128) : '',
-                name: typeof meta.name === 'string' ? meta.name.slice(0, 128) : ''
+                name: typeof meta.name === 'string' ? meta.name.slice(0, 128) : '',
+                sha: (typeof meta.sha === 'string' && /^[0-9a-f]{64}$/.test(meta.sha)) ? meta.sha : null,
+                lastAt: Date.now(),
+                fromPeer: fromPeer
             };
+            ensureBlobSweeper();
         }
         if (st.total !== meta.total || st.chunks[meta.seq] !== undefined) return;
         var bytes;
@@ -640,14 +705,32 @@
         catch (e) { delete blobRx[meta.id]; return; }
         st.chunks[meta.seq] = bytes;
         st.received++;
+        st.lastAt = Date.now();
         if (st.received === st.total) {
             delete blobRx[meta.id];
             var blob;
             try { blob = new Blob(st.chunks, { type: st.mime }); } catch (e) { return; }
-            fire(listeners.peerBlob, blob, {
-                name: st.name, size: blob.size, mime: st.mime, fromPeer: fromPeer, id: meta.id
-            });
+            var deliver = function () {
+                fire(listeners.peerBlob, blob, {
+                    name: st.name, size: blob.size, mime: st.mime, fromPeer: fromPeer, id: meta.id
+                });
+            };
+            if (!st.sha) { deliver(); return; }
+            // Integrity gate: only a hash-verified blob reaches the game.
+            blob.arrayBuffer().then(sha256Hex).then(function (got) {
+                if (got === null || got === st.sha) deliver();
+                else fireBlobError(meta.id, st, 'integrity', fromPeer);
+            }, function () { deliver(); /* unreadable-buffer edge: don't invent an error */ });
         }
+    }
+    function handleBlobAbort(meta, fromPeer) {
+        if (!meta || typeof meta.id !== 'string' || meta.id.length > 64) return;
+        var st = blobRx[meta.id];
+        // Unknown id: either nothing arrived yet or it already completed —
+        // record nothing, an abort for a finished transfer must not alarm.
+        if (!st) return;
+        delete blobRx[meta.id];
+        fireBlobError(meta.id, st, 'aborted', fromPeer);
     }
 
     // ─── postMessage protocol ─────────────────────────────────────
@@ -758,6 +841,13 @@
         switch (t) {
             case 'arcade:welcome':
                 if (handshakeTimer) { clearTimeout(handshakeTimer); handshakeTimer = null; }
+                // A welcome that lands AFTER the handshake timeout already
+                // resolved ready as standalone flips context.framed mid-
+                // session (#41). Launcher mounts are deterministic (bridged
+                // frames wait 2s and the launcher answers in ms) — this is
+                // the legacy same-origin-embed path. Observable via
+                // onFramedChange rather than silent.
+                var lateWelcome = readyResolved && !framed;
                 framed = true;
                 parentOrigin = e.origin;
                 setPeerStatus(typeof data.peerStatus === 'string' ? data.peerStatus : 'idle');
@@ -771,10 +861,15 @@
                 applyRoster(data.peers);
                 if (applySettings(data.settings)) fire(listeners.settingsChange, snapshotSettings());
                 resolveReady();
+                if (lateWelcome) fire(listeners.framedChange, true);
                 break;
             case 'arcade:peer.message': {
                 if (data.payload && typeof data.payload === 'object' && data.payload.__arcadeBlob) {
                     handleBlobChunk(data.payload.__arcadeBlob, data.fromPeer);
+                    break;
+                }
+                if (data.payload && typeof data.payload === 'object' && data.payload.__arcadeBlobAbort) {
+                    handleBlobAbort(data.payload.__arcadeBlobAbort, data.fromPeer);
                     break;
                 }
                 // meta = { relayed, to }: relayed=true means the frame did
@@ -1295,17 +1390,32 @@
                     throw new Error('Arcade.peer.sendBlob: blob too large ('
                         + bytes.length + ' bytes; max ' + (BLOB_MAX_CHUNKS * BLOB_CHUNK_BYTES) + ')');
                 }
+                // Whole-blob hash rides every chunk so the receiver can
+                // verify the assembled result (and never deliver a blob
+                // stitched from a stale duplicate id). null on hosts
+                // without SubtleCrypto — receiver skips the check then.
+                return sha256Hex(buf).then(function (sha) { return { bytes: bytes, total: total, sha: sha }; });
+            }).then(function (prep) {
+                var bytes = prep.bytes, total = prep.total;
                 var id = 'b' + (++blobSendCounter) + '-' + Date.now().toString(36);
                 for (var seq = 0; seq < total; seq++) {
                     var chunk = bytes.subarray(seq * BLOB_CHUNK_BYTES, (seq + 1) * BLOB_CHUNK_BYTES);
-                    var ok = peerApi.send({
-                        __arcadeBlob: {
-                            id: id, seq: seq, total: total, size: bytes.length,
-                            mime: blob.type || '', name: name.slice(0, 128),
-                            bytes: bytesToBase64(chunk)
-                        }
-                    });
-                    if (!ok) throw new Error('Arcade.peer.sendBlob: no live connection');
+                    var chunkMeta = {
+                        id: id, seq: seq, total: total, size: bytes.length,
+                        mime: blob.type || '', name: name.slice(0, 128),
+                        bytes: bytesToBase64(chunk)
+                    };
+                    if (prep.sha) chunkMeta.sha = prep.sha;
+                    var ok = peerApi.send({ __arcadeBlob: chunkMeta });
+                    if (!ok) {
+                        // Chunks already handed off may still arrive — tell
+                        // the receiver the rest never will, so it errors out
+                        // instead of wedging. Best-effort: if the link is
+                        // fully down this send fails too and the receiver's
+                        // TTL is the backstop.
+                        if (seq > 0) peerApi.send({ __arcadeBlobAbort: { id: id } });
+                        throw new Error('Arcade.peer.sendBlob: no live connection');
+                    }
                     if (onProgress) {
                         try { onProgress((seq + 1) / total, seq + 1, total); } catch (e) {}
                     }
@@ -1316,6 +1426,14 @@
         // fn(blob, { name, size, mime, fromPeer, id }) once a full blob has
         // been reassembled.
         onBlob: makeSubscriber(listeners.peerBlob),
+        // fn({ id, name, reason, received, total, fromPeer }) when an
+        // incoming transfer fails instead of completing. reason:
+        //   'timeout'   — no chunk for 60s (sender queue overflowed, link
+        //                 died without an abort, ...)
+        //   'aborted'   — the sender explicitly gave up mid-transfer
+        //   'integrity' — assembled bytes did not match the sender's hash
+        // A failed transfer is dropped entirely; the sender should resend.
+        onBlobError: makeSubscriber(listeners.peerBlobError),
 
         // Transport replay-queue visibility: { depth, limit, overflowed }.
         // depth grows while 'interrupted' (sends queue for replay); when
@@ -2068,6 +2186,12 @@
         onResume: makeSubscriber(listeners.resume),
         onStateReplaced: makeSubscriber(listeners.stateReplaced),
         onSettingsChange: makeSubscriber(listeners.settingsChange),
+        // Fires (with the new value of context.framed) if framed flips AFTER
+        // Arcade.ready — i.e. a launcher welcome that lost the handshake race
+        // (legacy same-origin embeds only; launcher-sandboxed frames resolve
+        // ready deterministically). Games that branch on context.framed at
+        // boot can re-run that branch here instead of missing the flip.
+        onFramedChange: makeSubscriber(listeners.framedChange),
         // Fired when a localStorage write fails (typically quota). Returns an
         // unsubscribe fn. Data was NOT saved — warn the user / shed load.
         onStorageError: function (fn) {
