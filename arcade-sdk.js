@@ -1,9 +1,24 @@
-/* Paul's Arcade SDK — window.Arcade  (protocol v2)
+/* Paul's Arcade SDK — window.Arcade  (protocol v2, SDK v3)
  *
  * Loaded by games at https://paulgibeault.github.io/arcade-sdk.js.
- * Same-origin with the launcher and every game; storage works without a bridge.
  * The launcher↔game bridge handles multiplayer, lifecycle hints, settings
- * broadcast, launcher-mediated UI (toasts), and post-import notifications.
+ * broadcast, launcher-mediated UI (toasts), post-import notifications — and,
+ * for launcher-mounted frames, ALL persistent storage:
+ *
+ * STORAGE MODES (Arcade.context.storage — chosen automatically at init)
+ *   'direct'  — standalone pages (and legacy same-origin embeds): the
+ *               document reads/writes localStorage/IndexedDB/OPFS itself.
+ *   'bridged' — the launcher mounts games in OPAQUE-ORIGIN iframes (sandbox
+ *               without allow-same-origin), so a game cannot open the
+ *               origin's storage — most importantly the launcher's P2P
+ *               identity/pairing key stores. Every storage API transparently
+ *               rides postMessage to the launcher, which persists under the
+ *               SAME arcade.v1.<gameId> names direct mode would use. Sync
+ *               state reads serve from a cache seeded by the welcome
+ *               snapshot — so AWAIT Arcade.ready BEFORE READING STATE when
+ *               framed; pre-ready reads return empty and warn.
+ *   'memory'  — opaque-origin frame but no launcher answered: state lives in
+ *               memory for the session; store/files operations reject/no-op.
  *
  * USAGE
  *   <script src="https://paulgibeault.github.io/arcade-sdk.js"></script>
@@ -15,7 +30,7 @@
  * API
  *   Arcade.init({ gameId })        identity + handshake (sync)
  *   Arcade.ready                   Promise resolved on welcome / standalone
- *   Arcade.context                 { framed, version, gameId, suspended }
+ *   Arcade.context                 { framed, version, gameId, suspended, storage }
  *
  *   // Storage — sync, JSON-encoded under arcade.v1.<gameId>.<key>
  *   Arcade.state.get / set / remove
@@ -105,8 +120,12 @@
 (function () {
     'use strict';
 
-    var VERSION = 2;
+    var VERSION = 3; // v3: bridged storage mode (opaque-origin frames)
     var HANDSHAKE_TIMEOUT_MS = 300;
+    // Opaque-origin (sandboxed, no allow-same-origin) frames have no storage
+    // to fall back to, so waiting longer for the launcher costs nothing and
+    // makes `context.framed` deterministic at ready in the launcher case.
+    var BRIDGED_HANDSHAKE_TIMEOUT_MS = 2000;
     var MSG_PREFIX = 'arcade:';
     var KEY_PREFIX = 'arcade.v1.';
     var GAME_ID_RE = /^[a-z0-9_-]+$/i;
@@ -119,6 +138,23 @@
     var framed = false;
     var parentOrigin = null;
     var handshakeTimer = null;
+
+    // Storage mode. 'direct' = this document can touch localStorage /
+    // IndexedDB / OPFS itself (standalone pages, and legacy launchers that
+    // mount games with allow-same-origin). 'bridged' = the document has an
+    // OPAQUE origin (the launcher sandboxes game iframes without
+    // allow-same-origin so a game can never open the launcher's — or another
+    // app's — origin storage, most importantly the P2P identity/pairing key
+    // stores). In bridged mode every storage API rides postMessage to the
+    // launcher, which persists under the same arcade.v1.<gameId> names the
+    // game would have used itself — the data is identical either way.
+    var storageMode = 'direct';
+    var lsCache = null;          // bridged: Map fullKey -> raw string
+    var pendingWrites = null;    // bridged: writes queued until the welcome snapshot
+    var PENDING_WRITES_CAP = 500;
+    var snapshotSeeded = false;  // bridged: welcome.state applied
+    var sdkInternalRead = false; // suppresses the early-read warning for SDK's own reads
+    var warnedEarlyReads = {};
 
     var peerStatus = 'unavailable';
     // Launcher capability flags (welcome.caps) — additive feature detection
@@ -252,9 +288,56 @@
     function globalKeyName(key) { return KEY_PREFIX + 'global.' + key; }
     function migratedSentinelKey(version) { return KEY_PREFIX + gameId + '._migrated.' + version; }
 
+    // ─── Raw storage layer ────────────────────────────────────────
+    // Single chokepoint for every localStorage touch. In bridged mode reads
+    // come from the in-memory cache (seeded by the launcher's welcome
+    // snapshot) and writes go cache-first with a write-through postMessage.
+    function storageAccessible() {
+        // In an opaque-origin document merely touching window.localStorage
+        // throws SecurityError — that's the whole signal.
+        try { void window.localStorage.getItem('arcade.v1._meta.probe'); return true; }
+        catch (e) { return false; }
+    }
+    function queueStateWrite(key, value) { // value: raw string, or null = remove
+        if (pendingWrites) {
+            if (pendingWrites.length >= PENDING_WRITES_CAP) {
+                pendingWrites.shift();
+                console.warn('[Arcade SDK] pre-ready write queue overflowed — oldest write dropped. Await Arcade.ready before writing state in framed mode.');
+            }
+            pendingWrites.push({ key: key, value: value });
+            return;
+        }
+        postToParent({ type: 'arcade:state.write', key: key, value: value });
+    }
+    function warnEarlyRead(k) {
+        if (storageMode !== 'bridged' || snapshotSeeded || sdkInternalRead) return;
+        // Post-timeout with no launcher = memory-only mode, a different
+        // (documented) situation — not an early read.
+        if (readyResolved && !framed) return;
+        if (warnedEarlyReads[k]) return;
+        warnedEarlyReads[k] = true;
+        console.warn('[Arcade SDK] "' + k + '" read before Arcade.ready in framed mode — '
+            + 'stored state has not arrived yet, so this returns empty. Await Arcade.ready.');
+    }
+    function rawGet(k) {
+        if (storageMode === 'bridged') {
+            warnEarlyRead(k);
+            var v = lsCache.get(k);
+            return v === undefined ? null : v;
+        }
+        try { return localStorage.getItem(k); } catch (e) { return null; }
+    }
+    function rawSetItem(k, raw) {
+        if (storageMode === 'bridged') { lsCache.set(k, raw); queueStateWrite(k, raw); return true; }
+        try { localStorage.setItem(k, raw); return true; } catch (e) { return false; }
+    }
+    function rawRemoveItem(k) {
+        if (storageMode === 'bridged') { lsCache['delete'](k); queueStateWrite(k, null); return; }
+        try { localStorage.removeItem(k); } catch (e) {}
+    }
+
     function readJSON(k) {
-        var raw;
-        try { raw = localStorage.getItem(k); } catch (e) { return null; }
+        var raw = rawGet(k);
         if (raw === null) return null;
         try { return JSON.parse(raw); } catch (e) { return null; }
     }
@@ -269,6 +352,14 @@
         }
     }
     function writeJSON(k, v) {
+        if (storageMode === 'bridged') {
+            // Cache writes can't fail; a quota failure on the launcher side
+            // comes back asynchronously as arcade:state.writeError and fires
+            // onStorageError there.
+            if (v === undefined) rawRemoveItem(k);
+            else rawSetItem(k, JSON.stringify(v));
+            return true;
+        }
         try {
             if (v === undefined) localStorage.removeItem(k);
             else localStorage.setItem(k, JSON.stringify(v));
@@ -276,7 +367,7 @@
         } catch (e) { fireStorageError(k, e); return false; }
     }
     function removeKey(k) {
-        try { localStorage.removeItem(k); } catch (e) {}
+        rawRemoveItem(k);
     }
 
     // HTML-escape helper + auto-escaping tagged template. Any peer- or
@@ -451,6 +542,14 @@
     // paint is correct without waiting for the launcher's welcome message.
     // Mirrors fields the launcher writes to arcade.v1.global.*.
     function hydrateSettingsFromStorage() {
+        // In bridged mode this runs against an empty cache (defaults) and the
+        // launcher's welcome re-applies real settings a beat later — suppress
+        // the early-read warning, these are the SDK's own reads.
+        sdkInternalRead = true;
+        try { hydrateSettingsFromStorageInner(); }
+        finally { sdkInternalRead = false; }
+    }
+    function hydrateSettingsFromStorageInner() {
         var fs = readJSON(globalKeyName('fontScale'));
         if (typeof fs === 'number' && isFinite(fs)) settings.fontScale = fs;
         var th = readJSON(globalKeyName('theme'));
@@ -480,17 +579,19 @@
     // in production: the flag is opt-in and the cost is one localStorage
     // read per message.
     function devModeOn() {
-        try { return localStorage.getItem('arcade.v1._meta.dev') === 'true'; }
-        catch (e) { return false; }
+        var prev = sdkInternalRead;
+        sdkInternalRead = true;
+        try { return rawGet('arcade.v1._meta.dev') === 'true'; }
+        finally { sdkInternalRead = prev; }
     }
     function honorDevQueryParam() {
         try {
             var p = new URLSearchParams(window.location.search).get('dev');
             if (p === null) return;
             if (p === '0' || p === 'false') {
-                localStorage.removeItem('arcade.v1._meta.dev');
+                rawRemoveItem('arcade.v1._meta.dev');
             } else {
-                localStorage.setItem('arcade.v1._meta.dev', 'true');
+                rawSetItem('arcade.v1._meta.dev', 'true');
             }
         } catch (e) {}
     }
@@ -561,6 +662,72 @@
         peerStatus = s;
         fire(listeners.peerStatus, s);
     }
+
+    // ─── Storage bridge (bridged mode only) ───────────────────────
+    // Seed the cache from welcome.state, then reconcile writes made before
+    // the snapshot arrived: a key the snapshot covers keeps the STORED value
+    // (a pre-ready getOrInit default must never clobber a real save), a key
+    // it doesn't cover flushes through to the launcher.
+    function seedInitialSnapshot(snap) {
+        snap = (snap && typeof snap === 'object') ? snap : {};
+        var pend = pendingWrites || [];
+        pendingWrites = null;
+        var inSnap = {};
+        Object.keys(snap).forEach(function (k) {
+            if (typeof snap[k] !== 'string') return;
+            lsCache.set(k, snap[k]);
+            inSnap[k] = true;
+        });
+        snapshotSeeded = true;
+        var superseded = [];
+        for (var i = 0; i < pend.length; i++) {
+            var w = pend[i];
+            if (inSnap[w.key]) {
+                if (superseded.indexOf(w.key) === -1) superseded.push(w.key);
+                continue;
+            }
+            postToParent({ type: 'arcade:state.write', key: w.key, value: w.value });
+        }
+        if (superseded.length) {
+            // The cache already holds the snapshot value (seeded above) —
+            // tell subscribers their earlier optimistic value was replaced.
+            superseded.forEach(function (k) {
+                var raw = lsCache.get(k);
+                var v = null;
+                if (raw !== undefined) { try { v = JSON.parse(raw); } catch (e) { v = null; } }
+                fireKeyChange(k, v);
+            });
+            console.warn('[Arcade SDK] state written before Arcade.ready was superseded by stored data ('
+                + superseded.join(', ') + ') — await Arcade.ready before touching state in framed mode.');
+        }
+    }
+
+    // Request/response over postMessage for the async storage APIs
+    // (Arcade.store / Arcade.files / Arcade.storage) in bridged mode. The
+    // launcher answers with arcade:bridge.result carrying the same id.
+    var rpcSeq = 0;
+    var rpcPending = {};
+    var RPC_TIMEOUT_MS = 30000;
+    function bridgeRpc(msgType, fields) {
+        return readyPromise.then(function () {
+            if (!framed) {
+                throw new Error('Arcade: storage bridge unavailable — no launcher answered this frame');
+            }
+            return new Promise(function (resolve, reject) {
+                var id = 'r' + (++rpcSeq);
+                var timer = setTimeout(function () {
+                    delete rpcPending[id];
+                    reject(new Error('Arcade: launcher did not answer ' + msgType));
+                }, RPC_TIMEOUT_MS);
+                rpcPending[id] = { resolve: resolve, reject: reject, timer: timer };
+                var msg = { type: msgType, id: id };
+                for (var k in fields) {
+                    if (Object.prototype.hasOwnProperty.call(fields, k)) msg[k] = fields[k];
+                }
+                postToParent(msg);
+            });
+        });
+    }
     function resolveReady() {
         if (readyResolved) return;
         readyResolved = true;
@@ -568,7 +735,20 @@
     }
     function onMessage(e) {
         if (e.source !== window.parent) return;
-        if (e.origin !== window.location.origin) return;
+        // Origin rules by mode. Direct mode keeps the same-origin requirement
+        // (a hostile page embedding this game must not be able to pose as the
+        // launcher and reach the peer bridge). Bridged mode runs in an
+        // OPAQUE-origin frame — our own origin is the useless string "null",
+        // and whichever parent mounted us sandboxed is by definition our
+        // storage custodian (there is no pre-existing data here to leak) —
+        // so we pin the first welcome's origin and require it thereafter.
+        if (parentOrigin !== null) {
+            if (e.origin !== parentOrigin) return;
+        } else if (storageMode === 'bridged') {
+            if (!(e.data && e.data.type === 'arcade:welcome')) return;
+        } else {
+            if (e.origin !== window.location.origin) return;
+        }
         var data = e.data;
         if (!data || typeof data !== 'object') return;
         var t = data.type;
@@ -584,6 +764,10 @@
                 if (Array.isArray(data.caps)) {
                     peerCaps = data.caps.filter(function (c) { return typeof c === 'string'; });
                 }
+                // Bridged: seed the storage cache from the launcher's
+                // snapshot BEFORE ready resolves, so post-ready reads see
+                // real state. Must precede resolveReady().
+                if (storageMode === 'bridged') seedInitialSnapshot(data.state);
                 applyRoster(data.peers);
                 if (applySettings(data.settings)) fire(listeners.settingsChange, snapshotSettings());
                 resolveReady();
@@ -632,6 +816,15 @@
                 }
                 break;
             case 'arcade:state.replaced':
+                // Bridged: the launcher sends the game's fresh post-import
+                // snapshot along — replace the cache wholesale first, so the
+                // listener replay below reads the new world.
+                if (storageMode === 'bridged' && data.state && typeof data.state === 'object') {
+                    lsCache.clear();
+                    Object.keys(data.state).forEach(function (k) {
+                        if (typeof data.state[k] === 'string') lsCache.set(k, data.state[k]);
+                    });
+                }
                 fire(listeners.stateReplaced);
                 // Replay key-change subscriptions — storage events also fire,
                 // but a launcher-driven event is more reliable across browsers.
@@ -642,6 +835,37 @@
                     }
                 });
                 break;
+            case 'arcade:state.changed':
+                // Bridged replacement for cross-document storage events: the
+                // launcher pushes shared-key changes (global.*, _meta.dev)
+                // made by the launcher or another frame.
+                if (storageMode === 'bridged' && typeof data.key === 'string') {
+                    var raw = (typeof data.value === 'string') ? data.value : null;
+                    if (raw === null) lsCache['delete'](data.key);
+                    else lsCache.set(data.key, raw);
+                    var parsed = null;
+                    if (raw !== null) { try { parsed = JSON.parse(raw); } catch (err) { parsed = null; } }
+                    fireKeyChange(data.key, parsed);
+                }
+                break;
+            case 'arcade:state.writeError':
+                // A bridged write failed to persist launcher-side (quota).
+                // Mirrors the synchronous false/onStorageError of direct mode.
+                if (typeof data.key === 'string') {
+                    fireStorageError(data.key, new Error(
+                        typeof data.error === 'string' ? data.error : 'launcher-side write failed'));
+                }
+                break;
+            case 'arcade:bridge.result': {
+                var pendingOp = rpcPending[data.id];
+                if (!pendingOp) break;
+                delete rpcPending[data.id];
+                clearTimeout(pendingOp.timer);
+                if (data.ok) pendingOp.resolve(data.value);
+                else pendingOp.reject(new Error(
+                    typeof data.error === 'string' ? data.error : 'Arcade: bridge operation failed'));
+                break;
+            }
             case 'arcade:settings.changed':
                 if (applySettings(data.settings)) fire(listeners.settingsChange, snapshotSettings());
                 break;
@@ -679,6 +903,9 @@
     var LAUNCHER_ROOT_ASSETS = ['/', '/index.html', '/arcade-sdk.js', '/arcade-p2p.js', '/styles.css'];
     function checkSWCollision() {
         try {
+            // Opaque-origin frames have no CacheStorage access (and no SW) —
+            // nothing to inspect, nothing to collide with.
+            if (storageMode === 'bridged') return;
             if (typeof caches === 'undefined' || !caches.keys) return;
             caches.keys().then(function (names) {
                 var offenders = [];
@@ -708,6 +935,39 @@
         } catch (e) {}
     }
 
+    // ─── Sandboxed-frame service-worker shim ──────────────────────
+    // Game pages register their own service workers for standalone offline
+    // support (GAME_INTEGRATION §10). In a sandboxed frame the
+    // navigator.serviceWorker GETTER itself throws SecurityError, which
+    // detonates boot scripts written before the opaque-frame move. Shadow it
+    // with an inert stub: register() rejects (catchable), lookups resolve
+    // empty, `ready` never settles (a SW will never control this frame).
+    function shimServiceWorkerForSandbox() {
+        try {
+            var stub = {
+                register: function () {
+                    return Promise.reject(new Error(
+                        'service workers are unavailable in launcher-sandboxed frames; standalone visits still register yours'));
+                },
+                getRegistration: function () { return Promise.resolve(undefined); },
+                getRegistrations: function () { return Promise.resolve([]); },
+                startMessages: function () {},
+                addEventListener: function () {},
+                removeEventListener: function () {},
+                dispatchEvent: function () { return false; },
+                controller: null,
+                oncontrollerchange: null,
+                onmessage: null,
+                onmessageerror: null,
+                ready: new Promise(function () {})
+            };
+            Object.defineProperty(window.navigator, 'serviceWorker', {
+                get: function () { return stub; },
+                configurable: true
+            });
+        } catch (e) {}
+    }
+
     // ─── init ─────────────────────────────────────────────────────
     function init(opts) {
         if (initialized) return api;
@@ -717,6 +977,16 @@
             throw new Error('Arcade.init: opts.gameId must match /^[a-z0-9_-]+$/');
         }
         gameId = opts.gameId;
+
+        // Pick the storage mode before anything touches storage. An opaque
+        // origin (launcher-sandboxed frame) cannot reach ANY origin storage —
+        // all reads/writes go through the launcher bridge instead.
+        if (!storageAccessible()) {
+            storageMode = 'bridged';
+            lsCache = new Map();
+            pendingWrites = [];
+            shimServiceWorkerForSandbox();
+        }
 
         honorDevQueryParam();
         injectBaseStyle();
@@ -744,19 +1014,26 @@
 
         try { window.addEventListener('message', onMessage); } catch (e) {}
         try {
+            // Opaque-origin frames can't name themselves as a targetOrigin
+            // ('null' is not a valid target) — and the hello carries nothing
+            // sensitive (gameId + version), so '*' is fine there. Direct mode
+            // keeps the same-origin guarantee.
             window.parent.postMessage(
                 { type: 'arcade:hello', gameId: gameId, version: VERSION },
-                window.location.origin
+                storageMode === 'bridged' ? '*' : window.location.origin
             );
         } catch (e) {}
 
         handshakeTimer = setTimeout(function () {
             handshakeTimer = null;
             // No welcome — assume standalone-in-iframe and unblock callers.
+            // Bridged frames keep their pending-write queue armed: if a slow
+            // launcher's welcome lands late, the queue still reconciles
+            // (context.framed flips — the documented late-welcome caveat).
             framed = false;
             peerStatus = 'unavailable';
             resolveReady();
-        }, HANDSHAKE_TIMEOUT_MS);
+        }, storageMode === 'bridged' ? BRIDGED_HANDSHAKE_TIMEOUT_MS : HANDSHAKE_TIMEOUT_MS);
 
         return api;
     }
@@ -778,6 +1055,17 @@
             list.splice(i, 1);
             writeJSON(noExportListKey(), list.length ? list : undefined);
         }
+    }
+    function runMigration(version, fn) {
+        var sentinel = migratedSentinelKey(version);
+        if (readJSON(sentinel) === true) return false;
+        try { fn(); }
+        catch (e) {
+            console.error('[Arcade SDK] migration "' + version + '" threw:', e);
+            return false;
+        }
+        writeJSON(sentinel, true);
+        return true;
     }
     var stateApi = {
         get: function (key) { ensureGameId(); return readJSON(gameKey(key)); },
@@ -831,15 +1119,16 @@
             if (typeof fn !== 'function') {
                 throw new Error('Arcade.state.migrate: fn must be a function');
             }
-            var sentinel = migratedSentinelKey(version);
-            if (readJSON(sentinel) === true) return false;
-            try { fn(); }
-            catch (e) {
-                console.error('[Arcade SDK] migration "' + version + '" threw:', e);
-                return false;
+            // Bridged mode before the snapshot: the sentinel AND the data the
+            // callback would read haven't arrived — running now would re-run
+            // completed migrations against empty state. Defer to post-welcome;
+            // games call migrate() before their own ready.then(boot), so FIFO
+            // ordering still runs the migration before boot code.
+            if (storageMode === 'bridged' && !snapshotSeeded) {
+                readyPromise.then(function () { runMigration(version, fn); });
+                return false; // deferred — result unknowable synchronously
             }
-            writeJSON(sentinel, true);
-            return true;
+            return runMigration(version, fn);
         },
         // Adopt a legacy (non-namespaced) localStorage key into the game's
         // namespace: read → namespaced write → delete original. Error-safe:
@@ -956,9 +1245,9 @@
         // P2P layer has generated one (i.e. before the first ever pairing).
         self: function () {
             try {
-                var id = localStorage.getItem(KEY_PREFIX + '_meta.deviceId');
+                var id = rawGet(KEY_PREFIX + '_meta.deviceId');
                 if (!id) return null;
-                var name = localStorage.getItem(KEY_PREFIX + '_meta.deviceName');
+                var name = rawGet(KEY_PREFIX + '_meta.deviceName');
                 return { deviceId: id, name: name || 'My device' };
             } catch (e) { return null; }
         },
@@ -1516,11 +1805,55 @@
         if (!STORE_NAME_RE.test(n)) throw new Error('Arcade.store.open: name must match /^[a-z0-9_-]{1,64}$/');
         return KEY_PREFIX + gameId + '.store.' + n;
     }
+    // Bridged Arcade.store handle — same surface, ops ride the launcher
+    // bridge. The launcher derives the real DB name from the FRAME's mounted
+    // gameId (never from anything this side sends), so a store op can only
+    // ever touch this app's own arcade.v1.<gameId>.store.* databases.
+    function bridgedStoreHandle(name) {
+        var n = (name === undefined || name === null) ? 'default' : String(name);
+        if (!STORE_NAME_RE.test(n)) throw new Error('Arcade.store.open: name must match /^[a-z0-9_-]{1,64}$/');
+        function op(fields) {
+            fields.name = n;
+            return bridgeRpc('arcade:store.op', fields);
+        }
+        return {
+            get: function (key) {
+                return op({ op: 'get', key: String(key) })
+                    .then(function (v) { return v === undefined || v === null ? null : v; });
+            },
+            set: function (key, value) {
+                return op({ op: 'set', key: String(key), value: value }).then(function () { return true; });
+            },
+            del: function (key) {
+                return op({ op: 'del', key: String(key) }).then(function () { return true; });
+            },
+            keys: function () {
+                return op({ op: 'keys' }).then(function (ks) { return Array.isArray(ks) ? ks : []; });
+            },
+            each: function (fn) {
+                // Cursor semantics emulated over one entries round-trip —
+                // bridged stores are small-to-medium; a paged cursor can come
+                // later behind the same signature if that stops being true.
+                return op({ op: 'entries' }).then(function (ents) {
+                    if (!Array.isArray(ents)) return;
+                    for (var i = 0; i < ents.length; i++) {
+                        var ent = ents[i];
+                        if (!ent) continue;
+                        try { fn(ent[1], ent[0]); } catch (e) {}
+                    }
+                });
+            },
+            clear: function () {
+                return op({ op: 'clear' }).then(function () { return true; });
+            }
+        };
+    }
     var storeApi = {
         // open(name?) → a handle whose get/set/del/keys/each/clear all return
         // promises. Distinct names are fully isolated stores.
         open: function (name) {
             ensureGameId();
+            if (storageMode === 'bridged') return bridgedStoreHandle(name);
             var dbName = storeDbName(name);
             return {
                 get: function (key) {
@@ -1582,6 +1915,10 @@
             var n = String(name);
             if (!FILE_NAME_RE.test(n)) return Promise.reject(new Error('Arcade.files: name must match /^[a-z0-9._-]{1,128}$/'));
             if (!(blob instanceof Blob)) blob = new Blob([blob]);
+            if (storageMode === 'bridged') {
+                return bridgeRpc('arcade:files.op', { op: 'put', name: n, blob: blob })
+                    .then(function () { return true; });
+            }
             if (opfsAvailable()) {
                 return opfsDir().then(function (dir) {
                     return dir.getFileHandle(n, { create: true }).then(function (fh) {
@@ -1598,6 +1935,11 @@
         get: function (name) {
             ensureGameId();
             var n = String(name);
+            if (storageMode === 'bridged') {
+                return bridgeRpc('arcade:files.op', { op: 'get', name: n })
+                    .then(function (b) { return (b instanceof Blob) ? b : null; })
+                    .catch(function () { return null; });
+            }
             if (opfsAvailable()) {
                 return opfsDir().then(function (dir) {
                     return dir.getFileHandle(n, { create: false }).then(function (fh) { return fh.getFile(); });
@@ -1609,6 +1951,11 @@
         },
         list: function () {
             ensureGameId();
+            if (storageMode === 'bridged') {
+                return bridgeRpc('arcade:files.op', { op: 'list' })
+                    .then(function (l) { return Array.isArray(l) ? l : []; })
+                    .catch(function () { return []; });
+            }
             if (opfsAvailable()) {
                 return opfsDir().then(function (dir) {
                     var out = [];
@@ -1633,6 +1980,11 @@
         'delete': function (name) {
             ensureGameId();
             var n = String(name);
+            if (storageMode === 'bridged') {
+                return bridgeRpc('arcade:files.op', { op: 'delete', name: n })
+                    .then(function (r) { return r !== false; })
+                    .catch(function () { return false; });
+            }
             if (opfsAvailable()) {
                 return opfsDir().then(function (dir) { return dir.removeEntry(n); })
                     .then(function () { return true; }).catch(function () { return false; });
@@ -1648,19 +2000,35 @@
     // evict this origin's data under storage pressure — the launcher calls it
     // on boot; apps may call it too.
     var storageApi = {
+        // Bridged mode proxies these to the launcher — storage was always
+        // origin-wide, so the launcher's numbers ARE this app's numbers.
         estimate: function () {
+            if (storageMode === 'bridged') {
+                return bridgeRpc('arcade:storage.op', { op: 'estimate' })
+                    .catch(function () { return { usage: undefined, quota: undefined }; });
+            }
             if (navigator.storage && navigator.storage.estimate) {
                 return navigator.storage.estimate();
             }
             return Promise.resolve({ usage: undefined, quota: undefined });
         },
         persisted: function () {
+            if (storageMode === 'bridged') {
+                return bridgeRpc('arcade:storage.op', { op: 'persisted' })
+                    .then(function (v) { return v === true; })
+                    .catch(function () { return false; });
+            }
             if (navigator.storage && navigator.storage.persisted) {
                 return navigator.storage.persisted();
             }
             return Promise.resolve(false);
         },
         persist: function () {
+            if (storageMode === 'bridged') {
+                return bridgeRpc('arcade:storage.op', { op: 'persist' })
+                    .then(function (v) { return v === true; })
+                    .catch(function () { return false; });
+            }
             if (navigator.storage && navigator.storage.persist) {
                 return navigator.storage.persist();
             }
@@ -1673,7 +2041,14 @@
         init: init,
         get ready() { return readyPromise; },
         get context() {
-            return { framed: framed, version: VERSION, gameId: gameId, suspended: suspendedNow };
+            return {
+                framed: framed, version: VERSION, gameId: gameId, suspended: suspendedNow,
+                // 'direct'  — this document owns its origin storage.
+                // 'bridged' — opaque-origin frame, storage rides the launcher.
+                // 'memory'  — opaque-origin frame and no launcher answered:
+                //             state lives for this session only.
+                storage: storageMode === 'direct' ? 'direct' : (framed ? 'bridged' : 'memory')
+            };
         },
         state: stateApi,
         global: globalApi,

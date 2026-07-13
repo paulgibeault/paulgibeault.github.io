@@ -135,14 +135,33 @@ All messages namespaced `arcade:` to avoid collision.
 ### Handshake
 
 ```
-child → parent:  { type: 'arcade:hello',   gameId, version: 2 }
+child → parent:  { type: 'arcade:hello',   gameId, version: 3 }
 parent → child:  { type: 'arcade:welcome', version: 2, peerStatus: 'idle',
-                   caps: ['peer.sendTo', 'peer.roster', 'peer.meta'],  // capability flags (absent ⇒ [])
+                   caps: ['peer.sendTo', 'peer.roster', 'peer.meta', 'storage.bridge'],  // capability flags (absent ⇒ [])
                    peers: [{ deviceId, name, status, direct }, ...],   // live remote devices (roster seed)
-                   settings: { fontScale, theme, reducedMotion, audioVolume, handedness } }
+                   settings: { fontScale, theme, reducedMotion, audioVolume, handedness },
+                   state: { '<fullKey>': '<raw string>', ... } }       // storage-bridge snapshot: the app's own
+                                                                       // keys + global.* + _meta identity/dev
 ```
 
-If no `welcome` arrives within ~300ms, SDK locks into standalone mode.
+If no `welcome` arrives within ~300ms (2s in an opaque-origin frame, where there's no storage to fall back to), the SDK locks into standalone mode.
+
+Frames are sandboxed without `allow-same-origin`, so their `e.origin` is the literal string `'null'` and both sides post with `targetOrigin '*'`; the SDK pins the first welcome's origin and requires it on every later message.
+
+### Storage bridge (opaque-origin frames)
+
+```
+child  → parent: { type: 'arcade:state.write',   key, value }      // value: raw string, or null = remove.
+                                                                   // Launcher enforces: own namespace, global.*, or _meta.dev only.
+parent → child:  { type: 'arcade:state.writeError', key, error }   // launcher-side quota failure → Arcade.onStorageError
+parent → child:  { type: 'arcade:state.changed',  key, value }     // shared-key change made by launcher/another frame
+child  → parent: { type: 'arcade:store.op',   id, name, op, key?, value? }  // op: get|set|del|keys|entries|clear
+child  → parent: { type: 'arcade:files.op',   id, op, name?, blob? }        // op: put|get|list|delete (Blobs structured-clone)
+child  → parent: { type: 'arcade:storage.op', id, op }                      // op: estimate|persisted|persist
+parent → child:  { type: 'arcade:bridge.result', id, ok, value?, error? }   // one reply channel for the three op types
+```
+
+The launcher derives every path from the FRAME's mounted gameId — nothing an app sends can widen its reach.
 
 ### Multiplayer & lifecycle
 
@@ -155,14 +174,14 @@ parent → child:  { type: 'arcade:peer.roster',       peers }               // 
 parent → child:  { type: 'arcade:peer.identity',     deviceId, name }      // roster update (legacy single-peer)
 parent → child:  { type: 'arcade:peer.ready',        deviceId, name }      // remote same-game listening
 parent → child:  { type: 'arcade:peer.queue',        depth, limit, overflowed } // replay-queue visibility
-parent → child:  { type: 'arcade:state.replaced' }               // after file import
+parent → child:  { type: 'arcade:state.replaced', state }         // after file import (state = fresh snapshot)
 parent → child:  { type: 'arcade:settings.changed',  settings }  // launcher setting updated
 parent → child:  { type: 'arcade:lifecycle.suspend' }             // iframe hidden, or about to be evicted
 parent → child:  { type: 'arcade:lifecycle.resume' }              // iframe shown
 child  → parent: { type: 'arcade:ui.toast',          message, kind, duration }
 ```
 
-Fourteen message types total (see GAME_INTEGRATION.md §14 for the full summary table). The launcher routes peer messages by `gameId` so multiple games could in principle multiplex one connection, though the current design assumes one foreground game at a time. Between launchers, presence frames (`{arcade:1, kind:'presence'|'presence-ack', gameId}`) announce that a game is mounted and listening; the receiving launcher surfaces them to the matching game as `arcade:peer.ready`.
+Twenty-one message types total (see GAME_INTEGRATION.md §14 for the full summary table). The launcher routes peer messages by `gameId` so multiple games could in principle multiplex one connection, though the current design assumes one foreground game at a time. Between launchers, presence frames (`{arcade:1, kind:'presence'|'presence-ack', gameId}`) announce that a game is mounted and listening; the receiving launcher surfaces them to the matching game as `arcade:peer.ready`.
 
 **Legacy compatibility shim:** a small number of older games (e.g. hecknsic) shipped their own postMessage-backed `localStorage` override before the SDK existed. The launcher still answers that game's `'ls-proxy-request'`/`'ls-proxy-response'` protocol (namespaced into `arcade.v1.<gameId>.ls.<key>`) purely so those games don't hang — this is launcher-side legacy support, not part of the `arcade:` protocol, and new games should use `Arcade.state.*` directly rather than rolling a shim of their own.
 
@@ -271,7 +290,7 @@ The launcher menu's Network section is a single "Multiplayer" item (`#connection
 
 | Scope          | Key / DB shape                          | Owner                                       |
 | -------------- | --------------------------------------- | ------------------------------------------- |
-| Per-game       | `arcade.v1.<gameId>.<key>`              | Game writes; launcher reads only for export |
+| Per-game       | `arcade.v1.<gameId>.<key>`              | Game-owned; written by the launcher on the game's behalf when framed (storage bridge), directly when standalone |
 | Global         | `arcade.v1.global.<key>`                | Any game or launcher                        |
 | Launcher meta  | `arcade.v1._meta.<key>`                 | Launcher only                               |
 | Per-game KV    | IndexedDB `arcade.v1.<gameId>.store.<name>` | `Arcade.store` — large/structured data  |
@@ -281,15 +300,23 @@ The `arcade.v1.` prefix is the **only** thing the export/import logic trusts. Ke
 
 ---
 
-## Trust model — first-party fleet
+## Trust model — first-party fleet, opaque-origin frames
 
-The platform's current posture is a **first-party fleet**: every catalog app is authored by the same owner, all apps are same-origin with the launcher, and storage namespacing (`arcade.v1.<gameId>.*`) is a **cooperative convention, not a security sandbox**. A same-origin app *can* technically read another app's storage or reach the launcher — this is acceptable precisely because all apps are trusted first-party code.
+The platform's posture is a **first-party fleet**: every catalog app is authored by the same owner and served from the launcher's origin. Apps are trusted — but since issue #43 they are no longer *storage-privileged*: the launcher mounts every app in a sandboxed iframe **without `allow-same-origin`**, so a mounted app runs with an opaque origin and **cannot open any of the origin's storage** — not another app's state, and above all not the P2P key stores (`qrp2p-identity` / `qrp2p-rendezvous`, whose non-extractable-but-usable keys would let a compromised app impersonate the device on the rendezvous dead-drop or launder fingerprint pins).
 
-Two things remain **untrusted** even under this posture, and keep their hard guards:
+An app's own persistence rides the **storage bridge** instead: the SDK transparently proxies `Arcade.state/store/files/storage` over postMessage to the launcher, which enforces the namespace at the trust boundary — a frame can write only `arcade.v1.<its-gameId>.*`, the shared `arcade.v1.global.*` keys, and the `_meta.dev` flag; device-identity meta is readable (welcome snapshot) but not writable. Data lives under the same `arcade.v1.*` names as before, so export/import and every pre-existing save are untouched. Enforced by `tools/bridge-acceptance.mjs` in CI: the frame cannot open the key stores, the launcher can, and namespace violations are refused.
+
+What this buys concretely: **an XSS or supply-chain compromise in one game is now contained to that game's own data** instead of the whole origin (the sowduku stored-XSS was the precedent). It is still not multi-tenant isolation — apps remain first-party-trusted code, and the launcher document is the root of trust.
+
+Two things remain **untrusted** as always, and keep their hard guards:
 - **Imported save files** — treated as hostile input (allowlist, checksum, per-key validation, staged commit; see below).
 - **Peer-supplied payloads** — names/ids/messages from a remote device must be escaped before rendering (`Arcade.html.escape`) and validated before use.
 
-True multi-tenant isolation (untrusted third-party apps on a sandboxed sub-origin, a capability/permission model, storage brokered over postMessage) is a deliberate **v2 epic**, deferred so it isn't back-doored into the same-origin model. See the fleet issue tracker.
+True multi-tenant isolation (untrusted third-party apps, user-added app URLs, a capability/permission model) remains the **v2 epic** — the storage bridge built here is its foundation piece, pulled forward.
+
+Known trade-offs of the opaque-frame move:
+- **No service worker inside launcher frames** — a game's SW cannot control an opaque-origin frame, so offline play *inside the launcher* falls back to the HTTP cache (standalone visits to the game's URL still register its SW normally). The SDK shims `navigator.serviceWorker` with an inert stub in frames so legacy registration code degrades gracefully.
+- **Raw `localStorage` access from game code no longer works when framed** — everything must go through the SDK (all catalog games already do); legacy-key migrations that read pre-SDK keys become safe no-ops in frames.
 
 ---
 

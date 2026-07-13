@@ -802,18 +802,21 @@
             const iframe = document.createElement('iframe');
             iframe.src = src;
             iframe.dataset.gameId = gameId;
-            iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-downloads');
+            // No allow-same-origin: games run with an OPAQUE origin, so they
+            // cannot open ANY of this origin's storage — other apps' state,
+            // and above all the P2P key stores (qrp2p-identity /
+            // qrp2p-rendezvous, non-extractable but usable). This is the
+            // first-party trust boundary made real (issue #43); their own
+            // persistence rides the storage bridge below instead.
+            iframe.setAttribute('sandbox', 'allow-scripts allow-downloads');
+            // Opaque origin no longer matches the default 'self' permissions-
+            // policy allowlists — grant the game-relevant features explicitly.
+            iframe.setAttribute('allow', 'autoplay; fullscreen; gamepad; screen-wake-lock');
             iframe.setAttribute('allowfullscreen', '');
             iframe.setAttribute('title', name);
             iframe.hidden = true;
             iframeHost.appendChild(iframe);
-            // Captured at mount so postMessage targets the iframe's real origin —
-            // games can be hosted at a different origin than the launcher (e.g.
-            // launcher on localhost, game on github.io during dev).
-            let origin;
-            try { origin = new URL(src, window.location.href).origin; }
-            catch (e) { origin = window.location.origin; }
-            entry = { iframe, name, origin };
+            entry = { iframe, name };
             pool.set(gameId, entry);
             return entry;
         }
@@ -868,10 +871,12 @@
         // talk only to the SDK; this is the launcher end of arcade:peer.*.
         let p2pBridge = null;
         let p2pLoadPromise = null;
-        // Peer-layer capability flags shipped in arcade:welcome. Games
-        // feature-detect via Arcade.peer.caps() instead of version checks —
-        // additive launcher features never bump the protocol version.
-        const ARCADE_PEER_CAPS = ['peer.sendTo', 'peer.roster', 'peer.meta'];
+        // Capability flags shipped in arcade:welcome. Games feature-detect
+        // via Arcade.peer.caps() instead of version checks — additive
+        // launcher features never bump the protocol version. storage.bridge:
+        // this launcher hosts the opaque-frame storage bridge (state.write /
+        // store.op / files.op / storage.op + welcome.state snapshot).
+        const ARCADE_PEER_CAPS = ['peer.sendTo', 'peer.roster', 'peer.meta', 'storage.bridge'];
         function loadP2P() {
             if (p2pBridge) return Promise.resolve(p2pBridge);
             if (p2pLoadPromise) return p2pLoadPromise;
@@ -1098,7 +1103,12 @@
             const entry = pool.get(gameId);
             if (!entry || !entry.iframe.contentWindow) return;
             if (devModeOn()) console.debug('[Arcade launcher → ' + gameId + ']', msg);
-            entry.iframe.contentWindow.postMessage(msg, entry.origin || window.location.origin);
+            // '*' because an opaque origin can't be named as a targetOrigin.
+            // The recipient is a frame WE created and sandboxed; the residual
+            // (a frame that self-navigated away receiving game-scoped
+            // messages) requires code execution inside the frame — the same
+            // capability the bridge already grants that gameId.
+            entry.iframe.contentWindow.postMessage(msg, '*');
         }
 
         function broadcast(msg) {
@@ -1155,21 +1165,257 @@
                     }
                 }
             } catch (err) { /* leave ok:false */ }
-            try { source.postMessage(reply, origin); } catch (err) {}
+            // '*': an opaque-origin requester can't be named as targetOrigin.
+            try { source.postMessage(reply, '*'); } catch (err) {}
+        }
+
+        // ---- storage bridge (opaque-origin frames) ----
+        // Games run sandboxed without allow-same-origin (see ensureIframe),
+        // so the launcher is their storage custodian. Everything here derives
+        // paths from the FRAME's mounted gameId — nothing a frame sends can
+        // widen its reach beyond its own arcade.v1.<gameId> tree plus the
+        // shared global.* keys.
+        const BRIDGE_VALUE_MAX = 2 * 1024 * 1024; // per-key sanity cap
+        const SETTINGS_KEY_RE = /^arcade\.v1\.global\.(fontScale|theme|reducedMotion|audioVolume|handedness)$/;
+
+        function stateSnapshotFor(gameId) {
+            const out = {};
+            const own = KEY_PREFIX + gameId + '.';
+            const glob = KEY_PREFIX + 'global.';
+            // Shared read-only literals: the device identity meta the SDK's
+            // peer.self() reports, and the dev-tracing flag.
+            const literals = [
+                KEY_PREFIX + '_meta.deviceId',
+                KEY_PREFIX + '_meta.deviceName',
+                KEY_PREFIX + '_meta.dev'
+            ];
+            try {
+                for (let i = 0; i < localStorage.length; i++) {
+                    const k = localStorage.key(i);
+                    if (!k) continue;
+                    if (k.startsWith(own) || k.startsWith(glob) || literals.includes(k)) {
+                        const v = localStorage.getItem(k);
+                        if (typeof v === 'string') out[k] = v;
+                    }
+                }
+            } catch (e) {}
+            return out;
+        }
+
+        function bridgeKeyWritable(gameId, key) {
+            if (typeof key !== 'string' || key.length > 512) return false;
+            if (key === KEY_PREFIX + '_meta.dev') return true;
+            if (!isSafeArcadeKey(key)) return false;
+            return key.startsWith(KEY_PREFIX + gameId + '.')
+                || key.startsWith(KEY_PREFIX + 'global.');
+        }
+
+        function handleBridgedStateWrite(gameId, data) {
+            const key = data.key;
+            if (!bridgeKeyWritable(gameId, key)) return;
+            const value = (data.value === undefined) ? null : data.value;
+            if (value !== null && (typeof value !== 'string' || value.length > BRIDGE_VALUE_MAX)) {
+                postToIframe(gameId, { type: 'arcade:state.writeError', key: key, error: 'value rejected (must be a string ≤ 2 MB)' });
+                return;
+            }
+            try {
+                if (value === null) localStorage.removeItem(key);
+                else localStorage.setItem(key, value);
+            } catch (e) {
+                postToIframe(gameId, { type: 'arcade:state.writeError', key: key, error: 'storage quota exceeded' });
+                return;
+            }
+            // Shared keys: other frames' storage events never fire for a
+            // launcher-document write — push the change to them explicitly.
+            const shared = key.startsWith(KEY_PREFIX + 'global.') || key === KEY_PREFIX + '_meta.dev';
+            if (!shared) return;
+            for (const gid of pool.keys()) {
+                if (gid !== gameId) postToIframe(gid, { type: 'arcade:state.changed', key: key, value: value });
+            }
+            // A game writing a launcher-managed setting (e.g. handedness)
+            // must reach every frame's settings stream too.
+            if (SETTINGS_KEY_RE.test(key)) window.__arcade.broadcastSettings();
+        }
+
+        function bridgeReply(gameId, id, ok, value, error) {
+            const msg = { type: 'arcade:bridge.result', id: id, ok: ok };
+            if (ok) msg.value = value === undefined ? null : value;
+            else msg.error = String(error || 'operation failed');
+            postToIframe(gameId, msg);
+        }
+        function validRpcId(id) { return typeof id === 'string' && id.length >= 1 && id.length <= 32; }
+
+        const STORE_NAME_RE = /^[a-z0-9_-]{1,64}$/i;
+        async function handleStoreOp(gameId, data) {
+            if (!validRpcId(data.id)) return;
+            const name = (data.name === undefined || data.name === null) ? 'default' : String(data.name);
+            if (!STORE_NAME_RE.test(name)) return bridgeReply(gameId, data.id, false, undefined, 'bad store name');
+            const dbName = KEY_PREFIX + gameId + '.store.' + name;
+            try {
+                const db = await idbOpen(dbName);
+                try {
+                    switch (data.op) {
+                        case 'get': {
+                            const v = await idbGet(db, String(data.key));
+                            return bridgeReply(gameId, data.id, true, v === undefined ? null : v);
+                        }
+                        case 'set':
+                            await idbPut(db, String(data.key), data.value);
+                            return bridgeReply(gameId, data.id, true, true);
+                        case 'del':
+                            await idbDel(db, String(data.key));
+                            return bridgeReply(gameId, data.id, true, true);
+                        case 'keys': {
+                            const rows = await idbAll(db);
+                            return bridgeReply(gameId, data.id, true, rows.map((r) => r.key));
+                        }
+                        case 'entries': {
+                            const rows = await idbAll(db);
+                            return bridgeReply(gameId, data.id, true, rows.map((r) => [r.key, r.value]));
+                        }
+                        case 'clear':
+                            await idbClear(db);
+                            return bridgeReply(gameId, data.id, true, true);
+                        default:
+                            return bridgeReply(gameId, data.id, false, undefined, 'unknown store op');
+                    }
+                } finally { db.close(); }
+            } catch (e) {
+                return bridgeReply(gameId, data.id, false, undefined, (e && e.message) || 'store op failed');
+            }
+        }
+
+        // Mirrors the SDK's direct-mode backend choice exactly (OPFS when
+        // navigator.storage.getDirectory exists, per-app IDB '.files'
+        // otherwise) so data written before this launcher version — or via
+        // save import — is found where the game itself would have put it.
+        const BRIDGE_FILE_NAME_RE = /^[a-z0-9._-]{1,128}$/i;
+        async function handleFilesOp(gameId, data) {
+            if (!validRpcId(data.id)) return;
+            const dir = KEY_PREFIX + gameId;
+            const opfs = !!(navigator.storage && navigator.storage.getDirectory);
+            try {
+                switch (data.op) {
+                    case 'put': {
+                        const n = String(data.name);
+                        if (!BRIDGE_FILE_NAME_RE.test(n)) return bridgeReply(gameId, data.id, false, undefined, 'bad file name');
+                        if (!(data.blob instanceof Blob)) return bridgeReply(gameId, data.id, false, undefined, 'not a Blob');
+                        if (opfs) {
+                            const root = await navigator.storage.getDirectory();
+                            const d = await root.getDirectoryHandle(dir, { create: true });
+                            const fh = await d.getFileHandle(n, { create: true });
+                            const w = await fh.createWritable();
+                            await w.write(data.blob); await w.close();
+                        } else {
+                            const db = await idbOpen(dir + '.files');
+                            try { await idbPut(db, n, { blob: data.blob, size: data.blob.size, type: data.blob.type }); }
+                            finally { db.close(); }
+                        }
+                        return bridgeReply(gameId, data.id, true, true);
+                    }
+                    case 'get': {
+                        const n = String(data.name);
+                        if (!BRIDGE_FILE_NAME_RE.test(n)) return bridgeReply(gameId, data.id, true, null);
+                        if (opfs) {
+                            try {
+                                const root = await navigator.storage.getDirectory();
+                                const d = await root.getDirectoryHandle(dir, { create: false });
+                                const fh = await d.getFileHandle(n, { create: false });
+                                return bridgeReply(gameId, data.id, true, await fh.getFile());
+                            } catch (e) { return bridgeReply(gameId, data.id, true, null); }
+                        }
+                        try {
+                            const db = await idbOpen(dir + '.files');
+                            let rec; try { rec = await idbGet(db, n); } finally { db.close(); }
+                            return bridgeReply(gameId, data.id, true, (rec && rec.blob instanceof Blob) ? rec.blob : null);
+                        } catch (e) { return bridgeReply(gameId, data.id, true, null); }
+                    }
+                    case 'list': {
+                        const items = [];
+                        if (opfs) {
+                            try {
+                                const root = await navigator.storage.getDirectory();
+                                const d = await root.getDirectoryHandle(dir, { create: false });
+                                for await (const h of d.values()) {
+                                    if (h.kind !== 'file') continue;
+                                    const f = await h.getFile();
+                                    items.push({ name: h.name, size: f.size });
+                                }
+                            } catch (e) { /* no dir yet → [] */ }
+                            return bridgeReply(gameId, data.id, true, items);
+                        }
+                        try {
+                            const db = await idbOpen(dir + '.files');
+                            let rows; try { rows = await idbAll(db); } finally { db.close(); }
+                            for (const r of rows) {
+                                items.push({ name: String(r.key), size: (r.value && r.value.size) || 0 });
+                            }
+                        } catch (e) {}
+                        return bridgeReply(gameId, data.id, true, items);
+                    }
+                    case 'delete': {
+                        const n = String(data.name);
+                        if (!BRIDGE_FILE_NAME_RE.test(n)) return bridgeReply(gameId, data.id, true, false);
+                        if (opfs) {
+                            try {
+                                const root = await navigator.storage.getDirectory();
+                                const d = await root.getDirectoryHandle(dir, { create: false });
+                                await d.removeEntry(n);
+                                return bridgeReply(gameId, data.id, true, true);
+                            } catch (e) { return bridgeReply(gameId, data.id, true, false); }
+                        }
+                        try {
+                            const db = await idbOpen(dir + '.files');
+                            try { await idbDel(db, n); } finally { db.close(); }
+                            return bridgeReply(gameId, data.id, true, true);
+                        } catch (e) { return bridgeReply(gameId, data.id, true, false); }
+                    }
+                    default:
+                        return bridgeReply(gameId, data.id, false, undefined, 'unknown files op');
+                }
+            } catch (e) {
+                return bridgeReply(gameId, data.id, false, undefined, (e && e.message) || 'files op failed');
+            }
+        }
+
+        async function handleStorageOp(gameId, data) {
+            if (!validRpcId(data.id)) return;
+            try {
+                switch (data.op) {
+                    case 'estimate': {
+                        if (navigator.storage && navigator.storage.estimate) {
+                            const est = await navigator.storage.estimate();
+                            return bridgeReply(gameId, data.id, true, { usage: est.usage, quota: est.quota });
+                        }
+                        return bridgeReply(gameId, data.id, true, { usage: undefined, quota: undefined });
+                    }
+                    case 'persisted':
+                        return bridgeReply(gameId, data.id, true,
+                            (navigator.storage && navigator.storage.persisted) ? await navigator.storage.persisted() : false);
+                    case 'persist':
+                        return bridgeReply(gameId, data.id, true,
+                            (navigator.storage && navigator.storage.persist) ? await navigator.storage.persist() : false);
+                    default:
+                        return bridgeReply(gameId, data.id, false, undefined, 'unknown storage op');
+                }
+            } catch (e) {
+                return bridgeReply(gameId, data.id, false, undefined, (e && e.message) || 'storage op failed');
+            }
         }
 
         window.addEventListener('message', (e) => {
-            // Two guards, both load-bearing. Source: only iframes we mounted
-            // via ensureIframe can match. Origin: the sandbox doesn't stop a
-            // frame from navigating ITSELF cross-origin (a stray <a href>
-            // suffices), and afterwards e.source still matches the pool entry
-            // — so we also require the message's origin to equal the origin
-            // captured at mount. Local dev stages games same-origin, and a
-            // cross-origin-mounted game's real origin is what ensureIframe
-            // recorded, so both setups pass without special-casing.
+            // Two guards. Source: only iframes we mounted via ensureIframe
+            // can match. Origin: sandboxed-without-allow-same-origin frames
+            // always report the literal string 'null' — anything else means
+            // a non-sandboxed document somehow speaks from a pooled frame
+            // (should be impossible; reject on principle). Note 'null' no
+            // longer discriminates a frame that navigated ITSELF elsewhere
+            // (both are opaque) — that needs code exec inside the frame,
+            // which already carries exactly the bridge powers of that
+            // gameId, nothing more.
             const [gameId, entry] = findPoolEntryForSource(e.source);
             if (!gameId) return;
-            if (e.origin !== entry.origin) return;
+            if (e.origin !== 'null') return;
             const data = e.data;
             if (!data || typeof data !== 'object') return;
             const t = data.type;
@@ -1196,7 +1442,11 @@
                         caps: ARCADE_PEER_CAPS,
                         peerStatus: p2pBridge ? p2pBridge.status() : 'idle',
                         peers: p2pBridge ? p2pBridge.connectedPeers() : [],
-                        settings: currentSettings()
+                        settings: currentSettings(),
+                        // Opaque frames can't read localStorage — this seeds
+                        // the SDK's state cache (its keys, global.*, and the
+                        // shared _meta identity/dev literals).
+                        state: stateSnapshotFor(gameId)
                     });
                     // If this game is the active one, also send a resume hint
                     // (the game's SDK may have missed the showGame() resume if
@@ -1228,6 +1478,25 @@
                             postToIframe(gameId, { type: 'arcade:peer.queue', ...p2pBridge.queueSnapshot() });
                         }
                     }
+                    break;
+                case 'arcade:state.write':
+                    // Bridged localStorage write-through. The KEY names the
+                    // whole permission: this frame's own namespace, the
+                    // shared global.* namespace, or the _meta.dev literal —
+                    // never another app's namespace, never other _meta.*
+                    // (device identity stays read-only), and structurally
+                    // never the qrp2p-* key stores.
+                    handleBridgedStateWrite(gameId, data);
+                    break;
+                case 'arcade:store.op':
+                    // Async — replies with arcade:bridge.result when done.
+                    handleStoreOp(gameId, data);
+                    break;
+                case 'arcade:files.op':
+                    handleFilesOp(gameId, data);
+                    break;
+                case 'arcade:storage.op':
+                    handleStorageOp(gameId, data);
                     break;
                 case 'arcade:ui.toast':
                     // Game asked the launcher to display a toast.
@@ -1396,6 +1665,29 @@
             return new Promise((resolve, reject) => {
                 const tx = db.transaction('kv', 'readwrite');
                 tx.objectStore('kv').put(value, key);
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+        }
+        function idbGet(db, key) {
+            return new Promise((resolve, reject) => {
+                const req = db.transaction('kv', 'readonly').objectStore('kv').get(key);
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject(req.error);
+            });
+        }
+        function idbDel(db, key) {
+            return new Promise((resolve, reject) => {
+                const tx = db.transaction('kv', 'readwrite');
+                tx.objectStore('kv').delete(key);
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+        }
+        function idbClear(db) {
+            return new Promise((resolve, reject) => {
+                const tx = db.transaction('kv', 'readwrite');
+                tx.objectStore('kv').clear();
                 tx.oncomplete = () => resolve();
                 tx.onerror = () => reject(tx.error);
             });
@@ -1806,9 +2098,11 @@
                     asyncNote = ' — note: some app data could not be restored (your auto-backup has the original)';
                 }
             }
-            // Notify mounted iframes; same-origin storage events also fire
-            // automatically, so listeners catch the change via either path.
-            broadcast({ type: 'arcade:state.replaced' });
+            // Notify mounted iframes. Opaque frames can't see storage events
+            // — each gets its fresh post-import snapshot to reseed its cache.
+            for (const gid of pool.keys()) {
+                postToIframe(gid, { type: 'arcade:state.replaced', state: stateSnapshotFor(gid) });
+            }
             showToast('Imported ' + cleanKeys.length + ' keys' + asyncNote + ' successfully.');
         }
 
