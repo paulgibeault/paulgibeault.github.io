@@ -18,133 +18,26 @@
 //
 // Exit code: 0 if all checks pass, 1 otherwise.
 
-import { chromium } from 'playwright';
-import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
-import http from 'node:http';
+import { startP2PHarness, makeCheck } from './lib/p2p-test-harness.mjs';
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const PORT = 4797;
-const DROP_PORT = 4796;
-const BASE = `http://127.0.0.1:${PORT}`;
+const { check, failed } = makeCheck();
+const harness = await startP2PHarness({ port: 4797, dropPort: 4796 });
+const { bootBridge, deviceIdOf } = harness;
 
-// In-test dead-drop standing in for the public MQTT broker (see
-// p2p-acceptance.mjs for the pattern).
-const dropTopics = new Map();
-const dropServer = http.createServer((req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    const u = new URL(req.url, 'http://x');
-    const topic = u.searchParams.get('t') || '';
-    if (req.method === 'POST' && u.pathname === '/pub') {
-        let body = '';
-        req.on('data', c => body += c);
-        req.on('end', () => {
-            if (!dropTopics.has(topic)) dropTopics.set(topic, []);
-            dropTopics.get(topic).push(body);
-            res.end('ok');
-        });
-    } else if (u.pathname === '/sub') {
-        const arr = dropTopics.get(topic) || [];
-        const since = parseInt(u.searchParams.get('since') || '0', 10);
-        res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ msgs: arr.slice(since), next: arr.length }));
-    } else res.end('');
-});
-dropServer.listen(DROP_PORT);
-
-const HTTP_CARRIER = `
-    window.__arcadeRdvCarrierFactory = () => ({
-        base: 'http://127.0.0.1:${DROP_PORT}',
-        subs: new Map(),
-        timer: null,
-        async connect() { if (!this.timer) this.timer = setInterval(() => this._poll(), 120); },
-        async _poll() {
-            for (const [topic, st] of this.subs) {
-                try {
-                    const r = await fetch(this.base + '/sub?t=' + topic + '&since=' + st.next);
-                    const j = await r.json();
-                    st.next = j.next;
-                    j.msgs.forEach(m => st.cbs.forEach(cb => { try { cb(m); } catch (e) {} }));
-                } catch (e) {}
-            }
-        },
-        async publish(topic, payload) { await fetch(this.base + '/pub?t=' + topic, { method: 'POST', body: payload }); },
-        subscribe(topic, cb) {
-            if (!this.subs.has(topic)) this.subs.set(topic, { next: 0, cbs: new Set() });
-            const st = this.subs.get(topic);
-            st.cbs.add(cb);
-            return () => st.cbs.delete(cb);
-        },
-        close() { clearInterval(this.timer); this.timer = null; this.subs.clear(); }
-    });
-`;
-
-let failures = 0;
-function check(name, ok, detail) {
-    const mark = ok ? '✓' : '✗';
-    console.log(`  ${mark} ${name}${detail ? ` — ${detail}` : ''}`);
-    if (!ok) failures++;
-}
-
-const server = spawn('python3', ['-m', 'http.server', String(PORT), '--directory', ROOT], {
-    stdio: 'ignore'
-});
-for (let i = 0; i < 50; i++) {
-    try { if ((await fetch(`${BASE}/index.html`)).ok) break; } catch (_) {}
-    await new Promise(r => setTimeout(r, 100));
-}
-
-const browser = await chromium.launch({
-    channel: 'chrome',
-    headless: true,
-    args: ['--disable-features=WebRtcHideLocalIpsWithMdns']
-});
-const FORCE_LOCAL_ICE = `
-    const OrigRTC = window.RTCPeerConnection;
-    window.RTCPeerConnection = class extends OrigRTC {
-        constructor(cfg = {}) { super({ ...cfg, iceServers: [] }); }
-    };
-`;
 // One context per simulated device: distinct localStorage/IndexedDB, so
 // deviceIds and DTLS certificates genuinely differ.
 const contexts = {};
 for (const label of ['H', 'A', 'B']) {
-    contexts[label] = await browser.newContext();
-    await contexts[label].addInitScript(FORCE_LOCAL_ICE + HTTP_CARRIER);
+    contexts[label] = await harness.newDeviceContext();
 }
 
-async function launcherPage(label) {
-    const page = await contexts[label].newPage();
-    page.on('pageerror', err => console.error(`  [${label} pageerror]`, err.message));
-    await page.goto(`${BASE}/`);
-    await page.waitForFunction('!!window.__arcade && !!window.__arcade.showGame');
-    return page;
-}
+const launcherPage = (label) => harness.launcherPage(label, contexts[label]);
 
-// Signaling ceremony at the transport level — stands in for QR / link
-// tennis. Each host-side createOffer() mints a fresh link, which is exactly
-// the "Invite another player" flow (openUI({mode:'host'}) → fresh code).
-async function connectJoiner(H, J) {
-    const packedOffer = await H.evaluate(async () => {
-        const { ConnectionUtils } = await import('./p2p/p2p-core.js');
-        const addon = window.__arcade.p2p._addon();
-        return await ConnectionUtils.encodePayload(await addon.peerNode.createOffer());
-    });
-    const packedAnswer = await J.evaluate(async (packed) => {
-        const { ConnectionUtils } = await import('./p2p/p2p-core.js');
-        const addon = window.__arcade.p2p._addon();
-        const offer = await ConnectionUtils.decodePayload(packed);
-        return await ConnectionUtils.encodePayload(await addon.peerNode.createAnswer(offer));
-    }, packedOffer);
-    await H.evaluate(async (packed) => {
-        const { ConnectionUtils } = await import('./p2p/p2p-core.js');
-        await window.__arcade.p2p._addon().peerNode.acceptAnswer(await ConnectionUtils.decodePayload(packed));
-    }, packedAnswer);
-    await J.waitForFunction(`window.__arcade.p2p.status() === 'connected'`, null, { timeout: 20000 });
-}
-
-const deviceIdOf = (page) => page.evaluate(() => localStorage.getItem('arcade.v1._meta.deviceId'));
+// Each host-side ceremony mints a fresh link while earlier ones stay live —
+// exactly the "Invite another player" flow (openUI({mode:'host'}) → fresh
+// code). waitHost:false — the host's aggregate status isn't what a second
+// link proves.
+const connectJoiner = (H, J) => harness.ceremony(H, J, { waitHost: false });
 
 try {
     console.log('\nP2P multiseat acceptance — host + two joiners (star topology)\n');
@@ -195,14 +88,7 @@ try {
             window.__arcade.showGame('p2p-test-game', 'tools/fixtures/p2p-test-game/index.html', 'P2P Test');
         });
     }
-    async function fixtureFrame(page) {
-        for (let i = 0; i < 100; i++) {
-            const f = page.frames().find(fr => fr.url().includes('p2p-test-game'));
-            if (f) return f;
-            await new Promise(r => setTimeout(r, 100));
-        }
-        throw new Error('fixture frame never attached');
-    }
+    const fixtureFrame = (page) => harness.fixtureFrame(page, 'p2p-test-game');
     const fH = await fixtureFrame(H), fA = await fixtureFrame(A), fB = await fixtureFrame(B);
     for (const f of [fH, fA, fB]) {
         await f.waitForFunction(`window.__peerStatus && window.__peerStatus() === 'connected'`, null, { timeout: 10000 });
@@ -386,12 +272,10 @@ try {
     await H.close(); await A.close(); await B.close();
 } catch (e) {
     console.error('\nFATAL:', e.message);
-    failures++;
+    check('run completed', false, e.message);
 } finally {
-    await browser.close();
-    server.kill();
-    dropServer.close();
+    await harness.shutdown();
 }
 
-console.log(failures === 0 ? '\nAll multiseat acceptance checks passed.' : `\n${failures} check(s) FAILED.`);
-process.exit(failures === 0 ? 0 : 1);
+console.log(failed() === 0 ? '\nAll multiseat acceptance checks passed.' : `\n${failed()} check(s) FAILED.`);
+process.exit(failed() === 0 ? 0 : 1);

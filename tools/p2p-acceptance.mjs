@@ -16,110 +16,16 @@
 //
 // Exit code: 0 if all checks pass, 1 otherwise.
 
-import { chromium } from 'playwright';
-import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
-import http from 'node:http';
+import { startP2PHarness, makeCheck } from './lib/p2p-test-harness.mjs';
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const PORT = 4799;
-const DROP_PORT = 4798;
-const BASE = `http://127.0.0.1:${PORT}`;
+const { check, failed } = makeCheck();
+const harness = await startP2PHarness({ port: 4799, dropPort: 4798 });
+const { launcherPage, bootBridge, ceremony, fixtureFrame } = harness;
 
-// In-test dead-drop standing in for the public MQTT broker: the rendezvous
-// carrier is override-injected (window.__arcadeRdvCarrierFactory), so the
-// acceptance run never touches external infrastructure.
-const dropTopics = new Map();
-const dropServer = http.createServer((req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    const u = new URL(req.url, 'http://x');
-    const topic = u.searchParams.get('t') || '';
-    if (req.method === 'POST' && u.pathname === '/pub') {
-        let body = '';
-        req.on('data', c => body += c);
-        req.on('end', () => {
-            if (!dropTopics.has(topic)) dropTopics.set(topic, []);
-            dropTopics.get(topic).push(body);
-            res.end('ok');
-        });
-    } else if (u.pathname === '/sub') {
-        const arr = dropTopics.get(topic) || [];
-        const since = parseInt(u.searchParams.get('since') || '0', 10);
-        res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ msgs: arr.slice(since), next: arr.length }));
-    } else res.end('');
-});
-dropServer.listen(DROP_PORT);
-
-const HTTP_CARRIER = `
-    window.__arcadeRdvCarrierFactory = () => ({
-        base: 'http://127.0.0.1:${DROP_PORT}',
-        subs: new Map(),
-        timer: null,
-        async connect() { if (!this.timer) this.timer = setInterval(() => this._poll(), 120); },
-        async _poll() {
-            for (const [topic, st] of this.subs) {
-                try {
-                    const r = await fetch(this.base + '/sub?t=' + topic + '&since=' + st.next);
-                    const j = await r.json();
-                    st.next = j.next;
-                    j.msgs.forEach(m => st.cbs.forEach(cb => { try { cb(m); } catch (e) {} }));
-                } catch (e) {}
-            }
-        },
-        async publish(topic, payload) { await fetch(this.base + '/pub?t=' + topic, { method: 'POST', body: payload }); },
-        subscribe(topic, cb) {
-            if (!this.subs.has(topic)) this.subs.set(topic, { next: 0, cbs: new Set() });
-            const st = this.subs.get(topic);
-            st.cbs.add(cb);
-            return () => st.cbs.delete(cb);
-        },
-        close() { clearInterval(this.timer); this.timer = null; this.subs.clear(); }
-    });
-`;
-
-let failures = 0;
-function check(name, ok, detail) {
-    const mark = ok ? '✓' : '✗';
-    console.log(`  ${mark} ${name}${detail ? ` — ${detail}` : ''}`);
-    if (!ok) failures++;
-}
-
-const server = spawn('python3', ['-m', 'http.server', String(PORT), '--directory', ROOT], {
-    stdio: 'ignore'
-});
-for (let i = 0; i < 50; i++) {
-    try { if ((await fetch(`${BASE}/index.html`)).ok) break; } catch (_) {}
-    await new Promise(r => setTimeout(r, 100));
-}
-
-const browser = await chromium.launch({
-    channel: 'chrome',
-    headless: true,
-    args: ['--disable-features=WebRtcHideLocalIpsWithMdns']
-});
-// Hermetic: never touch external STUN; loopback host candidates suffice.
-const FORCE_LOCAL_ICE = `
-    const OrigRTC = window.RTCPeerConnection;
-    window.RTCPeerConnection = class extends OrigRTC {
-        constructor(cfg = {}) { super({ ...cfg, iceServers: [] }); }
-    };
-`;
 // SEPARATE contexts per simulated device: distinct localStorage + IndexedDB,
 // so deviceIds and identity certificates genuinely differ like real devices.
-const contextH = await browser.newContext();
-const contextJ = await browser.newContext();
-await contextH.addInitScript(FORCE_LOCAL_ICE + HTTP_CARRIER);
-await contextJ.addInitScript(FORCE_LOCAL_ICE + HTTP_CARRIER);
-
-async function launcherPage(label, context) {
-    const page = await context.newPage();
-    page.on('pageerror', err => console.error(`  [${label} pageerror]`, err.message));
-    await page.goto(`${BASE}/`);
-    await page.waitForFunction('!!window.__arcade && !!window.__arcade.showGame');
-    return page;
-}
+const contextH = await harness.newDeviceContext();
+const contextJ = await harness.newDeviceContext();
 
 try {
     console.log('\nP2P acceptance — launcher-owned multiplayer\n');
@@ -127,42 +33,22 @@ try {
     const H = await launcherPage('host', contextH);
     const J = await launcherPage('joiner', contextJ);
 
-    // 1. Load the bridge on both, as a real user would: open the single
-    //    Multiplayer menu item (the hub dialog), then "New connection" —
-    //    that's what actually initializes the transport (ensureAddon()).
+    // 1. Load the bridge on both, as a real user would (harness clicks the
+    //    Multiplayer menu → "New connection", which runs ensureAddon()).
     for (const [page, label] of [[H, 'host'], [J, 'joiner']]) {
-        await page.evaluate(() => document.getElementById('menu-multiplayer').click());
-        await page.evaluate(() => document.getElementById('connections-dialog-new').click());
-        await page.waitForFunction('!!window.__arcade.p2p && !!window.__arcade.p2p._addon()', null, { timeout: 15000 });
+        await bootBridge(page);
         check(`${label}: bridge + vendored transport loaded (no CDN)`, true);
     }
 
     // 2. Signaling ceremony at the transport level (stands in for QR / link
-    //    tennis — the human-carried exchange, exercised manually via the
-    //    launcher's Multiplayer panel; see p2p/PROTOCOL.md §4).
-    const packedOffer = await H.evaluate(async () => {
-        const { ConnectionUtils } = await import('./p2p/p2p-core.js');
-        const addon = window.__arcade.p2p._addon();
-        return await ConnectionUtils.encodePayload(await addon.peerNode.createOffer());
-    });
+    //    tennis — see p2p/PROTOCOL.md §4). This suite also asserts the
+    //    packed-payload shape the human-carried exchange depends on.
+    const { packedOffer, packedAnswer } = await ceremony(H, J);
     check('host: packed offer produced', /^1\.[A-Za-z0-9_-]+$/.test(packedOffer), `${packedOffer.length} chars`);
-
-    const packedAnswer = await J.evaluate(async (packed) => {
-        const { ConnectionUtils } = await import('./p2p/p2p-core.js');
-        const addon = window.__arcade.p2p._addon();
-        const offer = await ConnectionUtils.decodePayload(packed);
-        return await ConnectionUtils.encodePayload(await addon.peerNode.createAnswer(offer));
-    }, packedOffer);
     check('joiner: packed answer produced', /^1\.[A-Za-z0-9_-]+$/.test(packedAnswer), `${packedAnswer.length} chars`);
 
-    await H.evaluate(async (packed) => {
-        const { ConnectionUtils } = await import('./p2p/p2p-core.js');
-        await window.__arcade.p2p._addon().peerNode.acceptAnswer(await ConnectionUtils.decodePayload(packed));
-    }, packedAnswer);
-
-    // 3. Bridge must report SDK-vocabulary 'connected' on both sides.
-    await H.waitForFunction(`window.__arcade.p2p.status() === 'connected'`, null, { timeout: 20000 });
-    await J.waitForFunction(`window.__arcade.p2p.status() === 'connected'`, null, { timeout: 20000 });
+    // 3. Bridge must report SDK-vocabulary 'connected' on both sides
+    //    (ceremony() already awaited both).
     check('both launchers report status connected (data channel open)', true);
 
     // 4. Mount the fixture game in both launchers — AFTER connecting, so the
@@ -172,18 +58,7 @@ try {
             window.__arcade.showGame('p2p-test-game', 'tools/fixtures/p2p-test-game/index.html', 'P2P Test');
         });
     }
-    // Poll for the fixture frame: attachment and URL assignment lag the
-    // showGame() call, and a frames() snapshot taken too early returns
-    // undefined on slow CI runners (same helper as the multiseat script).
-    async function fixtureFrame(page) {
-        for (let i = 0; i < 100; i++) {
-            const f = page.frames().find(fr => fr.url().includes('p2p-test-game'));
-            if (f) return f;
-            await new Promise(r => setTimeout(r, 100));
-        }
-        throw new Error('fixture frame never attached');
-    }
-    const fH = await fixtureFrame(H), fJ = await fixtureFrame(J);
+    const fH = await fixtureFrame(H, 'p2p-test-game'), fJ = await fixtureFrame(J, 'p2p-test-game');
     await fH.waitForFunction(`window.__peerStatus && window.__peerStatus() === 'connected'`, null, { timeout: 10000 });
     await fJ.waitForFunction(`window.__peerStatus && window.__peerStatus() === 'connected'`, null, { timeout: 10000 });
     check('game sees peer.status connected via SDK handshake alone', true);
@@ -363,11 +238,10 @@ try {
     await H.close(); await J.close();
 } catch (e) {
     console.error('\nFATAL:', e.message);
-    failures++;
+    check('run completed', false, e.message);
 } finally {
-    await browser.close();
-    server.kill();
+    await harness.shutdown();
 }
 
-console.log(failures === 0 ? '\nAll P2P acceptance checks passed.' : `\n${failures} check(s) FAILED.`);
-process.exit(failures === 0 ? 0 : 1);
+console.log(failed() === 0 ? '\nAll P2P acceptance checks passed.' : `\n${failed()} check(s) FAILED.`);
+process.exit(failed() === 0 ? 0 : 1);

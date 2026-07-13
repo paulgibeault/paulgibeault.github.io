@@ -15,90 +15,11 @@
 //
 // Exit code: 0 if all checks pass, 1 otherwise.
 
-import { chromium } from 'playwright';
-import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
-import http from 'node:http';
+import { startP2PHarness, makeCheck } from './lib/p2p-test-harness.mjs';
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const PORT = 4795;
-const DROP_PORT = 4794;
-const BASE = `http://127.0.0.1:${PORT}`;
-
-// In-test dead-drop. Deliberately REPLAYS full history to new subscribers —
-// harsher than real MQTT — because the protocol must tolerate stale blobs.
-const dropTopics = new Map();
-const dropServer = http.createServer((req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    const u = new URL(req.url, 'http://x');
-    const topic = u.searchParams.get('t') || '';
-    if (req.method === 'POST' && u.pathname === '/pub') {
-        let body = '';
-        req.on('data', c => body += c);
-        req.on('end', () => {
-            if (!dropTopics.has(topic)) dropTopics.set(topic, []);
-            dropTopics.get(topic).push(body);
-            res.end('ok');
-        });
-    } else if (u.pathname === '/sub') {
-        const arr = dropTopics.get(topic) || [];
-        const since = parseInt(u.searchParams.get('since') || '0', 10);
-        res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ msgs: arr.slice(since), next: arr.length }));
-    } else res.end('');
-});
-dropServer.listen(DROP_PORT);
-
-const HTTP_CARRIER = `
-    window.__arcadeRdvCarrierFactory = () => ({
-        base: 'http://127.0.0.1:${DROP_PORT}',
-        subs: new Map(),
-        timer: null,
-        async connect() { if (!this.timer) this.timer = setInterval(() => this._poll(), 120); },
-        async _poll() {
-            for (const [topic, st] of this.subs) {
-                try {
-                    const r = await fetch(this.base + '/sub?t=' + topic + '&since=' + st.next);
-                    const j = await r.json();
-                    st.next = j.next;
-                    j.msgs.forEach(m => st.cbs.forEach(cb => { try { cb(m); } catch (e) {} }));
-                } catch (e) {}
-            }
-        },
-        async publish(topic, payload) { await fetch(this.base + '/pub?t=' + topic, { method: 'POST', body: payload }); },
-        subscribe(topic, cb) {
-            if (!this.subs.has(topic)) this.subs.set(topic, { next: 0, cbs: new Set() });
-            const st = this.subs.get(topic);
-            st.cbs.add(cb);
-            return () => st.cbs.delete(cb);
-        },
-        close() { clearInterval(this.timer); this.timer = null; this.subs.clear(); }
-    });
-`;
-const FORCE_LOCAL_ICE = `
-    const OrigRTC = window.RTCPeerConnection;
-    window.RTCPeerConnection = class extends OrigRTC {
-        constructor(cfg = {}) { super({ ...cfg, iceServers: [] }); }
-    };
-`;
-
-let failures = 0;
-function check(name, ok, detail) {
-    console.log(`  ${ok ? '✓' : '✗'} ${name}${detail ? ` — ${detail}` : ''}`);
-    if (!ok) failures++;
-}
-
-const server = spawn('python3', ['-m', 'http.server', String(PORT), '--directory', ROOT], { stdio: 'ignore' });
-for (let i = 0; i < 50; i++) {
-    try { if ((await fetch(`${BASE}/index.html`)).ok) break; } catch (_) {}
-    await new Promise(r => setTimeout(r, 100));
-}
-
-const browser = await chromium.launch({
-    channel: 'chrome', headless: true,
-    args: ['--disable-features=WebRtcHideLocalIpsWithMdns']
-});
+const { check, failed } = makeCheck();
+const harness = await startP2PHarness({ port: 4795, dropPort: 4794 });
+const { launcherPage, ceremony } = harness;
 
 // Compress the in-band-first-claim delays so scenarios finish in seconds;
 // everything else (episode timeout, stall, re-arm) keeps production values
@@ -114,42 +35,9 @@ const FAST_RDV = `(() => {
     r.addEventListener('diagnostic', (e) => window.__rdvDiag.push((e.detail || {}).msg || ''));
 })()`;
 
-async function launcherPage(label, context) {
-    const page = await context.newPage();
-    page.on('pageerror', err => console.error(`  [${label} pageerror]`, err.message));
-    await page.goto(`${BASE}/`);
-    await page.waitForFunction('!!window.__arcade && !!window.__arcade.showGame');
-    return page;
-}
-
 async function loadBridge(page) {
-    await page.evaluate(() => document.getElementById('menu-multiplayer').click());
-    await page.evaluate(() => document.getElementById('connections-dialog-new').click());
-    await page.waitForFunction('!!window.__arcade.p2p && !!window.__arcade.p2p._addon()', null, { timeout: 15000 });
-    await page.evaluate(() => {
-        const overlay = document.getElementById('p2p-modal-overlay');
-        if (overlay) overlay.style.display = 'none';
-        if (window.__arcade.closeConnectionsDialog) window.__arcade.closeConnectionsDialog();
-    });
+    await harness.bootBridge(page, { closeDialog: true });
     await page.evaluate(FAST_RDV);
-}
-
-async function ceremony(H, J) {
-    const packedOffer = await H.evaluate(async () => {
-        const { ConnectionUtils } = await import('./p2p/p2p-core.js');
-        return await ConnectionUtils.encodePayload(await window.__arcade.p2p._addon().peerNode.createOffer());
-    });
-    const packedAnswer = await J.evaluate(async (packed) => {
-        const { ConnectionUtils } = await import('./p2p/p2p-core.js');
-        const offer = await ConnectionUtils.decodePayload(packed);
-        return await ConnectionUtils.encodePayload(await window.__arcade.p2p._addon().peerNode.createAnswer(offer));
-    }, packedOffer);
-    await H.evaluate(async (packed) => {
-        const { ConnectionUtils } = await import('./p2p/p2p-core.js');
-        await window.__arcade.p2p._addon().peerNode.acceptAnswer(await ConnectionUtils.decodePayload(packed));
-    }, packedAnswer);
-    await H.waitForFunction(`window.__arcade.p2p.status() === 'connected'`, null, { timeout: 20000 });
-    await J.waitForFunction(`window.__arcade.p2p.status() === 'connected'`, null, { timeout: 20000 });
 }
 
 async function pairBoth(H, J) {
@@ -174,10 +62,8 @@ const peerDev = (page) => page.evaluate(() =>
     Object.keys(JSON.parse(localStorage.getItem('arcade.v1._meta.knownPeers')))[0]);
 
 async function freshPair(tag) {
-    const ctxH = await browser.newContext();
-    const ctxJ = await browser.newContext();
-    await ctxH.addInitScript(FORCE_LOCAL_ICE + HTTP_CARRIER);
-    await ctxJ.addInitScript(FORCE_LOCAL_ICE + HTTP_CARRIER);
+    const ctxH = await harness.newDeviceContext();
+    const ctxJ = await harness.newDeviceContext();
     const H = await launcherPage(tag + ':host', ctxH);
     const J = await launcherPage(tag + ':joiner', ctxJ);
     await loadBridge(H); await loadBridge(J);
@@ -534,12 +420,10 @@ try {
     }
 } catch (e) {
     console.error('\nFATAL:', e.message);
-    failures++;
+    check('run completed', false, e.message);
 } finally {
-    await browser.close();
-    server.kill();
-    dropServer.close();
+    await harness.shutdown();
 }
 
-console.log(failures === 0 ? '\nAll reconnect acceptance checks passed.' : `\n${failures} check(s) FAILED.`);
-process.exit(failures === 0 ? 0 : 1);
+console.log(failed() === 0 ? '\nAll reconnect acceptance checks passed.' : `\n${failed()} check(s) FAILED.`);
+process.exit(failed() === 0 ? 0 : 1);
