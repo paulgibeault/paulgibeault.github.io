@@ -1,0 +1,9 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>storage-bridge acceptance fixture</title>
+<!-- Minimal page: load the SDK and init. The bridge acceptance mounts this
+     inside the launcher's sandboxed (opaque-origin) iframe pool and drives
+     every check through frame.evaluate — nothing to do here but init. -->
+<script src="/arcade-sdk.js"></script>
+<script>Arcade.init({ gameId: 'bridge-test' });</script>
+<body>bridge-test</body>

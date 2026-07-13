@@ -43,20 +43,33 @@ disk via `file://` — which doesn't work for any modern game (modules, fonts,
 storage, fetch) anyway, so serve over `http://localhost` for dev.
 
 The SDK is a singleton (`window.Arcade`) and is safe to load standalone — when
-not framed it locks `peer.status()` to `'unavailable'` and storage falls back
-to plain same-origin `localStorage`.
+not framed it locks `peer.status()` to `'unavailable'` and storage uses plain
+same-origin `localStorage` directly.
 
-For games that need to read state during module init, await `Arcade.ready`
-once before reading:
+**When mounted by the launcher, storage is BRIDGED** (`Arcade.context.storage
+=== 'bridged'`): the launcher sandboxes game iframes without
+`allow-same-origin`, so the frame cannot touch origin storage at all — the SDK
+proxies every storage API over postMessage to the launcher instead, and sync
+`Arcade.state` reads serve from a cache seeded by the launcher's welcome. The
+API surface is IDENTICAL in both modes; the one behavioral contract:
+
+**Await `Arcade.ready` before reading state.** Pre-ready reads in a frame
+return empty (the snapshot hasn't arrived) and log a
+`read before Arcade.ready` console warning naming the key:
 
 ```js
 Arcade.init({ gameId: 'hecknsic' });
-await Arcade.ready;     // resolves on welcome handshake (or immediately when standalone)
+await Arcade.ready;     // resolves on welcome handshake (or after the standalone timeout)
 const saved = Arcade.state.get('savedGame');
 ```
 
-Standalone games can skip the `await` — settings hydrate synchronously from
-`localStorage` before init returns, so first paint is correct.
+Standalone pages can skip the `await` — storage is direct there and settings
+hydrate synchronously before init returns. But write for the framed contract:
+a pre-ready `state.set` whose key turns out to exist in stored state is
+DISCARDED in favor of the stored value (so an early `getOrInit` default can
+never clobber a real save) — another reason boot code belongs after `ready`.
+`Arcade.state.migrate(...)` may be called before `ready` (the SDK defers the
+callback until the snapshot arrives when framed).
 
 ---
 
@@ -544,7 +557,11 @@ The launcher is one of two ways to run the game; the GitHub Pages URL is the oth
 
 ## 9. Iframe sandbox compatibility
 
-The launcher mounts each game in `<iframe sandbox="allow-scripts allow-same-origin allow-downloads" allowfullscreen>`.
+The launcher mounts each game in
+`<iframe sandbox="allow-scripts allow-downloads" allow="autoplay; fullscreen; gamepad; screen-wake-lock" allowfullscreen>`.
+Note there is **no `allow-same-origin`**: the frame runs with an opaque origin
+so a game can never open the origin's storage (other apps' data, the P2P key
+stores) — that's the platform's trust boundary (see ARCADE_PLATFORM.md).
 `allow-downloads` exists so a game can trigger `<a download>` (e.g. saving a
 file received over `Arcade.peer`) — without it, Chrome silently blocks
 anchor-triggered downloads from a sandboxed iframe.
@@ -552,8 +569,15 @@ anchor-triggered downloads from a sandboxed iframe.
 - [ ] No top-level navigation (`window.top.location = ...`) — it will be blocked.
 - [ ] No `window.open` to internal links; use in-game UI for help/about screens.
 - [ ] If the game requests fullscreen, request it on a user gesture only and target the game's own root element.
+- [ ] **Never touch `window.localStorage` / `indexedDB` / OPFS / `caches` directly in code that runs framed** — in an opaque-origin frame the property access itself throws `SecurityError`. Go through `Arcade.state/store/files`; wrap any unavoidable legacy probe in try/catch.
+- [ ] ES modules and `fetch()`ed assets load fine framed — GitHub Pages (and the dev servers) send `Access-Control-Allow-Origin: *`, which opaque-origin CORS requests need.
 
-`allow-same-origin` means **same-origin `localStorage` works directly inside the iframe** — you do **not** need a postMessage shim. If your game has one (legacy from earlier protocol versions), delete it as part of the SDK adoption. (One older game, hecknsic, still ships such a shim; the launcher answers its `ls-proxy-request`/`ls-proxy-response` messages purely for backward compatibility — this is not a pattern to copy into new integrations.)
+You do **not** need a postMessage storage shim — the SDK IS the shim when
+framed. If your game has a hand-rolled one (legacy from earlier protocol
+versions), delete it as part of the SDK adoption. (One older game, hecknsic,
+once shipped such a shim; the launcher still answers the
+`ls-proxy-request`/`ls-proxy-response` protocol purely for backward
+compatibility — not a pattern to copy.)
 
 ---
 
@@ -561,6 +585,15 @@ anchor-triggered downloads from a sandboxed iframe.
 
 Several games already ship a `manifest.json` and `sw.js`. Because every game
 and the launcher live on the same origin, sloppy scopes will collide.
+
+> **Framed reality check:** a game's SW only ever controls **standalone**
+> visits to `/<gameId>/` — an opaque-origin launcher frame can't be controlled
+> by any service worker, so in-launcher play always hits the network/HTTP
+> cache. The SDK shims `navigator.serviceWorker` with an inert stub inside
+> frames (register() rejects catchably; the real getter would throw
+> `SecurityError`). Keep registration fire-and-forget with a `.catch`, never
+> `await navigator.serviceWorker.ready` on your boot path, and wrap any SW
+> code that runs **before** the SDK loads in try/catch.
 
 Start from the reference worker at
 [`tools/templates/game-sw.js`](tools/templates/game-sw.js) — it encodes every
@@ -609,9 +642,12 @@ both pull from `paulgibeault.github.io/images/<gameId>.png`.
 
 ## 12. Local development
 
-The launcher and games must run **same-origin** for the postMessage handshake,
-shared `localStorage`, and iframe `allow-same-origin` to work end-to-end. The
-launcher repo ships [`dev.sh`](dev.sh) to stage everything for you:
+The launcher and games are served from **one origin** in production (the
+game frames themselves run opaque-origin — their storage rides the launcher
+bridge, and the SDK loads root-relative from the launcher). Reproduce that
+locally with [`dev.sh`](dev.sh), which stages everything under one server
+(with the `Access-Control-Allow-Origin: *` header opaque-frame module loads
+need):
 
 ```sh
 # from the launcher repo
@@ -699,17 +735,22 @@ pre-deploy script if you want regression coverage.
 
 ### Wire protocol summary (v2)
 
-All messages namespaced `arcade:`. Origin guard: SDK only listens to messages
-from `window.parent` whose `origin === window.location.origin`. Launcher only
-acts on messages from iframes it mounted via the pool.
+All messages namespaced `arcade:`. Origin guard: launcher frames are
+opaque-origin, so the SDK pins the origin of the first `welcome` from
+`window.parent` and requires it on every later message (standalone/legacy
+same-origin embeds keep the `origin === window.location.origin` rule). The
+launcher only acts on messages from iframes it mounted via the pool, and
+requires their origin to be the sandboxed literal `'null'`.
 
 ```
 child  → parent: arcade:hello              { gameId, version }
-parent → child:  arcade:welcome            { version, caps, peerStatus, peers, settings }
+parent → child:  arcade:welcome            { version, caps, peerStatus, peers, settings, state }
                                            // caps: capability flags (absent ⇒ []); peers
-                                           // entries: { deviceId, name, status, direct }
+                                           // entries: { deviceId, name, status, direct };
+                                           // state: storage-bridge snapshot (own keys +
+                                           // global.* + _meta identity/dev, raw strings)
 parent → child:  arcade:settings.changed   { settings }
-parent → child:  arcade:state.replaced     { }                      // after file import
+parent → child:  arcade:state.replaced     { state }                // after file import (fresh snapshot)
 parent → child:  arcade:lifecycle.suspend  { }                      // iframe hidden, or about to be evicted
 parent → child:  arcade:lifecycle.resume   { }                      // iframe shown
 parent → child:  arcade:peer.status        { status }               // aggregate across links
@@ -721,6 +762,16 @@ parent → child:  arcade:peer.ready         { deviceId, name }       // remote 
 parent → child:  arcade:peer.queue         { depth, limit, overflowed }
 child  → parent: arcade:peer.send          { payload, to? }         // to = target deviceId (targeted)
 child  → parent: arcade:ui.toast           { message, kind, duration }
+
+— storage bridge (framed storage; see §3/§9; the SDK speaks this for you) —
+child  → parent: arcade:state.write        { key, value }           // raw string, null = remove; launcher
+                                                                    // allows own namespace, global.*, _meta.dev
+parent → child:  arcade:state.writeError   { key, error }           // launcher-side quota → Arcade.onStorageError
+parent → child:  arcade:state.changed      { key, value }           // shared key changed by launcher/other frame
+child  → parent: arcade:store.op           { id, name, op, key?, value? }  // get|set|del|keys|entries|clear
+child  → parent: arcade:files.op           { id, op, name?, blob? }        // put|get|list|delete
+child  → parent: arcade:storage.op         { id, op }                      // estimate|persisted|persist
+parent → child:  arcade:bridge.result      { id, ok, value?, error? }      // reply channel for the three op types
 ```
 
 Settings shape:

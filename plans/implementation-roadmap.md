@@ -69,9 +69,16 @@ Order chosen so each PR is independently shippable and bisectable.
 > `stores`/`files` in the save bundle (schema v2); import restores them; P2P key stores are
 > excluded. Verified by `tools/export-roundtrip-acceptance.mjs` (seed→export→wipe→import, asserts
 > `qrp2p-*` untouched) and wired into CI. **Docs refreshed** (GAME_INTEGRATION §3/§3a/§7b/§13 +
-> ARCADE_PLATFORM SDK-shape/storage/save-format/trust-model). **Still open:** physically moving
-> the P2P key stores out of app reach — documented as the first-party trust boundary, but the
-> relocation itself stays tracked in issue #43.
+> ARCADE_PLATFORM SDK-shape/storage/save-format/trust-model).
+>
+> **Status 2026-07-12 — #43 CLOSED (boundary made real):** the "dedicated worker / partitioned
+> handle" idea was unimplementable — IndexedDB is origin-scoped, so any persistence root the
+> launcher can reach, a same-origin app could reach too. The real fix shipped instead: game
+> iframes are sandboxed **without `allow-same-origin`** (opaque origin ⇒ no origin storage at
+> all, key stores included) and the SDK transparently bridges `state/store/files/storage` over
+> postMessage to the launcher, which enforces per-app namespacing at the boundary. Same
+> `arcade.v1.*` names, so saves/export are untouched. Enforced in CI by
+> `tools/bridge-acceptance.mjs`; all five staged games verified booting + persisting bridged.
 
 ### P1.1 — `Arcade.store` (async per-app KV over IndexedDB)
 - `Arcade.store.open(name?) → { get, set, del, keys, each, clear }` (promise-based), backed by a

@@ -42,6 +42,9 @@ jobs:
       - name: Store/files acceptance (IndexedDB + OPFS)
         run: node tools/store-acceptance.mjs
 
+      - name: Storage-bridge acceptance (opaque-frame boundary + bridge round-trips)
+        run: node tools/bridge-acceptance.mjs
+
       - name: Export/import roundtrip (store/files in save bundle; P2P excluded)
         run: node tools/export-roundtrip-acceptance.mjs
 
