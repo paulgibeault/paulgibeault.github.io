@@ -784,16 +784,30 @@
                 }
                 if (!lruId) return;  // only the protected entry remains — never evict it
                 const entry = pool.get(lruId);
-                // Defensive flush — entry is already non-active (and thus already
-                // suspended), but the acceptance criteria call for an explicit
-                // hint before we drop it so cooperative games can persist state.
+                // Flush hint, then a GRACE before the destructive teardown
+                // (#41): postMessage is async, so navigating to about:blank
+                // in the same tick used to guarantee the suspend hint was
+                // never processed. The frame gets RETIRE_GRACE_MS to run its
+                // suspend handler and flush through the storage bridge —
+                // `retiring` keeps it addressable to the message router
+                // (pool membership is the router's trust test) while the
+                // pool slot itself frees synchronously, so cap math and an
+                // instant same-game relaunch behave exactly as before.
                 postToIframe(lruId, { type: 'arcade:lifecycle.suspend' });
-                try { entry.iframe.src = 'about:blank'; } catch (e) {}
-                entry.iframe.remove();
+                const retiree = { gameId: lruId, entry };
+                retiring.add(retiree);
+                setTimeout(() => {
+                    retiring.delete(retiree);
+                    try { entry.iframe.src = 'about:blank'; } catch (e) {}
+                    entry.iframe.remove();
+                }, RETIRE_GRACE_MS);
                 pool.delete(lruId);
                 helloedGames.delete(lruId);
             }
         }
+        // Evicted-but-flushing frames: still routable for the grace window.
+        const RETIRE_GRACE_MS = 250;
+        const retiring = new Set(); // { gameId, entry }
 
         function ensureIframe(gameId, src, name) {
             let entry = pool.get(gameId);
@@ -1095,6 +1109,12 @@
         function findPoolEntryForSource(src) {
             for (const [gid, entry] of pool) {
                 if (entry.iframe.contentWindow === src) return [gid, entry];
+            }
+            // Evicted frames stay routable during their retire grace so a
+            // suspend-time flush lands (matched by contentWindow identity —
+            // a relaunched same-gameId frame is a different window).
+            for (const r of retiring) {
+                if (r.entry.iframe.contentWindow === src) return [r.gameId, r.entry];
             }
             return [null, null];
         }

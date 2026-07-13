@@ -71,6 +71,14 @@ never clobber a real save) — another reason boot code belongs after `ready`.
 `Arcade.state.migrate(...)` may be called before `ready` (the SDK defers the
 callback until the snapshot arrives when framed).
 
+`Arcade.context.framed` is stable at `ready` for launcher mounts (sandboxed
+frames wait a full 2 s for the welcome, and the launcher answers in
+milliseconds). The one residual race is a legacy same-origin embed whose
+welcome loses the 300 ms standalone timeout — if that happens, `framed` flips
+after `ready` and `Arcade.onFramedChange(fn)` fires with the new value, so a
+game that branches on `framed` at boot can re-run that branch instead of
+missing the flip.
+
 ---
 
 ## 3. Storage — migrate to namespaced keys
@@ -361,9 +369,9 @@ When a game is evicted from the pool its `window` is destroyed — JS heap, audi
 context, WebGL context, and any in-memory game state all go away. A subsequent
 launch is a **fresh page load**, identical to opening the standalone URL.
 
-- [ ] Anything worth preserving across launches must hit `arcade.v1.<gameId>.*` localStorage during play (or, at the latest, in your `onSuspend` handler). The SDK's `Arcade.state.set(...)` does this for you; raw `localStorage` is fine if you namespace correctly.
+- [ ] Anything worth preserving across launches must be written via `Arcade.state.set(...)` during play (or, at the latest, in your `onSuspend` handler). Raw `localStorage` doesn't work in launcher frames (§9) — the SDK is the persistence path.
 - [ ] Do **not** assume your iframe will be alive next time the user launches your game. There is no per-iframe in-memory cache that persists across eviction.
-- [ ] In `onSuspend`, flush any debounced/coalesced writes — pending state could be lost if the launcher evicts before the next animation frame.
+- [ ] In `onSuspend`, flush any debounced/coalesced writes. The launcher delivers the suspend hint and holds teardown for a ~250 ms grace so a synchronous flush in your handler reliably lands — but only a *synchronous* one; don't start async work there and expect it to finish.
 
 ### 6c. Be a good iframe citizen — resource hygiene
 
@@ -453,6 +461,12 @@ Arcade.peer.onReady(({ deviceId }) => ...);  // remote has THIS game mounted & l
 
 Arcade.peer.sendBlob(file, { onProgress });  // chunked large payloads; Promise (broadcast only)
 Arcade.peer.onBlob((blob, { name, size, fromPeer }) => ...);
+Arcade.peer.onBlobError(({ id, name, reason, received, total }) => ...);
+// reason: 'timeout' (stalled 60s — e.g. chunks lost to queue overflow),
+//         'aborted' (sender gave up mid-transfer),
+//         'integrity' (bytes didn't match the sender's SHA-256).
+// A failed transfer is dropped whole — never a silently-wrong blob. Ask the
+// sender to resend. Transfers are hash-verified end-to-end automatically.
 
 Arcade.peer.queue();               // { depth, limit, overflowed } — replay-queue visibility
 Arcade.peer.onQueue(q => ...);     // pushed while 'interrupted'; overflowed ⇒ resync after recovery
@@ -497,8 +511,10 @@ Rules of the road:
 - [ ] Files and other large payloads: don't hand-roll base64 chunking —
       `Arcade.peer.sendBlob(blob, { onProgress })` chunks over the ordered
       channel and the receiver's `Arcade.peer.onBlob` fires with a
-      reassembled `Blob`. Mind the replay cap when sending large files while
-      `'interrupted'`.
+      reassembled, **hash-verified** `Blob`. Mind the replay cap when sending
+      large files while `'interrupted'` — if chunks are lost to overflow the
+      receiver gets `onBlobError` (`'timeout'`) instead of a wedged transfer;
+      resend after recovery.
 - [ ] Don't cache `status()` at init: a game mounted mid-session receives
       `'connected'` in its welcome, and live transitions arrive via `onStatus`.
 

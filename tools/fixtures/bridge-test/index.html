@@ -5,5 +5,9 @@
      inside the launcher's sandboxed (opaque-origin) iframe pool and drives
      every check through frame.evaluate — nothing to do here but init. -->
 <script src="/arcade-sdk.js"></script>
-<script>Arcade.init({ gameId: 'bridge-test' });</script>
+<script>
+  // ?gid= lets the acceptance mount several instances under distinct pool
+  // ids (eviction tests need three real games).
+  Arcade.init({ gameId: new URLSearchParams(location.search).get('gid') || 'bridge-test' });
+</script>
 <body>bridge-test</body>
