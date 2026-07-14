@@ -468,6 +468,21 @@
     </div>
     <div class="visually-hidden" id="net-activity-live" role="status" aria-live="polite"></div>
 
+    <!-- Non-blocking confirm/prompt. window.confirm/prompt freeze the event
+         loop — fired right after a P2P channel opens (naming a new connection,
+         the auto-reconnect opt-in) that stalls heartbeats and the peer sees the
+         fresh link flap to 'interrupted'. This modal keeps the loop running. -->
+    <div id="arcade-dialog" class="arcade-dialog-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="arcade-dialog-msg">
+        <div class="arcade-dialog">
+            <p class="arcade-dialog__msg" id="arcade-dialog-msg"></p>
+            <input type="text" class="arcade-dialog__input hidden" id="arcade-dialog-input" autocomplete="off">
+            <div class="arcade-dialog__actions">
+                <button type="button" class="topbar-btn arcade-dialog__btn" id="arcade-dialog-cancel">Cancel</button>
+                <button type="button" class="topbar-btn arcade-dialog__btn" id="arcade-dialog-ok">OK</button>
+            </div>
+        </div>
+    </div>
+
     <!-- ========== GAME VIEW ========== -->
     <div id="view-game" class="hidden">
         <div class="game-topbar">
@@ -1080,13 +1095,16 @@
                         // secret on a changed fingerprint — auto-reconnect for
                         // this peer stays parked until the user re-trusts.
                         if (ArcadeP2P.autoReconnectState(deviceId) === true) {
-                            const keep = window.confirm(
-                                '"' + name + '" reconnected with a changed device identity.\n\n' +
-                                'This is normal after ~a month (browser certificate renewal) or a browser ' +
-                                'reset. If neither applies, someone could be impersonating their device.\n\n' +
-                                'Keep reconnecting to this device automatically?');
-                            if (keep) ArcadeP2P.enableAutoReconnect(deviceId);
-                            else ArcadeP2P.disableAutoReconnect(deviceId);
+                            window.__arcade.dialog({
+                                message: '"' + name + '" reconnected with a changed device identity.\n\n' +
+                                    'This is normal after ~a month (browser certificate renewal) or a browser ' +
+                                    'reset. If neither applies, someone could be impersonating their device.\n\n' +
+                                    'Keep reconnecting to this device automatically?',
+                                okLabel: 'Keep', cancelLabel: 'Stop'
+                            }).then((keep) => {
+                                if (keep) ArcadeP2P.enableAutoReconnect(deviceId);
+                                else ArcadeP2P.disableAutoReconnect(deviceId);
+                            });
                         }
                     }
                     // Arrives a beat after 'connected' (one more data-channel
@@ -1104,20 +1122,27 @@
                     // suggesting the name it reported about itself. Declining
                     // (Cancel) just keeps that suggested name as-is.
                     if (isNew && window.__arcade.renamePeer) {
-                        const chosen = window.prompt('Name this connection:', remoteName);
-                        if (chosen !== null) window.__arcade.renamePeer(deviceId, chosen);
-                        // Auto-reconnect opt-in (rendezvous): both sides must
-                        // agree; the pairing secret never leaves the devices
-                        // and relays carry only ciphertext.
-                        askAutoReconnect(deviceId, chosen !== null ? (chosen || name) : name);
+                        // Non-blocking, and chained: name-this-connection then the
+                        // auto-reconnect opt-in run one after another without ever
+                        // freezing the event loop (a blocking prompt here stalls
+                        // the just-opened link's heartbeat → the peer sees it flap
+                        // to 'interrupted' at the worst possible moment).
+                        window.__arcade.dialog({
+                            message: 'Name this connection:', input: true, inputValue: remoteName, okLabel: 'Save'
+                        }).then((chosen) => {
+                            if (chosen !== null) window.__arcade.renamePeer(deviceId, chosen);
+                            return askAutoReconnect(deviceId, chosen !== null ? (chosen || name) : name);
+                        });
                     }
                 });
-                function askAutoReconnect(deviceId, name) {
-                    const yes = window.confirm(
-                        'Reconnect with "' + name + '" automatically if the connection breaks?\n\n' +
-                        'Uses public relays to find each other again — everything sent through them is ' +
-                        'end-to-end encrypted; game data never leaves your devices unencrypted. ' +
-                        'You can change this anytime in Multiplayer (🔁).');
+                async function askAutoReconnect(deviceId, name) {
+                    const yes = await window.__arcade.dialog({
+                        message: 'Reconnect with "' + name + '" automatically if the connection breaks?\n\n' +
+                            'Uses public relays to find each other again — everything sent through them is ' +
+                            'end-to-end encrypted; game data never leaves your devices unencrypted. ' +
+                            'You can change this anytime in Multiplayer (🔁).',
+                        okLabel: 'Yes', cancelLabel: 'No'
+                    });
                     if (yes) ArcadeP2P.enableAutoReconnect(deviceId);
                     else ArcadeP2P.disableAutoReconnect(deviceId);
                     if (window.__arcade.renderKnownPeers) window.__arcade.renderKnownPeers();
@@ -1172,7 +1197,10 @@
                         }
                     }
                     msgToastThrottle.set(key, now);
-                    showToast('💬 ' + resolvePeerName(fromDeviceId) + ' — ' + (entry.name || targetGameId));
+                    showToast('💬 ' + resolvePeerName(fromDeviceId) + ' — ' + (entry.name || targetGameId), {
+                        // Tap to jump straight to the game the message is for.
+                        onClick: () => window.__arcade.showGame(targetGameId, entry.src, entry.name)
+                    });
                 }
                 ArcadeP2P.onMessage((targetGameId, payload, fromDeviceId, meta) => {
                     // Route by the sender's gameId — both devices run the same
@@ -1799,15 +1827,69 @@
 
         // ---- toast helper ----
         let toastTimer = null;
+        let toastClickHandler = null;
         function showToast(msg, opts) {
             opts = opts || {};
             toast.textContent = msg;
             toast.classList.toggle('error', !!opts.error);
+            // Optional tap action (e.g. a "someone messaged you" toast that jumps
+            // to that game). Cleared on the next toast so a stale action can't fire.
+            if (toastClickHandler) { toast.removeEventListener('click', toastClickHandler); toastClickHandler = null; }
+            if (typeof opts.onClick === 'function') {
+                toastClickHandler = () => { toast.classList.remove('visible'); try { opts.onClick(); } catch (e) {} };
+                toast.addEventListener('click', toastClickHandler);
+                toast.classList.add('is-clickable');
+            } else {
+                toast.classList.remove('is-clickable');
+            }
             toast.classList.add('visible');
             if (toastTimer) clearTimeout(toastTimer);
             toastTimer = setTimeout(() => toast.classList.remove('visible'), opts.duration || 3500);
         }
         window.__arcade.showToast = showToast; // used by the Connections dialog module
+
+        // ---- non-blocking confirm/prompt (G-ux-2) ----
+        // Returns a Promise: for a prompt, resolves the string (or null on
+        // cancel); for a confirm, resolves true (OK) or null (cancel). Calls are
+        // serialized so a burst of peer events queues one dialog at a time.
+        const arcadeDialogEl = document.getElementById('arcade-dialog');
+        const arcadeDialogMsg = document.getElementById('arcade-dialog-msg');
+        const arcadeDialogInput = document.getElementById('arcade-dialog-input');
+        const arcadeDialogOk = document.getElementById('arcade-dialog-ok');
+        const arcadeDialogCancel = document.getElementById('arcade-dialog-cancel');
+        let arcadeDialogResolve = null;
+        let arcadeDialogChain = Promise.resolve();
+        function arcadeDialogFinish(result) {
+            if (!arcadeDialogResolve) return;
+            const r = arcadeDialogResolve; arcadeDialogResolve = null;
+            arcadeDialogEl.classList.add('hidden');
+            r(result);
+        }
+        arcadeDialogOk.addEventListener('click', () => {
+            arcadeDialogFinish(arcadeDialogInput.classList.contains('hidden') ? true : arcadeDialogInput.value);
+        });
+        arcadeDialogCancel.addEventListener('click', () => arcadeDialogFinish(null));
+        arcadeDialogInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') arcadeDialogOk.click(); });
+        arcadeDialogEl.addEventListener('keydown', (e) => { if (e.key === 'Escape') arcadeDialogFinish(null); });
+        function arcadeDialog(opts) {
+            opts = opts || {};
+            const run = () => new Promise((resolve) => {
+                arcadeDialogResolve = resolve;
+                arcadeDialogMsg.textContent = opts.message || '';
+                const hasInput = !!opts.input;
+                arcadeDialogInput.classList.toggle('hidden', !hasInput);
+                if (hasInput) arcadeDialogInput.value = opts.inputValue || '';
+                arcadeDialogOk.textContent = opts.okLabel || 'OK';
+                arcadeDialogCancel.textContent = opts.cancelLabel || 'Cancel';
+                arcadeDialogCancel.classList.toggle('hidden', opts.cancelLabel === null);
+                arcadeDialogEl.classList.remove('hidden');
+                setTimeout(() => { (hasInput ? arcadeDialogInput : arcadeDialogOk).focus(); }, 30);
+            });
+            const chained = arcadeDialogChain.then(run);
+            arcadeDialogChain = chained.catch(() => {});
+            return chained;
+        }
+        window.__arcade.dialog = arcadeDialog;
 
         // ---- network-activity watermark ----
         // A quiet corner mark that replaces the interruption toast. Live

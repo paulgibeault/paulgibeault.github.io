@@ -114,7 +114,10 @@ function rdvBrokerUrls() {
 }
 
 let rdv = null;
-let rdvReconnecting = false; // an episode is actively repairing a dead link
+// peerIds with an ACTIVE rendezvous repair episode. Per-peer (not a single
+// global flag): with two known peers, repairing peer A must not make peer B's
+// unrelated stashed/departed session read as 'interrupted' in the roster.
+const rdvReconnecting = new Set();
 
 function rdvCarrierFactory() {
     // Test hook: acceptance injects a loopback/dead-drop carrier here.
@@ -142,7 +145,7 @@ function aggregateStatus(mp) {
     if (pending) return 'connecting';
     // A rendezvous episode means a session is being repaired even though its
     // dead link has left the peers map — games should keep waiting, not reset.
-    if (rdvReconnecting) return 'interrupted';
+    if (rdvReconnecting.size) return 'interrupted';
     return 'idle';
 }
 
@@ -276,7 +279,7 @@ function hostLinkPeerId() {
 function seatReachable(peerId) {
     if (!addon || peerId === undefined || peerId === null) return false;
     if (addon.peerNode.peers.has(peerId)) return true;
-    return !!(addon.peerNode.sessionStash && addon.peerNode.sessionStash.has(peerId) && rdvReconnecting);
+    return !!(addon.peerNode.sessionStash && addon.peerNode.sessionStash.has(peerId) && rdvReconnecting.has(peerId));
 }
 
 // Roster: the per-device view of every DIRECT link (a host sees all joiners;
@@ -300,7 +303,7 @@ function rosterSnapshot() {
         if (p) {
             status = p.status === 'connected' ? 'connected' : 'interrupted';
         } else if (addon.peerNode.sessionStash && addon.peerNode.sessionStash.has(peerId)
-                && rdvReconnecting && !(known[deviceId] && known[deviceId].paused)) {
+                && rdvReconnecting.has(peerId) && !(known[deviceId] && known[deviceId].paused)) {
             // A stashed session counts as a seat only while a rendezvous
             // episode is actively repairing it. A stash with NO episode is a
             // departure (remote bye, or a hang-up — `paused`), and departure
@@ -738,13 +741,16 @@ async function ensureAddon() {
             const d = e.detail || {};
             ArcadeDiag.log('rdv', (d.type && d.type !== 'info' ? d.type.toUpperCase() + ': ' : '') + d.msg);
         });
-        rdv.addEventListener('reconnecting', () => {
-            rdvReconnecting = true;
+        rdv.addEventListener('reconnecting', (e) => {
+            const { peerId } = e.detail || {};
+            if (peerId) rdvReconnecting.add(peerId);
             applyStatus(mp);
         });
         for (const done of ['reconnected', 'recovered-inband', 'gave-up']) {
-            rdv.addEventListener(done, () => {
-                rdvReconnecting = false;
+            rdv.addEventListener(done, (e) => {
+                const { peerId } = e.detail || {};
+                if (peerId) rdvReconnecting.delete(peerId);
+                else rdvReconnecting.clear(); // legacy event without a peerId: clear all
                 applyStatus(mp);
                 if (done !== 'gave-up') stampLiveSession();
             });

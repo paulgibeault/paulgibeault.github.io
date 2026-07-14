@@ -459,9 +459,15 @@ await connect() · await publish(topic, blob) · unsub = subscribe(topic, cb) ·
 
 Defined carriers: `MqttCarrier` (minimal dependency-free MQTT 3.1.1 over
 WSS, QoS 0, for free public brokers; topics namespaced
-`qrp2p/r/v1/<topic>`) and `LoopbackCarrier` (`BroadcastChannel`, same-origin
-testing). Nostr relays are a candidate future carrier (requires secp256k1
-signing, i.e. a vendored dependency).
+`qrp2p/r/v1/<topic>`), `MultiCarrier` (fans the carrier interface out across
+several `MqttCarrier` legs — one per broker — publishing to every live leg,
+subscribing on all, and dropping duplicate deliveries; the rendezvous stays
+reachable while ANY one broker is reachable from both devices), and
+`LoopbackCarrier` (`BroadcastChannel`, same-origin testing). Production wires a
+`MultiCarrier` over three public brokers (mosquitto / emqx / hivemq); a user can
+override the list via `arcade.v1._meta.rdvBrokers` (a JSON array of `wss://`
+URLs). Nostr relays are a candidate future carrier (requires secp256k1 signing,
+i.e. a vendored dependency).
 
 A carrier is expected to be **self-healing** (1.10): `MqttCarrier.connect()`
 resolves on its first successful broker session and never rejects — it
@@ -510,16 +516,14 @@ reflexive address of a client that asked for it.
 
 ## 10. Registry
 
-| item | values (v1.11) |
+| item | values |
 |---|---|
 | payload codec versions | `1` (packed); legacy deflate (decode-only) |
-| rdv ext frame kinds | `pair` `bye` |
+| rdv ext frame kinds | `pair` `pair-confirm` `bye` |
 | rdv sealed directions | `o` (offer) `a` (answer) `r` (ring) |
 | control frame kinds | `ping` `pong` `ack` `resync` `signal` `ext` |
 | ext namespaces | `rdv` |
-| rdv ext message types | `pair` |
-| sealed directions | `o` (offer) `a` (answer) |
-| HKDF info strings | `qrp2p/rdv/v1/{base,topic,aead,ratchet}` |
+| HKDF info strings | `qrp2p/rdv/v1/{base,topic,aead,ratchet,confirm,check}` |
 | AAD prefix | `qrp2p/rdv/v1|` |
 | IndexedDB | `qrp2p-identity/identity` · `qrp2p-rendezvous/pairs` |
 | MQTT namespace | `qrp2p/r/v1/` |
@@ -540,3 +544,4 @@ resume window 6 h · epoch acceptance window +3.
 | 1.9 | rendezvous: pairing, key schedule, sealed dead-drop re-signaling, session adoption, carriers |
 | 1.10 | reconnect-lifecycle hardening: self-healing carriers, standby/ring/bye, exchange nonces, quiet-phase episodes |
 | 1.11 | targeted sends: public `sendTo`, `noRelay` app-frame flag, hub strips forged inbound `relayed` |
+| 2.x (`RDV_BUILD` `v2.4`) | `pair-confirm` key-confirmation before persisting; serialized per-pair record writes; `MultiCarrier` fan-out across several public brokers; flap-resend. **Ratchet frozen** (see §7.5) — epoch stays 0; a per-episode decrypt rate-limit + day-topic-rollover resubscribe added |

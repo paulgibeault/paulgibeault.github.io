@@ -52,14 +52,25 @@ p2p, multiseat, reconnect):
   D-2 (GAME_INTEGRATION.md framed adopt/migrate + `set()` return), D-3 (ARCADE_
   PLATFORM.md duplicate section removed, README message-count, new-API docs).
 
-**Not yet done (follow-ups):** the full Phase 4 structural refactors (P4-a unified
-seat record, P4-b/c aggregate helpers as a full extraction, P4-d index.html
-split, P4-e transport API) — the *bugs* they target are fixed surgically, so
-these remain pure refactors; B-p2p-5 (per-peer `rdvReconnecting`); S-sec-4a
-(persistent cross-episode replay cache) and S-sec-5 (SDP charset validation);
-S-sdk-2/3/4/5/6 SDK polish; G-ux-2 (non-blocking dialogs), G-ux-3 (tappable
-toast); T-2/T-3/T-4 (carrier/crypto unit tests, harness hooks); D-4 (mark shipped
-items in plans/). PROTOCOL.md §10 registry tidy-ups (D-1 remainder).
+**Landed in a second pass (also validated):** T-2/T-3 (crypto + MQTT-codec
+unit tests — `tools/rendezvous-unit.mjs`, 32 checks, wired into CI as an
+early no-browser gate); B-p2p-5 (per-peer `rdvReconnecting` Set); S-sec-5 (SDP
+token/CRLF validation on unpack); S-sdk-3 (scores order sticks to category),
+S-sdk-4 (corrupt-JSON warn-once), S-sdk-5 (warn on `ready` before `init`);
+G-ux-2 (non-blocking `window.__arcade.dialog` replacing the P2P confirm/prompt
+that froze the heartbeat); G-ux-3 (tappable message toast).
+
+**Not yet done (follow-ups):** the full Phase 4 structural refactors — P4-a
+unified seat record (note: `indirectPeers` is relay-tag-keyed, not peerId-keyed,
+so it stays separate from the peerId seat map), P4-d index.html split, P4-e
+transport API. The *bugs* they target are all fixed surgically, so these are pure
+maintainability refactors best done as focused, separately-reviewed PRs (P4-b/c
+are largely covered by the `_renderBadge`/`_renderChoiceButtons` helpers and the
+per-peer rdv Set already added). Also: S-sec-4a (persistent cross-episode replay
+cache — the compensating decrypt rate-limit and honest PROTOCOL.md are in);
+S-sdk-2/6; T-4 (harness carrier hooks + day-rollover scenario); D-4 (tick shipped
+items in framework-evolution.md / implementation-roadmap.md); PROTOCOL.md §10
+registry tidy.
 
 ---
 

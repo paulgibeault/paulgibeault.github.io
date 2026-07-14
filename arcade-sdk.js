@@ -142,6 +142,7 @@
     // ─── Module state ─────────────────────────────────────────────
     var gameId = null;
     var initialized = false;
+    var warnedReadyPreInit = false;
     var framed = false;
     var parentOrigin = null;
     var handshakeTimer = null;
@@ -361,10 +362,20 @@
         try { localStorage.removeItem(k); } catch (e) {}
     }
 
+    var warnedCorruptKeys = {};
     function readJSON(k) {
         var raw = rawGet(k);
         if (raw === null) return null;
-        try { return JSON.parse(raw); } catch (e) { return null; }
+        try { return JSON.parse(raw); }
+        catch (e) {
+            // Corrupt stored JSON reads as "absent" (null), which silently looks
+            // like a missing save. Signal it once per key so it's diagnosable.
+            if (!warnedCorruptKeys[k]) {
+                warnedCorruptKeys[k] = true;
+                console.warn('[Arcade SDK] stored value at "' + k + '" is not valid JSON — treated as empty.');
+            }
+            return null;
+        }
     }
     // Storage-error hook: a quota-denied (or otherwise failed) write fires these
     // so an app can warn the user instead of losing data silently. Declared
@@ -1783,7 +1794,23 @@
                     || typeof entry.score !== 'number' || !isFinite(entry.score)) {
                 throw new Error('Arcade.scores.add: entry.score must be a finite number');
             }
-            var order = (opts && opts.order === 'asc') ? 'asc' : 'desc';
+            // Order sticks to the CATEGORY, not the call: a single add() that
+            // forgets { order: 'asc' } on a time-based category would otherwise
+            // resort the whole list descending and the cap would evict the best
+            // (lowest) times. First add establishes it; a later mismatch warns.
+            var requestedOrder = (opts && (opts.order === 'asc' || opts.order === 'desc')) ? opts.order : null;
+            var ordersKey = gameKey('_scoreOrders');
+            var orders = readJSON(ordersKey);
+            if (!isPlainObject(orders)) orders = {};
+            var order = orders[category];
+            if (!order) {
+                order = requestedOrder || 'desc';
+                orders[category] = order;
+                writeJSON(ordersKey, orders);
+            } else if (requestedOrder && requestedOrder !== order) {
+                console.warn('[Arcade SDK] scores.add("' + category + '"): order "' + requestedOrder
+                    + '" ignored — this category was established as "' + order + '".');
+            }
             var record = {
                 score: entry.score,
                 ts: typeof entry.ts === 'number' ? entry.ts : Date.now()
@@ -2438,7 +2465,16 @@
     // ─── Public surface ───────────────────────────────────────────
     var api = {
         init: init,
-        get ready() { return readyPromise; },
+        get ready() {
+            // A game that awaits Arcade.ready without ever calling Arcade.init()
+            // would hang forever (readyPromise only settles via init's handshake
+            // or timeout). Warn once so the missing init() is obvious.
+            if (!initialized && !warnedReadyPreInit) {
+                warnedReadyPreInit = true;
+                console.warn('[Arcade SDK] Arcade.ready accessed before Arcade.init() — it will not resolve until you call Arcade.init({ gameId }).');
+            }
+            return readyPromise;
+        },
         get context() {
             return {
                 framed: framed, version: VERSION, gameId: gameId, suspended: suspendedNow,

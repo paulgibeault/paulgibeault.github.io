@@ -34,6 +34,9 @@ jobs:
             node --check "$f"
           done
 
+      - name: Rendezvous unit tests (crypto AAD/tamper + MQTT codec resync — no browser)
+        run: node tools/rendezvous-unit.mjs
+
       - name: Install deps + browsers
         run: |
           npm install
