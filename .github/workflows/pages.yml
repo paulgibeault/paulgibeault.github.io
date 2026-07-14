@@ -78,7 +78,7 @@ jobs:
           echo "p2p-multiseat failed after 3 attempts"
           exit 1
 
-      - name: P2P reconnect acceptance (rendezvous: heal, hang up, call, re-pair)
+      - name: "P2P reconnect acceptance (rendezvous heal, hang up, call, re-pair)"
         # The ONLY automated coverage of the rendezvous subsystem (the highest-
         # churn code in the repo). Same retry wrapper as the other WebRTC suites.
         run: |
