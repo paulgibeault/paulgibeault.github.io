@@ -123,6 +123,10 @@
 (function () {
     'use strict';
 
+    // Idempotent load: a template copy-paste that includes arcade-sdk.js twice
+    // must not throw (window.Arcade is defined non-configurable below).
+    if (window.Arcade) { return; }
+
     var VERSION = 3; // v3: bridged storage mode (opaque-origin frames)
     var HANDSHAKE_TIMEOUT_MS = 300;
     // Opaque-origin (sandboxed, no allow-same-origin) frames have no storage
@@ -138,6 +142,7 @@
     // ─── Module state ─────────────────────────────────────────────
     var gameId = null;
     var initialized = false;
+    var warnedReadyPreInit = false;
     var framed = false;
     var parentOrigin = null;
     var handshakeTimer = null;
@@ -156,6 +161,9 @@
     var pendingWrites = null;    // bridged: writes queued until the welcome snapshot
     var PENDING_WRITES_CAP = 500;
     var snapshotSeeded = false;  // bridged: welcome.state applied
+    var welcomedOnce = false;    // guards against a duplicate/late second welcome re-seeding the cache
+    var migrationBlockedByBridge = false; // set when adopt() can't reach a legacy key in an opaque frame
+    var warnedAdoptBridged = false;
     var sdkInternalRead = false; // suppresses the early-read warning for SDK's own reads
     var warnedEarlyReads = {};
 
@@ -180,6 +188,7 @@
         peerQueue: [],
         peerBlob: [],
         peerBlobError: [],
+        peerRequest: [],
         stateReplaced: [],
         settingsChange: [],
         suspend: [],
@@ -303,11 +312,23 @@
         try { void window.localStorage.getItem('arcade.v1._meta.probe'); return true; }
         catch (e) { return false; }
     }
+    var warnedWriteOverflow = false;
     function queueStateWrite(key, value) { // value: raw string, or null = remove
         if (pendingWrites) {
             if (pendingWrites.length >= PENDING_WRITES_CAP) {
                 pendingWrites.shift();
-                console.warn('[Arcade SDK] pre-ready write queue overflowed — oldest write dropped. Await Arcade.ready before writing state in framed mode.');
+                // Warn ONCE, not on every subsequent write. In memory-only mode
+                // (handshake timed out, no launcher) ready has already resolved
+                // and there is nothing left to await — say so instead of telling
+                // the game to await Arcade.ready.
+                if (!warnedWriteOverflow) {
+                    warnedWriteOverflow = true;
+                    if (readyResolved && !framed) {
+                        console.warn('[Arcade SDK] running in memory-only mode (no launcher answered) — writes are session-local and the oldest are being dropped past ' + PENDING_WRITES_CAP + '.');
+                    } else {
+                        console.warn('[Arcade SDK] pre-ready write queue overflowed — oldest write dropped. Await Arcade.ready before writing state in framed mode.');
+                    }
+                }
             }
             pendingWrites.push({ key: key, value: value });
             return;
@@ -341,10 +362,20 @@
         try { localStorage.removeItem(k); } catch (e) {}
     }
 
+    var warnedCorruptKeys = {};
     function readJSON(k) {
         var raw = rawGet(k);
         if (raw === null) return null;
-        try { return JSON.parse(raw); } catch (e) { return null; }
+        try { return JSON.parse(raw); }
+        catch (e) {
+            // Corrupt stored JSON reads as "absent" (null), which silently looks
+            // like a missing save. Signal it once per key so it's diagnosable.
+            if (!warnedCorruptKeys[k]) {
+                warnedCorruptKeys[k] = true;
+                console.warn('[Arcade SDK] stored value at "' + k + '" is not valid JSON — treated as empty.');
+            }
+            return null;
+        }
     }
     // Storage-error hook: a quota-denied (or otherwise failed) write fires these
     // so an app can warn the user instead of losing data silently. Declared
@@ -429,16 +460,66 @@
 
     function fire(arr /*, ...args */) {
         var args = Array.prototype.slice.call(arguments, 1);
-        for (var i = 0; i < arr.length; i++) {
-            try { arr[i].apply(null, args); } catch (e) {}
+        // Iterate a SNAPSHOT: built-in subscribers (managed timers, loops,
+        // session trackers) legitimately unsubscribe from inside their own
+        // callback, which splices `arr` mid-loop and would otherwise skip the
+        // next sibling — the exact hazard that leaks a timer past a save import.
+        var snap = arr.slice();
+        for (var i = 0; i < snap.length; i++) {
+            try { snap[i].apply(null, args); } catch (e) { logListenerError(e); }
         }
     }
     function fireKeyChange(fullKey, value) {
         var arr = keyChangeListeners.get(fullKey);
         if (!arr) return;
-        for (var i = 0; i < arr.length; i++) {
-            try { arr[i](value); } catch (e) {}
+        var snap = arr.slice();
+        for (var i = 0; i < snap.length; i++) {
+            try { snap[i](value); } catch (e) { logListenerError(e); }
         }
+    }
+    // Deterministic seeded PRNG (mulberry32) for lockstep/turn-based games —
+    // both devices seed from the same value (e.g. a shared game code) and deal
+    // the same deck without a desync from Math.random.
+    function hashStringToU32(str) {
+        var h = 2166136261 >>> 0;
+        for (var i = 0; i < str.length; i++) {
+            h ^= str.charCodeAt(i);
+            h = Math.imul(h, 16777619) >>> 0;
+        }
+        return h >>> 0;
+    }
+    function mulberry32(seed) {
+        var a = seed >>> 0;
+        return function () {
+            a = (a + 0x6D2B79F5) | 0;
+            var t = Math.imul(a ^ (a >>> 15), 1 | a);
+            t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+    function makeSeededRandom(seed) {
+        var s = (typeof seed === 'number' && isFinite(seed)) ? (seed >>> 0)
+            : hashStringToU32(String(seed == null ? '' : seed));
+        var next = mulberry32(s);
+        // Integer in [min, max] inclusive.
+        next.int = function (min, max) { return min + Math.floor(next() * (max - min + 1)); };
+        next.pick = function (arr) { return arr[Math.floor(next() * arr.length)]; };
+        next.shuffle = function (arr) {
+            var a = arr.slice();
+            for (var i = a.length - 1; i > 0; i--) {
+                var j = Math.floor(next() * (i + 1));
+                var tmp = a[i]; a[i] = a[j]; a[j] = tmp;
+            }
+            return a;
+        };
+        return next;
+    }
+
+    function logListenerError(e) {
+        // Keep listener isolation (one bad handler must not break the rest) but
+        // stop swallowing the error entirely — a game whose handler throws gets
+        // at least a console signal.
+        try { console.error('[Arcade SDK] listener threw:', e); } catch (_) {}
     }
     function makeSubscriber(arr) {
         return function (fn) {
@@ -481,9 +562,11 @@
     function applySettings(incoming) {
         if (!incoming || typeof incoming !== 'object') return false;
         var changed = false;
-        if (typeof incoming.fontScale === 'number' && isFinite(incoming.fontScale)
-                && incoming.fontScale !== settings.fontScale) {
-            settings.fontScale = incoming.fontScale; changed = true;
+        if (typeof incoming.fontScale === 'number' && isFinite(incoming.fontScale)) {
+            // Clamp to the launcher's own range — a stray 0/negative from a
+            // buggy launcher would blank every rem-sized glyph (font-size: 0).
+            var fs = Math.max(0.5, Math.min(3, incoming.fontScale));
+            if (fs !== settings.fontScale) { settings.fontScale = fs; changed = true; }
         }
         if ((incoming.theme === 'light' || incoming.theme === 'dark')
                 && incoming.theme !== settings.theme) {
@@ -623,31 +706,47 @@
     var BLOB_CHUNK_BYTES = 48 * 1024;
     var BLOB_MAX_CHUNKS = 2048; // ~96 MB — reject anything claiming more
     var BLOB_RX_TTL_MS = 60 * 1000;
+    var BLOB_MAX_CHUNK_DECODED = BLOB_CHUNK_BYTES + 256; // slack for base64/framing
+    var BLOB_MAX_TOTAL_BYTES = BLOB_MAX_CHUNKS * BLOB_CHUNK_BYTES;
+    var BLOB_DEAD_TTL_MS = 30 * 1000;
     var blobSendCounter = 0;
-    var blobRx = {}; // id -> { chunks, received, total, mime, name, sha, lastAt, fromPeer }
+    // Keyed by fromPeer|id (NOT id alone): in a multi-seat session ids are
+    // guessable, so keying by id let any peer poison or abort another seat's
+    // transfer. The composite key isolates each sender's transfers.
+    var blobRx = {}; // rxKey -> { id, chunks, received, total, bytesTotal, mime, name, sha, lastAt, fromPeer }
+    var blobRxDead = {}; // rxKey -> deadAt: briefly reject retransmits of a failed transfer
     var blobRxSweeper = null;
+    function rxKey(id, fromPeer) { return (fromPeer || 'peer') + '|' + id; }
 
     function fireBlobError(id, st, reason, fromPeer) {
         fire(listeners.peerBlobError, {
             id: id,
             name: st ? st.name : '',
-            reason: reason, // 'timeout' | 'aborted' | 'integrity'
+            reason: reason, // 'timeout' | 'aborted' | 'integrity' | 'malformed' | 'oversize'
             received: st ? st.received : 0,
             total: st ? st.total : 0,
             fromPeer: fromPeer || (st ? st.fromPeer : undefined)
         });
     }
+    function killBlobRx(key, st, reason, fromPeer) {
+        delete blobRx[key];
+        blobRxDead[key] = Date.now();
+        fireBlobError(st ? st.id : key, st, reason, fromPeer);
+    }
     function blobRxSweep() {
         var now = Date.now();
         var live = 0;
-        for (var id in blobRx) {
-            var st = blobRx[id];
+        for (var key in blobRx) {
+            var st = blobRx[key];
             if (now - st.lastAt > BLOB_RX_TTL_MS) {
-                delete blobRx[id];
-                fireBlobError(id, st, 'timeout');
+                delete blobRx[key];
+                fireBlobError(st.id, st, 'timeout');
             } else {
                 live++;
             }
+        }
+        for (var dk in blobRxDead) {
+            if (now - blobRxDead[dk] > BLOB_DEAD_TTL_MS) delete blobRxDead[dk];
         }
         if (!live && blobRxSweeper) { clearInterval(blobRxSweeper); blobRxSweeper = null; }
     }
@@ -685,12 +784,18 @@
         if (typeof meta.seq !== 'number' || typeof meta.total !== 'number') return;
         if (meta.total < 1 || meta.total > BLOB_MAX_CHUNKS
                 || meta.seq < 0 || meta.seq >= meta.total || meta.seq !== Math.floor(meta.seq)) return;
-        var st = blobRx[meta.id];
+        var key = rxKey(meta.id, fromPeer);
+        // A retransmitted chunk of a transfer we already failed must not
+        // resurrect a fresh (incompletable) entry.
+        if (blobRxDead[key]) return;
+        var st = blobRx[key];
         if (!st) {
-            st = blobRx[meta.id] = {
+            st = blobRx[key] = {
+                id: meta.id,
                 chunks: new Array(meta.total),
                 received: 0,
                 total: meta.total,
+                bytesTotal: 0,
                 mime: typeof meta.mime === 'string' ? meta.mime.slice(0, 128) : '',
                 name: typeof meta.name === 'string' ? meta.name.slice(0, 128) : '',
                 sha: (typeof meta.sha === 'string' && /^[0-9a-f]{64}$/.test(meta.sha)) ? meta.sha : null,
@@ -702,35 +807,90 @@
         if (st.total !== meta.total || st.chunks[meta.seq] !== undefined) return;
         var bytes;
         try { bytes = base64ToBytes(String(meta.bytes || '')); }
-        catch (e) { delete blobRx[meta.id]; return; }
+        catch (e) {
+            // Corrupt base64 — surface it instead of silently discarding, and
+            // remember the id so later chunks don't build a ghost entry.
+            killBlobRx(key, st, 'malformed', fromPeer);
+            return;
+        }
+        // Cap per-chunk and cumulative decoded size: a peer sending 2048 chunks
+        // of arbitrarily large base64 could otherwise pin hundreds of MB.
+        if (bytes.length > BLOB_MAX_CHUNK_DECODED) { killBlobRx(key, st, 'oversize', fromPeer); return; }
+        if (st.bytesTotal + bytes.length > BLOB_MAX_TOTAL_BYTES) { killBlobRx(key, st, 'oversize', fromPeer); return; }
         st.chunks[meta.seq] = bytes;
+        st.bytesTotal += bytes.length;
         st.received++;
         st.lastAt = Date.now();
         if (st.received === st.total) {
-            delete blobRx[meta.id];
+            delete blobRx[key];
             var blob;
             try { blob = new Blob(st.chunks, { type: st.mime }); } catch (e) { return; }
             var deliver = function () {
                 fire(listeners.peerBlob, blob, {
-                    name: st.name, size: blob.size, mime: st.mime, fromPeer: fromPeer, id: meta.id
+                    name: st.name, size: blob.size, mime: st.mime, fromPeer: fromPeer, id: st.id
                 });
             };
             if (!st.sha) { deliver(); return; }
             // Integrity gate: only a hash-verified blob reaches the game.
             blob.arrayBuffer().then(sha256Hex).then(function (got) {
                 if (got === null || got === st.sha) deliver();
-                else fireBlobError(meta.id, st, 'integrity', fromPeer);
+                else fireBlobError(st.id, st, 'integrity', fromPeer);
             }, function () { deliver(); /* unreadable-buffer edge: don't invent an error */ });
         }
     }
+    // ─── Request/response over peer.send ──────────────────────────
+    // Every multiplayer game re-invents id+timeout+retry on top of fire-and-
+    // forget send(). peer.request()/onRequest() provide it once: __arcadeReq /
+    // __arcadeReqReply are reserved payload keys, intercepted before onMessage.
+    var reqSendCounter = 0;
+    var reqPending = {}; // id -> { resolve, reject, timer }
+    function handlePeerRequest(req, fromPeer) {
+        if (!req || typeof req.id !== 'string') return;
+        var replyTo = function (response, isError) {
+            var reply = { __arcadeReqReply: { id: req.id, response: response, error: !!isError } };
+            // Reply privately to the requester when we can target it; otherwise
+            // broadcast (the id disambiguates on the requester side).
+            if (fromPeer && peerCaps.indexOf('peer.sendTo') !== -1) peerApi.send(reply, { to: fromPeer });
+            else peerApi.send(reply);
+        };
+        var handlers = listeners.peerRequest;
+        if (!handlers.length) { replyTo('no request handler registered', true); return; }
+        // First handler to return a non-undefined value (or a promise) answers.
+        var handled = false;
+        var snap = handlers.slice();
+        for (var i = 0; i < snap.length && !handled; i++) {
+            try {
+                var out = snap[i](req.payload, fromPeer);
+                if (out !== undefined) {
+                    handled = true;
+                    Promise.resolve(out).then(function (v) { replyTo(v, false); },
+                                             function (err) { replyTo(String(err && err.message || err), true); });
+                }
+            } catch (err) { handled = true; replyTo(String(err && err.message || err), true); logListenerError(err); }
+        }
+        if (!handled) replyTo(undefined, false); // acknowledged, no payload
+    }
+    function handlePeerReqReply(reply) {
+        if (!reply || typeof reply.id !== 'string') return;
+        var pend = reqPending[reply.id];
+        if (!pend) return;
+        delete reqPending[reply.id];
+        clearTimeout(pend.timer);
+        if (reply.error) pend.reject(new Error(typeof reply.response === 'string' ? reply.response : 'peer request failed'));
+        else pend.resolve(reply.response);
+    }
+
     function handleBlobAbort(meta, fromPeer) {
         if (!meta || typeof meta.id !== 'string' || meta.id.length > 64) return;
-        var st = blobRx[meta.id];
+        // Keyed by sender: an abort can only ever touch the aborting peer's OWN
+        // in-flight transfer, never a victim's between two other seats.
+        var key = rxKey(meta.id, fromPeer);
+        var st = blobRx[key];
         // Unknown id: either nothing arrived yet or it already completed —
         // record nothing, an abort for a finished transfer must not alarm.
         if (!st) return;
-        delete blobRx[meta.id];
-        fireBlobError(meta.id, st, 'aborted', fromPeer);
+        delete blobRx[key];
+        fireBlobError(st.id, st, 'aborted', fromPeer);
     }
 
     // ─── postMessage protocol ─────────────────────────────────────
@@ -848,6 +1008,13 @@
                 // the legacy same-origin-embed path. Observable via
                 // onFramedChange rather than silent.
                 var lateWelcome = readyResolved && !framed;
+                // A SECOND welcome (launcher bug, or a hostile same-origin parent
+                // in direct mode) must not re-seed the cache — that would clobber
+                // live local writes with the stale snapshot — nor re-resolve ready.
+                var dupWelcome = welcomedOnce;
+                if (dupWelcome) {
+                    console.warn('[Arcade SDK] duplicate arcade:welcome ignored for storage; refreshing live launcher state only.');
+                }
                 framed = true;
                 parentOrigin = e.origin;
                 setPeerStatus(typeof data.peerStatus === 'string' ? data.peerStatus : 'idle');
@@ -857,11 +1024,12 @@
                 // Bridged: seed the storage cache from the launcher's
                 // snapshot BEFORE ready resolves, so post-ready reads see
                 // real state. Must precede resolveReady().
-                if (storageMode === 'bridged') seedInitialSnapshot(data.state);
+                if (storageMode === 'bridged' && !dupWelcome) seedInitialSnapshot(data.state);
                 applyRoster(data.peers);
                 if (applySettings(data.settings)) fire(listeners.settingsChange, snapshotSettings());
-                resolveReady();
-                if (lateWelcome) fire(listeners.framedChange, true);
+                if (!dupWelcome) resolveReady();
+                welcomedOnce = true;
+                if (lateWelcome && !dupWelcome) fire(listeners.framedChange, true);
                 break;
             case 'arcade:peer.message': {
                 if (data.payload && typeof data.payload === 'object' && data.payload.__arcadeBlob) {
@@ -870,6 +1038,14 @@
                 }
                 if (data.payload && typeof data.payload === 'object' && data.payload.__arcadeBlobAbort) {
                     handleBlobAbort(data.payload.__arcadeBlobAbort, data.fromPeer);
+                    break;
+                }
+                if (data.payload && typeof data.payload === 'object' && data.payload.__arcadeReq) {
+                    handlePeerRequest(data.payload.__arcadeReq, data.fromPeer);
+                    break;
+                }
+                if (data.payload && typeof data.payload === 'object' && data.payload.__arcadeReqReply) {
+                    handlePeerReqReply(data.payload.__arcadeReqReply);
                     break;
                 }
                 // meta = { relayed, to }: relayed=true means the frame did
@@ -923,11 +1099,9 @@
                 fire(listeners.stateReplaced);
                 // Replay key-change subscriptions — storage events also fire,
                 // but a launcher-driven event is more reliable across browsers.
+                // Route through fireKeyChange for snapshot-safe iteration.
                 keyChangeListeners.forEach(function (arr, k) {
-                    var v = readJSON(k);
-                    for (var i = 0; i < arr.length; i++) {
-                        try { arr[i](v); } catch (err) {}
-                    }
+                    fireKeyChange(k, readJSON(k));
                 });
                 break;
             case 'arcade:state.changed':
@@ -976,15 +1150,12 @@
     }
     function onStorage(e) {
         if (!e.key) return;
-        var arr = keyChangeListeners.get(e.key);
-        if (!arr) return;
+        if (!keyChangeListeners.has(e.key)) return;
         var v = null;
         if (e.newValue !== null) {
             try { v = JSON.parse(e.newValue); } catch (err) { v = null; }
         }
-        for (var i = 0; i < arr.length; i++) {
-            try { arr[i](v); } catch (err) {}
-        }
+        fireKeyChange(e.key, v);
     }
 
     // ─── Service-worker collision check ───────────────────────────
@@ -1154,9 +1325,18 @@
     function runMigration(version, fn) {
         var sentinel = migratedSentinelKey(version);
         if (readJSON(sentinel) === true) return false;
+        migrationBlockedByBridge = false;
         try { fn(); }
         catch (e) {
             console.error('[Arcade SDK] migration "' + version + '" threw:', e);
+            return false;
+        }
+        if (migrationBlockedByBridge) {
+            // A pre-namespace adopt() couldn't reach its legacy key in this
+            // opaque frame. Withhold the sentinel so the migration re-runs and
+            // completes on a later standalone visit — burning it here would
+            // orphan the legacy save permanently (that's the whole bug).
+            console.warn('[Arcade SDK] migration "' + version + '" deferred: pre-namespace legacy keys are only reachable on a standalone visit to this game, not inside the launcher frame.');
             return false;
         }
         writeJSON(sentinel, true);
@@ -1194,11 +1374,24 @@
             var k = gameKey(key);
             var current = readJSON(k);
             if (current === null) {
+                // Store and return independent copies — returning `defaults` by
+                // reference lets a caller's later mutation silently rewrite the
+                // shared default object it passed in.
                 writeJSON(k, defaults);
-                return defaults;
+                fireKeyChange(k, defaults);
+                try { return JSON.parse(JSON.stringify(defaults)); } catch (e) { return defaults; }
             }
             if (isPlainObject(defaults) && isPlainObject(current)) {
                 var merged = deepMerge(defaults, current);
+                // Persist newly-added default fields so a plain state.get(key)
+                // afterwards returns the merged shape, not the unmerged stored
+                // value (callers otherwise must use getOrInit forever).
+                try {
+                    if (JSON.stringify(merged) !== JSON.stringify(current)) {
+                        writeJSON(k, merged);
+                        fireKeyChange(k, merged);
+                    }
+                } catch (e) {}
                 return merged;
             }
             return current;
@@ -1238,12 +1431,28 @@
                 throw new Error('Arcade.state.adopt: legacyKey must be a non-empty string');
             }
             var targetKey = (typeof newKey === 'string' && newKey) ? newKey : legacyKey;
+            var k = gameKey(targetKey);
+            if (storageMode === 'bridged') {
+                // The legacy (non-namespaced) key lives in the REAL origin's
+                // localStorage, which this opaque-origin frame cannot read. If
+                // the namespaced target already holds a value, a prior standalone
+                // adopt already moved it — nothing to do. Otherwise we genuinely
+                // can't complete here: flag it so the enclosing migrate()
+                // withholds its sentinel (see runMigration) rather than marking
+                // the migration done and orphaning the legacy save.
+                if (readJSON(k) !== null) return true;
+                migrationBlockedByBridge = true;
+                if (!warnedAdoptBridged) {
+                    warnedAdoptBridged = true;
+                    console.warn('[Arcade SDK] state.adopt("' + legacyKey + '") cannot reach pre-namespace keys inside the launcher frame; it will complete on a standalone visit to this game.');
+                }
+                return false;
+            }
             var raw;
             try { raw = localStorage.getItem(legacyKey); } catch (e) { return false; }
             if (raw === null) return false;
-            var k = gameKey(targetKey);
             var existing;
-            try { existing = localStorage.getItem(k); } catch (e) { existing = null; }
+            try { existing = rawGet(k); } catch (e) { existing = null; }
             if (existing === null) {
                 var value = raw;
                 if (!opts || opts.json !== false) {
@@ -1258,6 +1467,36 @@
         onChange: function (key, fn) {
             ensureGameId();
             return makeKeyChangeSubscriber(gameKey(key))(fn);
+        },
+        // True if a value is stored for key (distinguishes absent from a stored
+        // null, which state.get() cannot).
+        has: function (key) {
+            ensureGameId();
+            return rawGet(gameKey(key)) !== null;
+        },
+        // Enumerate this game's own stored keys (unprefixed) — for slot pickers,
+        // debug dumps, etc. SDK-internal keys (_migrated, _noExport, _meta) are
+        // excluded.
+        keys: function () {
+            ensureGameId();
+            var prefix = gameKey('');
+            var out = [];
+            var take = function (k) {
+                if (k.indexOf(prefix) !== 0) return;
+                var sub = k.slice(prefix.length);
+                if (sub && sub.charAt(0) !== '_') out.push(sub);
+            };
+            if (storageMode === 'bridged') {
+                lsCache.forEach(function (v, k) { take(k); });
+            } else {
+                try {
+                    for (var i = 0; i < localStorage.length; i++) {
+                        var k = localStorage.key(i);
+                        if (k) take(k);
+                    }
+                } catch (e) {}
+            }
+            return out;
         }
     };
 
@@ -1335,6 +1574,32 @@
         },
         onMessage: makeSubscriber(listeners.peerMessage),
 
+        // Request/response over the peer channel. request() sends a payload and
+        // resolves with the peer's reply (or rejects on timeout/error); the
+        // remote game answers by returning a value (or a Promise) from its
+        // onRequest handler. opts.to targets one device (needs 'peer.sendTo');
+        // opts.timeoutMs defaults to 10s. Correlation and cleanup are handled
+        // here so games stop hand-rolling id+timeout+retry on top of send().
+        request: function (payload, opts) {
+            var to = (opts && typeof opts.to === 'string' && opts.to) ? opts.to : undefined;
+            var timeoutMs = (opts && typeof opts.timeoutMs === 'number' && opts.timeoutMs > 0) ? opts.timeoutMs : 10000;
+            var id = 'r' + (++reqSendCounter) + '-' + Date.now().toString(36);
+            var frame = { __arcadeReq: { id: id, payload: payload } };
+            var ok = to ? peerApi.send(frame, { to: to }) : peerApi.send(frame);
+            if (!ok) return Promise.reject(new Error('Arcade.peer.request: no live connection' + (to ? ' to ' + to : '')));
+            return new Promise(function (resolve, reject) {
+                var timer = setTimeout(function () {
+                    delete reqPending[id];
+                    reject(new Error('Arcade.peer.request: timed out after ' + timeoutMs + 'ms'));
+                }, timeoutMs);
+                reqPending[id] = { resolve: resolve, reject: reject, timer: timer };
+            });
+        },
+        // Register a responder: fn(payload, fromPeer) may return a value or a
+        // Promise, which is sent back to the requester. Return undefined to let
+        // another registered handler answer (or send a bare ack if none do).
+        onRequest: makeSubscriber(listeners.peerRequest),
+
         // This device's stable identity — the same deviceId the launcher
         // uses for known peers / auto-reconnect. null until the launcher's
         // P2P layer has generated one (i.e. before the first ever pairing).
@@ -1373,14 +1638,20 @@
         // Replaces the hand-rolled hello/echo handshake games used to need.
         onReady: makeSubscriber(listeners.peerReady),
 
-        // Send a Blob/File to the peer, chunked over the ordered channel.
+        // Send a Blob/File to the peer(s), chunked over the ordered channel.
         // Resolves { id, chunks, size } after the last chunk is handed to
         // the transport; opts.onProgress(fraction, sent, total) per chunk.
+        // opts.to = a deviceId sends privately to that seat (needs the
+        // 'peer.sendTo' cap); omit to broadcast to every connected peer.
         sendBlob: function (blob, opts) {
             if (!blob || typeof blob.arrayBuffer !== 'function') {
                 return Promise.reject(new Error('Arcade.peer.sendBlob: pass a Blob or File'));
             }
             var onProgress = (opts && typeof opts.onProgress === 'function') ? opts.onProgress : null;
+            var to = (opts && typeof opts.to === 'string' && opts.to) ? opts.to : null;
+            var sendOne = to
+                ? function (payload) { return peerApi.send(payload, { to: to }); }
+                : function (payload) { return peerApi.send(payload); };
             var name = (opts && typeof opts.name === 'string' && opts.name) ? opts.name
                 : (typeof blob.name === 'string' ? blob.name : '');
             return blob.arrayBuffer().then(function (buf) {
@@ -1398,29 +1669,41 @@
             }).then(function (prep) {
                 var bytes = prep.bytes, total = prep.total;
                 var id = 'b' + (++blobSendCounter) + '-' + Date.now().toString(36);
-                for (var seq = 0; seq < total; seq++) {
-                    var chunk = bytes.subarray(seq * BLOB_CHUNK_BYTES, (seq + 1) * BLOB_CHUNK_BYTES);
-                    var chunkMeta = {
-                        id: id, seq: seq, total: total, size: bytes.length,
-                        mime: blob.type || '', name: name.slice(0, 128),
-                        bytes: bytesToBase64(chunk)
-                    };
-                    if (prep.sha) chunkMeta.sha = prep.sha;
-                    var ok = peerApi.send({ __arcadeBlob: chunkMeta });
-                    if (!ok) {
-                        // Chunks already handed off may still arrive — tell
-                        // the receiver the rest never will, so it errors out
-                        // instead of wedging. Best-effort: if the link is
-                        // fully down this send fails too and the receiver's
-                        // TTL is the backstop.
-                        if (seq > 0) peerApi.send({ __arcadeBlobAbort: { id: id } });
-                        throw new Error('Arcade.peer.sendBlob: no live connection');
+                // Pace the send in small batches, yielding a macrotask between
+                // them. Handing 2048 chunks to the transport in one synchronous
+                // burst spikes the per-link replay outbox past its cap (forcing
+                // a spurious resync) and makes onProgress fire 0→100% in a single
+                // frame. Yielding lets the channel drain and progress render.
+                var BLOB_SEND_BATCH = 8;
+                function sendFrom(seq) {
+                    var end = Math.min(seq + BLOB_SEND_BATCH, total);
+                    for (var s = seq; s < end; s++) {
+                        var chunk = bytes.subarray(s * BLOB_CHUNK_BYTES, (s + 1) * BLOB_CHUNK_BYTES);
+                        var chunkMeta = {
+                            id: id, seq: s, total: total, size: bytes.length,
+                            mime: blob.type || '', name: name.slice(0, 128),
+                            bytes: bytesToBase64(chunk)
+                        };
+                        if (prep.sha) chunkMeta.sha = prep.sha;
+                        var ok = sendOne({ __arcadeBlob: chunkMeta });
+                        if (!ok) {
+                            // Chunks already handed off may still arrive — tell
+                            // the receiver the rest never will, so it errors out
+                            // instead of wedging. Best-effort: if the link is
+                            // fully down this send fails too and the receiver's
+                            // TTL is the backstop.
+                            if (s > 0) sendOne({ __arcadeBlobAbort: { id: id } });
+                            return Promise.reject(new Error('Arcade.peer.sendBlob: no live connection'
+                                + (to ? ' to ' + to : '')));
+                        }
+                        if (onProgress) {
+                            try { onProgress((s + 1) / total, s + 1, total); } catch (e) {}
+                        }
                     }
-                    if (onProgress) {
-                        try { onProgress((seq + 1) / total, seq + 1, total); } catch (e) {}
-                    }
+                    if (end >= total) return { id: id, chunks: total, size: bytes.length };
+                    return new Promise(function (res) { setTimeout(res, 0); }).then(function () { return sendFrom(end); });
                 }
-                return { id: id, chunks: total, size: bytes.length };
+                return sendFrom(0);
             });
         },
         // fn(blob, { name, size, mime, fromPeer, id }) once a full blob has
@@ -1511,7 +1794,23 @@
                     || typeof entry.score !== 'number' || !isFinite(entry.score)) {
                 throw new Error('Arcade.scores.add: entry.score must be a finite number');
             }
-            var order = (opts && opts.order === 'asc') ? 'asc' : 'desc';
+            // Order sticks to the CATEGORY, not the call: a single add() that
+            // forgets { order: 'asc' } on a time-based category would otherwise
+            // resort the whole list descending and the cap would evict the best
+            // (lowest) times. First add establishes it; a later mismatch warns.
+            var requestedOrder = (opts && (opts.order === 'asc' || opts.order === 'desc')) ? opts.order : null;
+            var ordersKey = gameKey('_scoreOrders');
+            var orders = readJSON(ordersKey);
+            if (!isPlainObject(orders)) orders = {};
+            var order = orders[category];
+            if (!order) {
+                order = requestedOrder || 'desc';
+                orders[category] = order;
+                writeJSON(ordersKey, orders);
+            } else if (requestedOrder && requestedOrder !== order) {
+                console.warn('[Arcade SDK] scores.add("' + category + '"): order "' + requestedOrder
+                    + '" ignored — this category was established as "' + order + '".');
+            }
             var record = {
                 score: entry.score,
                 ts: typeof entry.ts === 'number' ? entry.ts : Date.now()
@@ -2076,17 +2375,26 @@
             }
             if (opfsAvailable()) {
                 return opfsDir().then(function (dir) {
+                    // values() is an async iterator of FileSystemHandles. Drive
+                    // it with .then() recursion rather than `for await`, so the
+                    // whole SDK stays parseable on engines without async
+                    // iteration (the rest of this file is deliberately ES5).
                     var out = [];
-                    // values() is an async iterator of FileSystemHandles.
-                    return (async function () {
-                        for await (var h of dir.values()) {
-                            if (h.kind === 'file') {
-                                var f = await h.getFile();
-                                out.push({ name: h.name, size: f.size });
+                    var it = dir.values();
+                    function step() {
+                        return it.next().then(function (res) {
+                            if (res.done) return out;
+                            var h = res.value;
+                            if (h && h.kind === 'file') {
+                                return h.getFile().then(function (f) {
+                                    out.push({ name: h.name, size: f.size });
+                                    return step();
+                                });
                             }
-                        }
-                        return out;
-                    })();
+                            return step();
+                        });
+                    }
+                    return step();
                 }).catch(function () { return []; });
             }
             return kvTx(filesDbName(), 'readonly', function (s) {
@@ -2157,7 +2465,16 @@
     // ─── Public surface ───────────────────────────────────────────
     var api = {
         init: init,
-        get ready() { return readyPromise; },
+        get ready() {
+            // A game that awaits Arcade.ready without ever calling Arcade.init()
+            // would hang forever (readyPromise only settles via init's handshake
+            // or timeout). Warn once so the missing init() is obvious.
+            if (!initialized && !warnedReadyPreInit) {
+                warnedReadyPreInit = true;
+                console.warn('[Arcade SDK] Arcade.ready accessed before Arcade.init() — it will not resolve until you call Arcade.init({ gameId }).');
+            }
+            return readyPromise;
+        },
         get context() {
             return {
                 framed: framed, version: VERSION, gameId: gameId, suspended: suspendedNow,
@@ -2181,6 +2498,11 @@
         store: storeApi,
         files: filesApi,
         storage: storageApi,
+        // Deterministic seeded RNG for lockstep/turn-based multiplayer. Both
+        // devices seed from the same value to produce identical sequences:
+        //   const rng = Arcade.random.seeded(gameCode);
+        //   rng() → [0,1)   rng.int(1,6)   rng.pick(arr)   rng.shuffle(arr)
+        random: { seeded: makeSeededRandom },
         loop: function (fn) { ensureGameId(); return createLoop(fn); },
         onSuspend: makeSubscriber(listeners.suspend),
         onResume: makeSubscriber(listeners.resume),

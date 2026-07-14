@@ -196,6 +196,11 @@ function waitGathering(pc, timeoutMs = 10000) {
 // Epoch acceptance window above the completed epoch (crash-recovery skew).
 const EPOCH_WINDOW = 3;
 
+// How often a live episode re-checks its day-topic window. Publishers rotate to
+// a new UTC-day HMAC topic at midnight; re-subscribing well within a day keeps a
+// long-quiet/standby episode reachable across the rollover (B-rdv day-deafness).
+const RENDEZVOUS_TOPIC_REFRESH_MS = 6 * 3600 * 1000;
+
 export class RendezvousManager extends EventTarget {
     /**
      * @param {PeerManager} peerManager
@@ -232,6 +237,8 @@ export class RendezvousManager extends EventTarget {
         this.earlyConfirms = new Map(); // peerId → mac (confirm that outran our async opt-in)
         this.confirmRetries = new Map();// peerId → count (crossed-exchange restarts)
         this.episodes = new Map();      // pairId → episode
+        this._startingEpisodes = new Set(); // pairIds mid-_startEpisode, before the slot is claimed
+        this._tombstoned = new Set();   // pairIds forgotten via disablePair — refuse stale re-persists
         this.delayTimers = new Map();   // pairId → clearFn
         this._peerLocks = new Map();    // peerId → queue tail (pairing ops serialized per peer)
         this._recWrites = new Map();    // pairId → queue tail (record writes serialized per pair)
@@ -271,7 +278,9 @@ export class RendezvousManager extends EventTarget {
      */
     _serial(map, key, fn) {
         const tail = map.get(key) || Promise.resolve();
-        const run = tail.catch(() => {}).then(fn);
+        // A queued op that comes due AFTER destroy() must not run — it could
+        // write a record back to IndexedDB post-teardown. Skip to undefined.
+        const run = tail.catch(() => {}).then(() => (this._destroyed ? undefined : fn()));
         const settled = run.catch(() => {});
         map.set(key, settled);
         settled.then(() => { if (map.get(key) === settled) map.delete(key); });
@@ -298,8 +307,16 @@ export class RendezvousManager extends EventTarget {
      * record (or null) and returns the record to store, or falsy to store
      * nothing. Resolves to the record now in force (or null).
      */
-    _updateRec(pairId, mutate) {
+    _updateRec(pairId, mutate, opts) {
         return this._serial(this._recWrites, pairId, async () => {
+            // A pair the user forgot via disablePair() must stay forgotten: a
+            // settle/commit already queued when the delete landed would otherwise
+            // re-persist the revoked secret. Only an explicit re-pairing
+            // (resurrect) may write again, and it lifts the tombstone.
+            if (this._tombstoned.has(pairId)) {
+                if (opts && opts.resurrect) this._tombstoned.delete(pairId);
+                else return null;
+            }
             const rec = await dbGet(pairId).catch(() => null);
             const out = mutate(rec);
             if (out) await dbPut(pairId, out);
@@ -381,7 +398,15 @@ export class RendezvousManager extends EventTarget {
                 this.pairExchanges.delete(pid);
             }
         }
-        await dbDelete(pairId);
+        // Delete through the SAME per-pair queue that record writes use, and
+        // tombstone the pair first — otherwise a settle/commit already queued
+        // ahead of us runs after the delete and resurrects the secret the user
+        // just revoked (the read-modify-write clobber _recWrites exists to stop,
+        // here on the revocation path where the stakes are "still callable").
+        await this._serial(this._recWrites, pairId, async () => {
+            this._tombstoned.add(pairId);
+            await dbDelete(pairId);
+        });
         this._emit('pair-removed', { pairId });
     }
 
@@ -751,8 +776,10 @@ export class RendezvousManager extends EventTarget {
         const pairId = ex.pairId;
         try {
             // Through the record queue: a resumePair()/pausePair() racing
-            // this commit must never write a stale read back over it.
-            await this._updateRec(pairId, () => ex.rec);
+            // this commit must never write a stale read back over it. A fresh
+            // manual pairing is the one write allowed to lift a disablePair
+            // tombstone (the user is deliberately re-establishing the pair).
+            await this._updateRec(pairId, () => ex.rec, { resurrect: true });
         } catch (e) {
             // A pair that can't persist can't auto-reconnect after a restart
             // (and the OTHER side thinks it can) — never let this be silent.
@@ -837,7 +864,9 @@ export class RendezvousManager extends EventTarget {
         // the caller's shadow offer waits longer.
         const t1 = setTimeout(async () => {
             this.delayTimers.delete(pairId);
-            const rec = await dbGet(pairId).catch(() => null);
+            // Serialized read so a just-queued pausePair/bye is observed before
+            // we commit to a role/delay (_startEpisode re-validates too).
+            const rec = await this._serial(this._recWrites, pairId, () => dbGet(pairId).catch(() => null));
             if (!rec || !rec.enabled) return;
             if (this._connectedPeerIdFor(pairId)) return;
             if (rec.role === 'listener') {
@@ -922,6 +951,42 @@ export class RendezvousManager extends EventTarget {
     }
 
     /**
+     * Reconcile the episode's live subscriptions with the CURRENT day-topic
+     * window (yesterday/today/tomorrow). Used for the initial subscribe (the
+     * topicSubs map starts empty, so every current topic is added) and by the
+     * periodic refresh timer, which subscribes newly-current day topics and
+     * drops aged ones — the fix for long-lived episodes going deaf after a UTC
+     * midnight rollover.
+     */
+    async _refreshTopics(pairId, ep) {
+        if (ep.settled || !ep.carrier) return;
+        const want = await this._topics(ep);
+        if (ep.settled) return;
+        const wantSet = new Set(want);
+        let added = 0, dropped = 0;
+        for (const t of want) {
+            if (ep.topicSubs.has(t)) continue;
+            const unsub = ep.carrier.subscribe(t, (blob) => {
+                this._onBlob(pairId, ep, blob).catch(() => {});
+            });
+            ep.topicSubs.set(t, unsub);
+            ep.unsubs.push(unsub);
+            added++;
+        }
+        for (const [t, unsub] of [...ep.topicSubs]) {
+            if (wantSet.has(t)) continue;
+            try { unsub(); } catch (e) {}
+            ep.topicSubs.delete(t);
+            const i = ep.unsubs.indexOf(unsub);
+            if (i >= 0) ep.unsubs.splice(i, 1);
+            dropped++;
+        }
+        if (added && dropped) {
+            this._diag(`pair ${pairId}: day-topic rollover — +${added}/-${dropped}, now on ${ep.topicSubs.size} topic(s)`);
+        }
+    }
+
+    /**
      * One episode per pair, from trigger until settle/cancel. Phases:
      *   active — initiating (offer or ring on the retry schedule) with the
      *            session publicly claimed ('reconnecting' emitted);
@@ -933,55 +998,75 @@ export class RendezvousManager extends EventTarget {
      * bye forces standbyOnly regardless of opts.
      */
     async _startEpisode(pairId, peerId, opts = {}) {
-        if (this.episodes.has(pairId) || !this.options.carrierFactory) return;
-        const rec = await dbGet(pairId).catch(() => null);
-        if (!rec || !rec.enabled) {
-            this._diag(`pair ${pairId}: episode not started (${!rec ? 'no stored secret' : 'pair disabled/paused'})`);
-            return;
-        }
-        if (this._connectedPeerIdFor(pairId)) return;
-        const byed = !!(rec.byeAt && rec.byeAt > (rec.lastSeenAt || 0));
-        const standbyOnly = !!opts.standbyOnly || byed;
-        const quiet = !!opts.quiet || standbyOnly;
-        const ep = {
-            peerId, rec, settled: false, exchanged: false, usedEpoch: null,
-            carrier: null, shadow: null, timers: [], unsubs: [],
-            phase: quiet ? 'quiet' : 'active', standbyOnly, announced: false,
-            offerNonce: null, sealedOffer: null, ringNonce: null, sealedRing: null,
-            answeredNonce: null, deadNonces: new Set(), seenRings: new Set(),
-            lastShadowAt: 0, publishOnce: null, publishScheduled: false, answering: false,
-            ownBlobs: new Set(), undecryptable: 0, lastNudgeAt: 0, republishWindowLogged: false
-        };
-        this.episodes.set(pairId, ep);
-        // The key check names the ROOM this episode meets in: two devices
-        // logging different checks hold different bases and can never hear
-        // each other — the one question a pair of connection logs must answer.
-        let check = 'unknown';
-        try { check = await RC.keyCheck(rec.base); } catch (e) {}
-        this._diag(`pair ${pairId}: episode started — role=${rec.role}, epoch=${rec.epoch || 0}, key check ${check}, phase=${ep.phase}${standbyOnly ? ' (standby-only' + (byed ? ', after bye' : '') + ')' : ''}`);
+        if (this.episodes.has(pairId) || this._startingEpisodes.has(pairId) || !this.options.carrierFactory) return;
+        // Claim the start synchronously, BEFORE the dbGet await below. Two
+        // triggers racing through that window (a terminal 'disconnected' status
+        // vs a user Call; the rearm timer vs a status event) would otherwise both
+        // build an episode and the second would overwrite the first in the map —
+        // orphaning the first's carriers (redialing forever) while it publishes a
+        // DIFFERENT offer nonce than the survivor: the exact competing-nonce
+        // failure _promoteEpisode was built to eliminate, plus a carrier leak.
+        this._startingEpisodes.add(pairId);
+        let ep = null;
         try {
-            ep.carrier = this.options.carrierFactory();
-            ep.topicKey = await RC.deriveTopicKey(rec.base);
-            ep.aeadKey = await RC.deriveAeadKey(rec.base);
-            if (!quiet) {
-                ep.announced = true;
-                this._emit('reconnecting', { pairId, peerId, role: rec.role });
-            }
-            this._after(ep, this.options.episodeTimeoutMs, () => this._demoteEpisode(pairId, ep));
-            // A hardened carrier resolves on its first successful session and
-            // redials internally afterwards; episodes never die of carrier loss.
-            await ep.carrier.connect();
-            if (ep.settled) { // cancelled while the carrier was dialing
-                try { ep.carrier.close(); } catch (e) {}
+            // Serialized read: observe any queued record write (a just-received
+            // bye, a racing pausePair) rather than a stale snapshot, so we don't
+            // arm a full active repair against a peer that deliberately hung up.
+            const rec = await this._serial(this._recWrites, pairId, () => dbGet(pairId).catch(() => null));
+            if (!rec || !rec.enabled) {
+                this._diag(`pair ${pairId}: episode not started (${!rec ? 'no stored secret' : 'pair disabled/paused'})`);
                 return;
             }
-            const topics = await this._topics(ep);
-            for (const t of topics) {
-                ep.unsubs.push(ep.carrier.subscribe(t, (blob) => {
-                    this._onBlob(pairId, ep, blob).catch(() => {});
-                }));
-            }
-            this._diag(`pair ${pairId}: carrier up, subscribed to ${topics.length} day-topic(s)`);
+            if (this._connectedPeerIdFor(pairId)) return;
+            if (this.episodes.has(pairId)) return; // a concurrent path claimed the slot
+            const byed = !!(rec.byeAt && rec.byeAt > (rec.lastSeenAt || 0));
+            const standbyOnly = !!opts.standbyOnly || byed;
+            const quiet = !!opts.quiet || standbyOnly;
+            ep = {
+                peerId, rec, settled: false, exchanged: false, usedEpoch: null,
+                carrier: null, shadow: null, timers: [], unsubs: [], topicSubs: new Map(),
+                phase: quiet ? 'quiet' : 'active', standbyOnly, announced: false,
+                offerNonce: null, sealedOffer: null, ringNonce: null, sealedRing: null,
+                answeredNonce: null, deadNonces: new Set(), seenRings: new Set(),
+                lastShadowAt: 0, publishOnce: null, publishScheduled: false, answering: false,
+                ownBlobs: new Set(), undecryptable: 0, lastNudgeAt: 0, republishWindowLogged: false
+            };
+            this.episodes.set(pairId, ep);
+            // Slot is now claimed in `episodes` — release the start-guard so the
+            // long carrier-connect awaits below don't block a legitimate fresh
+            // start (e.g. a manual re-pairing that supersedes this very episode).
+            // From here the `episodes.has` guard alone is sufficient.
+            this._startingEpisodes.delete(pairId);
+            // The key check names the ROOM this episode meets in: two devices
+            // logging different checks hold different bases and can never hear
+            // each other — the one question a pair of connection logs must answer.
+            let check = 'unknown';
+            try { check = await RC.keyCheck(rec.base); } catch (e) {}
+            this._diag(`pair ${pairId}: episode started — role=${rec.role}, epoch=${rec.epoch || 0}, key check ${check}, phase=${ep.phase}${standbyOnly ? ' (standby-only' + (byed ? ', after bye' : '') + ')' : ''}`);
+            try {
+                ep.carrier = this.options.carrierFactory();
+                ep.topicKey = await RC.deriveTopicKey(rec.base);
+                ep.aeadKey = await RC.deriveAeadKey(rec.base);
+                if (!quiet) {
+                    ep.announced = true;
+                    this._emit('reconnecting', { pairId, peerId, role: rec.role });
+                }
+                this._after(ep, this.options.episodeTimeoutMs, () => this._demoteEpisode(pairId, ep));
+                // A hardened carrier resolves on its first successful session and
+                // redials internally afterwards; episodes never die of carrier loss.
+                await ep.carrier.connect();
+                if (ep.settled) { // cancelled while the carrier was dialing
+                    try { ep.carrier.close(); } catch (e) {}
+                    return;
+                }
+                await this._refreshTopics(pairId, ep); // initial subscribe (topicSubs empty)
+                this._diag(`pair ${pairId}: carrier up, subscribed to ${ep.topicSubs.size} day-topic(s)`);
+                // Publishers rotate to a new UTC-day topic at midnight. Without
+                // resubscribing, a long-quiet/standby episode is left subscribed
+                // only to topics nobody publishes on and goes silently deaf within
+                // ~24-48h — breaking the "app open ⇒ reachable" promise. Re-check
+                // topics every few hours so a new day-topic is always covered.
+                this._every(ep, RENDEZVOUS_TOPIC_REFRESH_MS, () => this._refreshTopics(pairId, ep).catch(() => {}));
             // A broker session that comes BACK mid-episode (socket died in a
             // suspend, broker restarted) re-issues the subscriptions inside
             // the carrier — but everything we published into the dead socket
@@ -994,13 +1079,16 @@ export class RendezvousManager extends EventTarget {
                 this._diag(`pair ${pairId}: carrier session restored — republishing now`);
                 Promise.resolve(ep.publishOnce()).catch(() => {});
             };
-            if (!ep.standbyOnly) {
-                if (rec.role === 'caller') await this._armCallerOffer(pairId, ep);
-                else await this._armRing(pairId, ep);
-                this._schedulePublishes(pairId, ep);
+                if (!ep.standbyOnly) {
+                    if (rec.role === 'caller') await this._armCallerOffer(pairId, ep);
+                    else await this._armRing(pairId, ep);
+                    this._schedulePublishes(pairId, ep);
+                }
+            } catch (e) {
+                this._failEpisode(pairId, ep, e.message);
             }
-        } catch (e) {
-            this._failEpisode(pairId, ep, e.message);
+        } finally {
+            this._startingEpisodes.delete(pairId);
         }
     }
 
@@ -1101,6 +1189,22 @@ export class RendezvousManager extends EventTarget {
     async _onBlob(pairId, ep, blob) {
         if (ep.settled) return;
         if (ep.ownBlobs.has(blob)) return; // our own publish echoed back
+        // Rate-limit decrypt work: an untrusted broker streaming ≤16 KB junk
+        // blobs could otherwise buy unbounded AES-GCM attempts (up to EPOCH_WINDOW
+        // per blob). Legitimate rendezvous is a few blobs/min, so a small token
+        // bucket never touches real traffic. (Date.now is fine here — browser code.)
+        const now = Date.now();
+        if (ep._dtAt === undefined) { ep._dtTokens = 20; ep._dtAt = now; }
+        ep._dtTokens = Math.min(20, ep._dtTokens + ((now - ep._dtAt) / 1000) * 10);
+        ep._dtAt = now;
+        if (ep._dtTokens < 1) {
+            if (!ep._dtWarned) {
+                ep._dtWarned = true;
+                this._diag(`pair ${pairId}: decrypt rate limit hit — dropping excess sealed blobs (possible hostile/noisy broker)`, 'warn');
+            }
+            return;
+        }
+        ep._dtTokens -= 1;
         let consumed;
         if (ep.rec.role === 'caller') {
             consumed = await this._onCallerAnswer(pairId, ep, blob)

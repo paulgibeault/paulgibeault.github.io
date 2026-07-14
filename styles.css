@@ -656,6 +656,91 @@ body.app-in-game .launcher-menu[data-open="true"] .launcher-menu__panel {
 }
 .launcher-toast.visible { opacity: 1; }
 .launcher-toast.error { border-color: var(--tactical-red); }
+/* A toast with a tap action (e.g. "someone messaged you") becomes interactive. */
+.launcher-toast.is-clickable { pointer-events: auto; cursor: pointer; }
+.launcher-toast.is-clickable:hover { border-color: var(--field-gold); }
+
+/* ---- non-blocking confirm/prompt dialog ---- */
+.arcade-dialog-overlay {
+    position: fixed; inset: 0; z-index: 5000;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(0, 0, 0, 0.6); padding: 20px;
+    -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px);
+}
+.arcade-dialog-overlay.hidden { display: none !important; }
+.arcade-dialog {
+    background: rgba(18, 18, 30, 0.98);
+    border: 1px solid var(--field-gold, #e6c15a); border-radius: 12px;
+    padding: 20px; max-width: 30rem; width: 100%;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+}
+.arcade-dialog__msg { margin: 0 0 14px; color: #eee; white-space: pre-wrap; line-height: 1.45; }
+.arcade-dialog__input {
+    width: 100%; box-sizing: border-box; margin-bottom: 14px;
+    padding: 8px 10px; border-radius: 6px;
+    border: 1px solid #444; background: #111; color: #fff; font-size: 1rem;
+}
+.arcade-dialog__input.hidden { display: none !important; }
+.arcade-dialog__actions { display: flex; gap: 10px; justify-content: flex-end; }
+.arcade-dialog__btn { padding: 8px 18px; }
+.arcade-dialog__btn.hidden { display: none !important; }
+#arcade-dialog-ok { border-color: var(--field-gold, #e6c15a); }
+
+/* ---- NETWORK-ACTIVITY WATERMARK ----
+   Quiet bottom-corner mark that replaces the interruption toast. Sits above
+   the game view (z 3000/3002) but below toasts (z 4000) so a reconnect during
+   play reads as a soft shimmer, never a blocking banner. Hidden until active. */
+.net-watermark {
+    position: fixed;
+    left: 14px;
+    bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    z-index: 3500;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.5s ease;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+}
+.net-watermark.is-active { opacity: 0.45; }
+.net-watermark__glyph { font-size: 0.95rem; line-height: 1; }
+.net-watermark__label { text-transform: lowercase; }
+
+/* Live ceremony / reconnect — amber, gently pulsing. */
+.net-watermark.is-reconnecting { color: var(--field-gold); }
+.net-watermark.is-reconnecting .net-watermark__glyph {
+    animation: net-watermark-pulse 1.4s ease-in-out infinite;
+}
+/* Settled — steady green, then the JS fades the whole mark out. */
+.net-watermark.is-connected { color: var(--online-green); }
+
+@keyframes net-watermark-pulse {
+    0%, 100% { opacity: 0.35; }
+    50%      { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .net-watermark.is-reconnecting .net-watermark__glyph { animation: none; }
+}
+
+/* Visually hidden but exposed to assistive tech (live regions, skip targets). */
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    border: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
 
 /* ---- "In Development" overlay banner ----
    Apply .in-dev-wrap to a relatively-clipped image container

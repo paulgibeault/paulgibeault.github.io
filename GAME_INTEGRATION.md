@@ -106,9 +106,12 @@ silently dropped on import, so old keys won't survive a cross-device save.
   inflate every save file: write it with
   `Arcade.state.set('telemetry', data, { exportable: false })`. The flag is
   sticky per key until you set `{ exportable: true }`.
-- [ ] **Storage can fill up.** `Arcade.state.set(...)` returns `true`, or `false`
-  when the write was dropped (quota) — the value was **not** saved. For anything
-  the user would hate to lose, check the return and/or subscribe once:
+- [ ] **Storage can fill up.** `Arcade.state.set(...)` returns `false` only when
+  the write was *definitely* dropped (direct-mode quota). Inside the launcher
+  (framed mode) the write is proxied to the launcher, so `set()` returns `true`
+  = *accepted, pending* — a later launcher-side quota failure arrives
+  asynchronously. **`Arcade.onStorageError` is therefore the only reliable
+  "dropped" signal**; subscribe once for anything the user would hate to lose:
 
   ```js
   Arcade.onStorageError(() => Arcade.ui.toast('Storage full — some data was not saved', { kind: 'error' }));
@@ -137,6 +140,17 @@ Arcade.state.migrate('v1', () => {
 });
 ```
 
+> **Framed caveat (pre-namespace legacy keys).** A legacy, non-namespaced key
+> lives in the *real* origin's `localStorage`, which an in-launcher (opaque-
+> origin) frame cannot read. `adopt()` detects this and does **not** let the
+> migration complete there — the SDK withholds the `_migrated` sentinel so the
+> move finishes on the next **standalone** visit to the game's own URL (where the
+> legacy data is reachable), instead of marking the migration done and orphaning
+> the save. Migrations that only touch already-namespaced `arcade.v1.*` keys work
+> identically framed or standalone. Do **not** call raw `localStorage.getItem`
+> inside a migration — it throws in a framed game; always go through `adopt()` /
+> `Arcade.state.*`.
+
 Version bumps *within* the namespace need no new machinery — use a fresh
 migrate sentinel and rewrite in place:
 
@@ -152,21 +166,27 @@ the full form:
 
 ```js
 Arcade.state.migrate('v1', () => {
-    // 1. Settings (raw object → namespaced)
-    const old = localStorage.getItem('hecknsic_settings');
-    if (old) {
-        try { Arcade.state.set('settings', JSON.parse(old)); } catch (e) {}
-        localStorage.removeItem('hecknsic_settings');
-    }
+    // Guarded legacy read: raw localStorage THROWS in an opaque (framed) game.
+    // Throwing here is deliberate — it aborts the migration WITHOUT burning the
+    // _migrated sentinel, so it re-runs and completes on a standalone visit
+    // where the legacy keys are actually reachable (see the framed caveat above).
+    const readLegacy = (k) => {
+        try { return localStorage.getItem(k); }
+        catch (e) { throw new Error('legacy storage unreachable in a framed game — will complete standalone'); }
+    };
+    const dropLegacy = (k) => { try { localStorage.removeItem(k); } catch (e) {} };
+
+    // 1. Settings (raw object → namespaced). adopt() is the plain-move path and
+    //    already handles the framed defer itself.
+    Arcade.state.adopt('hecknsic_settings', 'settings');
 
     // 2. Sticky player name → global
-    const name = localStorage.getItem('hecknsic_player_name');
-    if (name) Arcade.player.setName(name);
-    localStorage.removeItem('hecknsic_player_name');
+    const name = readLegacy('hecknsic_player_name');
+    if (name) { Arcade.player.setName(name); dropLegacy('hecknsic_player_name'); }
 
     // 3. Per-mode high scores → leaderboard API
     for (const mode of ['arcade', 'chill', 'puzzle']) {
-        const raw = localStorage.getItem(`hecknsic_highscores_${mode}`);
+        const raw = readLegacy(`hecknsic_highscores_${mode}`);
         if (!raw) continue;
         try {
             const list = JSON.parse(raw);
@@ -174,7 +194,7 @@ Arcade.state.migrate('v1', () => {
                 for (const e of list) Arcade.scores.add(mode, e);
             }
         } catch (e) {}
-        localStorage.removeItem(`hecknsic_highscores_${mode}`);
+        dropLegacy(`hecknsic_highscores_${mode}`);
     }
 });
 ```
@@ -518,7 +538,7 @@ Rules of the road:
 - [ ] Don't cache `status()` at init: a game mounted mid-session receives
       `'connected'` in its welcome, and live transitions arrive via `onStatus`.
 
-Multi-seat rules (host + several joiners over "Invite another player"):
+Multi-seat rules (host holding several standalone connections):
 
 - [ ] **Feature-detect, don't version-check**: gate targeted sends / roster /
       meta on `Arcade.peer.caps()` at lobby time. A session's host should

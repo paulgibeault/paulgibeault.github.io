@@ -32,9 +32,10 @@ Current lineup: Moon Lit, Pi Game, Silicon Syndicate, HecknSic, Cozy Solitaire.
 Because every game is hosted at `paulgibeault.github.io/<game>/`,
 same-origin as the launcher, `localStorage` is already shared and the
 browser's `storage` event gives free reactivity across windows. The
-launcher-to-game bridge (`arcade-sdk.js` + a 10-message postMessage
-protocol) exists only for what the browser can't do alone: multiplayer
-transport and launcher-aware settings/lifecycle hints.
+launcher-to-game bridge (`arcade-sdk.js` + the `arcade:` postMessage
+protocol — see ARCADE_PLATFORM.md for the full message table) exists only
+for what the browser can't do alone: multiplayer transport, the
+opaque-frame storage bridge, and launcher-aware settings/lifecycle hints.
 
 ## Documentation
 

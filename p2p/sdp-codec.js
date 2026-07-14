@@ -305,10 +305,22 @@ export class SDPCodec {
         if ((header >> 4) !== FORMAT_VERSION) throw new Error('packed header version mismatch');
         const type = (header & 1) ? 'answer' : 'offer';
 
-        const peerId = r.lstr();
-        const mid = r.lstr();
-        const ufrag = r.lstr();
-        const pwd = r.lstr();
+        // Every string field below is interpolated into SDP lines by buildSDP.
+        // A packed payload is smaller and more constrained than raw SDP, but its
+        // strings are still attacker-controlled — reject any that carry control
+        // characters (above all CR/LF, which would inject new SDP lines) or run
+        // absurdly long, so the "only entropy travels, the template constrains
+        // the rest" property actually holds.
+        const assertSdpToken = (v, what) => {
+            if (typeof v !== 'string' || v.length > 256 || !/^[\x21-\x7e]*$/.test(v)) {
+                throw new Error(`packed payload: invalid ${what}`);
+            }
+            return v;
+        };
+        const peerId = assertSdpToken(r.lstr(), 'peerId');
+        const mid = assertSdpToken(r.lstr(), 'mid');
+        const ufrag = assertSdpToken(r.lstr(), 'ufrag');
+        const pwd = assertSdpToken(r.lstr(), 'pwd');
 
         const fpLen = r.u8();
         const hash = HASH_BY_LEN[fpLen];
@@ -325,7 +337,7 @@ export class SDPCodec {
             if (kind === ADDR_KIND.IPV4) address = bytesToIpv4(r.raw(4));
             else if (kind === ADDR_KIND.IPV6) address = bytesToIpv6(r.raw(16));
             else if (kind === ADDR_KIND.MDNS) address = bytesToMdns(r.raw(16));
-            else address = r.lstr();
+            else address = assertSdpToken(r.lstr(), 'candidate address');
             const port = r.u16();
             candidates.push({ address, port, type: type_ });
         }
