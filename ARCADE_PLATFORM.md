@@ -30,14 +30,20 @@ Arcade.state.get(key)                 // localStorage 'arcade.v1.<gameId>.<key>'
 Arcade.state.set(key, value)
 Arcade.state.set(key, value, { exportable: false })  // local-only: excluded from save files
 Arcade.state.remove(key)
-Arcade.state.getOrInit(key, defaults) // deep-merges defaults under any stored value
+Arcade.state.getOrInit(key, defaults) // deep-merges defaults under any stored value,
+                                      // PERSISTS the merge, returns an independent copy
+Arcade.state.has(key)                 // true if a value is stored (absent vs stored-null)
+Arcade.state.keys()                   // this game's own stored keys (unprefixed; excludes _internal)
 Arcade.state.onChange(key, fn)
 Arcade.state.migrate(version, fn)     // runs fn exactly once per (gameId, version)
 Arcade.state.adopt(legacyKey, newKey?, { json? })  // read → namespaced write → delete original
 Arcade.global.get(key)                // localStorage 'arcade.v1.global.<key>'
-Arcade.global.set(key, value)         // set() returns true, or false on quota failure
+Arcade.global.set(key, value)         // returns false = definitely dropped (direct-mode
+                                      // quota). true = accepted (framed: pending — a later
+                                      // launcher-side quota failure arrives via onStorageError,
+                                      // which is the ONLY reliable drop signal in framed mode)
 Arcade.onStateReplaced(fn)            // fires after a launcher import — re-read state
-Arcade.onStorageError(fn)             // a localStorage write was dropped (quota) — warn the user
+Arcade.onStorageError(fn)             // a write was dropped (quota) — warn the user
 Arcade.storage.estimate()             // { usage, quota } (async); persisted(); persist()
 
 // ASYNC STORAGE — large/binary per-app data (IndexedDB KV + OPFS blobs); all
@@ -93,8 +99,22 @@ Arcade.peer.peers()                   // full roster [{ deviceId, name, status, 
                                       // marks this device's own link (a joiner's host)
 Arcade.peer.onPeersChange(fn)         // fn(rosterArray) on any join/leave/rename/status change
 Arcade.peer.onReady(fn)               // remote device has THIS game mounted and listening
-Arcade.peer.sendBlob(blob, { onProgress }) / onBlob(fn)  // chunked large payloads (broadcast)
+Arcade.peer.request(payload, { to, timeoutMs })  // → Promise of the peer's reply
+                                      // (rejects on timeout/no-connection); correlation
+                                      // + cleanup handled by the SDK
+Arcade.peer.onRequest(fn)             // fn(payload, fromPeer) → value|Promise answers a request;
+                                      // return undefined to defer to another handler
+Arcade.peer.sendBlob(blob, { onProgress, to })   // chunked large payload; paced (real
+                                      // progress, no outbox spike); { to } sends privately
+Arcade.peer.onBlob(fn)                // fn(blob, { name, size, mime, fromPeer, id })
 Arcade.peer.queue() / onQueue(fn)     // replay-queue { depth, limit, overflowed }
+
+// DETERMINISM — shared seeded RNG for lockstep/turn-based games (identical
+// sequences on both devices from the same seed; never Math.random for shared state)
+const rng = Arcade.random.seeded(seed) // seed: number | string
+rng()                                  // → [0, 1)
+rng.int(min, max)                      // integer in [min, max] inclusive
+rng.pick(arr) / rng.shuffle(arr)       // deterministic choice / Fisher–Yates copy
 
 // SETTINGS — launcher pushes its current values, SDK auto-applies CSS vars/attrs
 Arcade.settings.fontScale()           // current launcher font scale (1 = default)
@@ -271,16 +291,6 @@ The launcher menu's Network section is a single "Multiplayer" item (`#connection
 - **📞 Call** (shown while hung-up/idle, only for auto-reconnect peers): calls `ArcadeP2P.callKnownPeer(deviceId)`, which re-arms the pair (`RendezvousManager.resumePair` flips `enabled` back on, clears any received bye, and kicks a reconnect episode against the pair's last known peerId). The episode RINGS: the listener role publishes a sealed doorbell that provokes the caller role into arming a fresh offer, so a one-sided Call lands on any peer whose arcade is merely open with the pair enabled — actively repairing, quiet after a timeout, or standing by since boot. It still honestly reports back when there's no pairing secret on record to re-arm (never established, or lost before the last manual reconnect) rather than claiming an attempt that can't happen. A "🔗 New invite code" action is always shown alongside it as the deterministic manual fallback.
 - **↺ Start over**: calls `ArcadeP2P.startOverKnownPeer(deviceId)` — drops any live link, forgets the stashed session (`PeerManager.forgetSession`, so the next connection can't try to resume old sequence counters), and forgets the rendezvous pairing secret entirely (`RendezvousManager.disablePair`), flipping auto-reconnect off. The saved name and connection history stay; only **✕ Delete** forgets the device outright. Use this when a connection is stuck in a bad state and Call doesn't help.
 - **🔧 Connection log** (dialog footer): opens a dedicated overlay with a read-only, live-tailing view of the session-long connection log (`arcade-diag.js` ring buffer). Every connection-related layer writes into it from the moment the page loads — the launch resume decision (`boot`), bridge status transitions and user actions (`bridge`), transport diagnostics (`p2p`), rendezvous episode lifecycle including publish/receive/decrypt outcomes (`rdv`), and MQTT carrier socket state (`mqtt`). This exists because the only other diagnostics view lives inside the New-connection ceremony, and opening that to *read* the log would itself start a hosting attempt and pollute the record; this view starts nothing. "📋 Copy to clipboard" puts a timestamped transcript (with UA header) on the clipboard (clipboard API → hidden-textarea `execCommand` → prompt fallback chain, for iOS/WebView quirks), and a "📤 Share…" button rides the native share sheet where `navigator.share` exists. Also reachable from any console as `window.__arcadeDiag`.
-
-**Bfcache resume gap:** a page the browser restores from its back-forward cache (e.g. Back after navigating to a different page) doesn't always re-run index.html's startup script — it resumes the frozen JS heap instead. Without a second trigger, a connection killed by that navigation would sit dead until the user reconnects by hand, since the startup-only `resumeRendezvous()` check never got a chance to run again. index.html listens for `pageshow` and re-runs the same freshness check whenever `event.persisted` is true.
-
-### Multiplayer dialog — device name, call/hang up, start over (IMPLEMENTED)
-
-The launcher menu's Network section is a single "Multiplayer" item (`#connections-dialog`, id kept from when this was called the Connections dialog) — it opens one dialog holding the device name field, "New connection", and the full saved-connections manager, so Network never grows past one menu row no matter how many connection-lifecycle controls it gains. Every saved connection gets three lifecycle controls beyond rename/delete/auto-reconnect, framed like a phone call — live means Hang Up ends it (keeping the number to call back later), not-live means Call tries to silently bring it back:
-
-- **☎️ Hang Up** (shown while a peer is live): calls `ArcadeP2P.hangUpKnownPeer(deviceId)`, which drops the link (`PeerManager.disconnectPeer`) and, for an auto-reconnect pair, tells the rendezvous layer to stand down (`RendezvousManager.pausePair` — clears the pair's `enabled` flag in IndexedDB and cancels any in-flight episode) *before* tearing the link down, so the disconnect's own `'disconnected'` status event doesn't immediately re-trigger a repair episode. The pairing secret is kept — this directly answers "does healing suspend on its own, or can I terminate now and reopen later": both are true, and Hang Up is the explicit form of the latter.
-- **📞 Call** (shown while hung-up/idle, only for auto-reconnect peers): calls `ArcadeP2P.callKnownPeer(deviceId)`, which re-arms the pair (`RendezvousManager.resumePair` flips `enabled` back on and kicks one reconnect episode against the pair's last known peerId) and attempts a silent reconnect through the dead-drop — best-effort only, since it needs the other device to be reachable there too, and honestly reports back when there's no pairing secret on record to re-arm (never established, or lost before the last manual reconnect) rather than claiming an attempt that can't happen. A "🔗 New invite code" action is always shown alongside it as the deterministic manual fallback.
-- **↺ Start over**: calls `ArcadeP2P.startOverKnownPeer(deviceId)` — drops any live link, forgets the stashed session (`PeerManager.forgetSession`, so the next connection can't try to resume old sequence counters), and forgets the rendezvous pairing secret entirely (`RendezvousManager.disablePair`), flipping auto-reconnect off. The saved name and connection history stay; only **✕ Delete** forgets the device outright. Use this when a connection is stuck in a bad state and Call doesn't help.
 
 **Bfcache resume gap:** a page the browser restores from its back-forward cache (e.g. Back after navigating to a different page) doesn't always re-run index.html's startup script — it resumes the frozen JS heap instead. Without a second trigger, a connection killed by that navigation would sit dead until the user reconnects by hand, since the startup-only `resumeRendezvous()` check never got a chance to run again. index.html listens for `pageshow` and re-runs the same freshness check whenever `event.persisted` is true.
 

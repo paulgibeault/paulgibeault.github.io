@@ -35,6 +35,11 @@
 
 // ---------------------------------------------------------------------------
 
+// Grace for an outstanding MQTT PINGREQ before the socket is declared dead.
+// Longer than any realistic broker round trip, so a merely non-zero-RTT broker
+// isn't torn down by a ping that raced the 30s keepalive interval.
+const PING_GRACE_MS = 10000;
+
 export class LoopbackCarrier {
     constructor(name = 'qrp2p-rdv-loopback') {
         this.name = name;
@@ -365,14 +370,19 @@ export class MqttCarrier {
 
     _startPing(ws) {
         this._awaitingPong = false;
+        this._pingSentAt = 0;
         this.pingTimer = setInterval(() => {
+            const now = Date.now();
             if (this._awaitingPong) {
-                // No PINGRESP since our last PINGREQ: the socket is dead even
-                // if the WebSocket object doesn't know it yet.
-                this._lost(ws);
-                return;
+                // Only declare the socket dead once the outstanding PINGREQ has
+                // gone unanswered past the grace — NOT the instant this interval
+                // happens to fire just after ensureAlive() sent a fresh ping on a
+                // healthy, non-zero-RTT broker (that race tore down good sessions).
+                if (now - this._pingSentAt > PING_GRACE_MS) { this._lost(ws); return; }
+                return; // still within grace — keep waiting, don't double-ping
             }
             this._awaitingPong = true;
+            this._pingSentAt = now;
             try { ws.send(mqttCodec.pingreq()); } catch (err) { this._lost(ws); }
         }, 30000);
     }
@@ -426,8 +436,11 @@ export class MqttCarrier {
         const ws = this.ws;
         try { ws.send(mqttCodec.pingreq()); } catch (e) { this._lost(ws); return; }
         this._awaitingPong = true;
+        this._pingSentAt = Date.now();
+        const sentAt = this._pingSentAt;
         setTimeout(() => {
-            if (this.ws === ws && this._awaitingPong) this._lost(ws);
+            // Only if THIS ping is still the outstanding one and still unanswered.
+            if (this.ws === ws && this._awaitingPong && this._pingSentAt === sentAt) this._lost(ws);
         }, 5000);
     }
 

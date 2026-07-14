@@ -586,8 +586,17 @@ export class PeerManager extends EventTarget {
         // Frames marked `noRelay` are targeted (v1.11) — the sender aimed
         // them at this device alone, so the hub must not fan them out.
         if (this.isHost && !msg.noRelay) {
+            const relayFrame = { text: msg.text, from: peerId, relayed: true };
             this.peers.forEach((destData, destId) => {
-                if (destId !== peerId) this._sendAppTo(destId, { text: msg.text, from: peerId, relayed: true });
+                if (destId !== peerId) this._sendAppTo(destId, relayFrame);
+            });
+            // A joiner whose link is terminally dead and mid-rendezvous-adoption
+            // is not in `peers` — mirror broadcast()'s stash handling so the
+            // frames other joiners send during the repair window replay on
+            // adoption, keeping the exactly-once guarantee that direct traffic
+            // has (otherwise these frames live in no outbox and are lost).
+            this.sessionStash.forEach((stash, destId) => {
+                if (destId !== peerId) this._stashAppend(stash, relayFrame);
             });
         }
 
@@ -1053,7 +1062,22 @@ export class PeerManager extends EventTarget {
         this.peers.clear();
     }
 
+    /**
+     * True once this node has committed to a role — it holds at least one live
+     * peer or a stashed (repairing/dead) session. A role flip while this is true
+     * corrupts the star topology (one global isHost, one relay loop), so the
+     * ceremony entry points refuse it.
+     */
+    _hasEstablishedLinks() {
+        return this.peers.size > 0 || this.sessionStash.size > 0;
+    }
+
     async createOffer() {
+        // A joiner cannot become a host mid-session: flipping isHost would kill
+        // the relationship it already has (see PROTOCOL §5.6 star topology).
+        if (!this.isHost && this._hasEstablishedLinks()) {
+            throw new Error('Cannot host while joined to another player — start over first.');
+        }
         this.isHost = true;
         await this._ensureCertificate();
         const peerId = this.generateId();
@@ -1094,6 +1118,11 @@ export class PeerManager extends EventTarget {
     }
 
     async createAnswer(offerPayload) {
+        // A host cannot become a joiner mid-session: flipping isHost false would
+        // stop the relay loop and silently orphan every joiner it connects.
+        if (this.isHost && this._hasEstablishedLinks()) {
+            throw new Error('Cannot join while hosting — start over first.');
+        }
         this.isHost = false;
         await this._ensureCertificate();
         const hostPeerId = offerPayload.peerId;

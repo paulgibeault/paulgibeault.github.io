@@ -222,6 +222,28 @@
             width: 100%; height: 100%; border: none; background: #000;
         }
         #iframe-host iframe[hidden] { display: none !important; }
+        /* Loading veil + error card over the game frame (below the 40px topbar). */
+        .game-overlay {
+            position: absolute; top: 40px; left: 0; right: 0; bottom: 0;
+            z-index: 3001; background: #000;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            gap: 14px; padding: 24px; text-align: center; color: #ddd;
+        }
+        .game-overlay.hidden { display: none !important; }
+        .game-overlay__spinner {
+            width: 34px; height: 34px; border-radius: 50%;
+            border: 3px solid rgba(255,255,255,0.18);
+            border-top-color: var(--field-gold, #e6c15a);
+            animation: game-spin 0.9s linear infinite;
+        }
+        @keyframes game-spin { to { transform: rotate(360deg); } }
+        @media (prefers-reduced-motion: reduce) {
+            .game-overlay__spinner { animation-duration: 2.4s; }
+        }
+        .game-overlay__msg { font-size: 1rem; margin: 0; }
+        .game-overlay__sub { font-size: 0.85rem; color: #999; margin: 0; max-width: 32ch; }
+        .game-overlay__actions { display: flex; gap: 10px; margin-top: 6px; }
+        .game-overlay__btn { padding: 8px 16px; }
         .game-topbar {
             width: 100%; height: 40px; background: rgba(10, 10, 25, 0.85);
             border-bottom: 1px solid var(--field-gold); display: flex;
@@ -437,11 +459,14 @@
     <div class="launcher-toast" id="launcher-toast" role="status" aria-live="polite"></div>
 
     <!-- Quiet, non-blocking network-activity mark (bottom corner). Replaces the
-         old interruption toast — a reconnect shows as a soft shimmer, not a banner. -->
+         old interruption toast — a reconnect shows as a soft shimmer, not a banner.
+         The visual mark stays aria-hidden (decorative); the sibling live region
+         gives assistive tech the same signal the sighted user reads. -->
     <div class="net-watermark" id="net-watermark" aria-hidden="true">
         <span class="net-watermark__glyph">⚇</span>
         <span class="net-watermark__label" id="net-watermark-label"></span>
     </div>
+    <div class="visually-hidden" id="net-activity-live" role="status" aria-live="polite"></div>
 
     <!-- ========== GAME VIEW ========== -->
     <div id="view-game" class="hidden">
@@ -461,6 +486,21 @@
             </div>
         </div>
         <div id="iframe-host"></div>
+        <!-- Loading veil + error card over the game frame. Opaque frames fire a
+             load event even for error pages, so we key "loaded" on the SDK's
+             arcade:hello, with a timeout fallback to the error card. -->
+        <div id="game-loading" class="game-overlay hidden" role="status" aria-live="polite">
+            <div class="game-overlay__spinner" aria-hidden="true"></div>
+            <p class="game-overlay__msg" id="game-loading-msg">Loading…</p>
+        </div>
+        <div id="game-error" class="game-overlay hidden" role="alert">
+            <p class="game-overlay__msg" id="game-error-msg">This game didn't load.</p>
+            <p class="game-overlay__sub">It may be offline right now, or still deploying. Games inside the arcade need a connection.</p>
+            <div class="game-overlay__actions">
+                <button type="button" class="topbar-btn game-overlay__btn" id="game-error-retry">Retry</button>
+                <button type="button" class="topbar-btn game-overlay__btn" id="game-error-back">Back to games</button>
+            </div>
+        </div>
     </div>
 
 </div>
@@ -725,6 +765,18 @@
             }
             return true;
         }
+        // Keys an import must NOT overwrite, even though export includes them for
+        // inspection. The save checksum is integrity, not authenticity — anyone
+        // can craft a valid file — so a malicious save could otherwise replace
+        // this device's identity or its TOFU trust records (fingerprint pins,
+        // auto-reconnect flags in knownPeers), laundering a future impostor past
+        // the fingerprint-changed warning. Restoring device identity/trust is a
+        // deliberate, separate action, never a silent side effect of a save load.
+        const IMPORT_PROTECTED_KEYS = new Set([
+            KEY_PREFIX + '_meta.knownPeers',
+            KEY_PREFIX + '_meta.deviceId',
+            KEY_PREFIX + '_meta.deviceName'
+        ]);
         const SAVE_FORMAT = 'pauls-arcade-save';
         // Schema 2 adds `stores` (Arcade.store IndexedDB) and `files`
         // (Arcade.files OPFS/IDB blobs). v1 (localStorage-only) files still import.
@@ -844,7 +896,7 @@
             iframe.setAttribute('title', name);
             iframe.hidden = true;
             iframeHost.appendChild(iframe);
-            entry = { iframe, name };
+            entry = { iframe, name, src };
             pool.set(gameId, entry);
             return entry;
         }
@@ -865,6 +917,10 @@
 
             document.body.classList.add('app-in-game');
             viewGame.classList.remove('hidden');
+            // Show a loading veil until this game's SDK handshake lands (or a
+            // timeout flips to an error card) — a 404 or offline launch is
+            // otherwise just a black frame with a quit button.
+            beginGameLoad(gameId, name);
 
             // Lifecycle: suspend prior game (if any) and resume the new one.
             if (previousGameId && previousGameId !== gameId) {
@@ -879,6 +935,7 @@
         function hideGameView() {
             viewGame.classList.add('hidden');
             document.body.classList.remove('app-in-game');
+            hideGameOverlays();
             // Iframes stay mounted (hidden) — instant relaunch + state preserved.
             const previousGameId = activeGameId;
             for (const e of pool.values()) e.iframe.hidden = true;
@@ -887,6 +944,53 @@
                 postToIframe(previousGameId, { type: 'arcade:lifecycle.suspend' });
             }
         }
+
+        // ---- game loading / error overlay (G-ux-1) ----
+        const gameLoading = document.getElementById('game-loading');
+        const gameLoadingMsg = document.getElementById('game-loading-msg');
+        const gameError = document.getElementById('game-error');
+        const gameErrorMsg = document.getElementById('game-error-msg');
+        let gameLoadTimer = null;
+        const GAME_LOAD_TIMEOUT_MS = 12000;
+        function showGameOverlay(which) {
+            gameLoading.classList.toggle('hidden', which !== 'loading');
+            gameError.classList.toggle('hidden', which !== 'error');
+        }
+        function hideGameOverlays() {
+            showGameOverlay(null);
+            if (gameLoadTimer) { clearTimeout(gameLoadTimer); gameLoadTimer = null; }
+        }
+        function beginGameLoad(gameId, name) {
+            // A warm, already-handshaken pooled frame needs no veil (instant relaunch).
+            if (helloedGames.has(gameId)) { hideGameOverlays(); return; }
+            gameLoadingMsg.textContent = 'Loading ' + (name || 'game') + '…';
+            showGameOverlay('loading');
+            if (gameLoadTimer) clearTimeout(gameLoadTimer);
+            gameLoadTimer = setTimeout(() => {
+                gameLoadTimer = null;
+                if (activeGameId === gameId && !helloedGames.has(gameId)) {
+                    gameErrorMsg.textContent = (name || 'This game') + " didn't load.";
+                    showGameOverlay('error');
+                }
+            }, GAME_LOAD_TIMEOUT_MS);
+        }
+        // Called from the arcade:hello handler once a game's SDK checks in.
+        function onGameHelloed(gameId) {
+            if (gameId === activeGameId) hideGameOverlays();
+        }
+        window.__arcade.onGameHelloed = onGameHelloed;
+        document.getElementById('game-error-retry').addEventListener('click', () => {
+            const gid = activeGameId;
+            const entry = gid && pool.get(gid);
+            if (!entry) return;
+            helloedGames.delete(gid);
+            beginGameLoad(gid, entry.name);
+            try { entry.iframe.src = entry.src || entry.iframe.src; } catch (e) {}
+        });
+        document.getElementById('game-error-back').addEventListener('click', () => {
+            if (window.__arcade.closeLauncherMenu) window.__arcade.closeLauncherMenu();
+            hideGameView();
+        });
 
         window.__arcade.hideGameView = hideGameView;
         window.__arcade.applyPoolCap = evictLRU;
@@ -1047,19 +1151,28 @@
                     } catch (_) {}
                     return 'Someone';
                 }
-                function resolveGameTitle(gameId) {
-                    const el = document.querySelector('.launcher-btn[data-game-id="' + (gameId || '') + '"] .launcher-btn__name');
-                    return (el && el.textContent.trim()) || gameId || 'a game';
-                }
                 function maybeMessageToast(targetGameId, fromDeviceId) {
+                    // Only toast for a game actually mounted AND handshaken here —
+                    // otherwise postToIframe drops the message and the toast would
+                    // promise something the user can't go see. Reading the title
+                    // from the pool entry (never a wire-built selector) also closes
+                    // the querySelector-injection / toast-spoof surface.
+                    const entry = pool.get(targetGameId);
+                    if (!entry || !helloedGames.has(targetGameId)) return;
                     // Suppress when you're already looking at that game.
-                    if (targetGameId && targetGameId === activeGameId) return;
-                    const key = (fromDeviceId || 'peer') + '|' + (targetGameId || '');
+                    if (targetGameId === activeGameId) return;
+                    const key = (fromDeviceId || 'peer') + '|' + targetGameId;
                     const now = Date.now();
                     const last = msgToastThrottle.get(key) || 0;
                     if (now - last < MSG_TOAST_WINDOW_MS) return;
+                    // Bound the throttle map: prune stale entries opportunistically.
+                    if (msgToastThrottle.size > 64) {
+                        for (const [k, t] of msgToastThrottle) {
+                            if (now - t >= MSG_TOAST_WINDOW_MS) msgToastThrottle.delete(k);
+                        }
+                    }
                     msgToastThrottle.set(key, now);
-                    showToast('💬 ' + resolvePeerName(fromDeviceId) + ' — ' + resolveGameTitle(targetGameId));
+                    showToast('💬 ' + resolvePeerName(fromDeviceId) + ' — ' + (entry.name || targetGameId));
                 }
                 ArcadeP2P.onMessage((targetGameId, payload, fromDeviceId, meta) => {
                     // Route by the sender's gameId — both devices run the same
@@ -1204,6 +1317,18 @@
         // Per-game keys live under arcade.v1.<gameId>.ls.<key> so they ride
         // along with the launcher's save/load bundling and can't collide.
         function lsPrefix(gameId) { return KEY_PREFIX + gameId + '.ls.'; }
+        // A legacy ls-proxy key stores its sub-key verbatim, so it can contain
+        // characters (spaces, ':', '/') that the stricter isSafeArcadeKey regex
+        // rejects — which would silently drop it from every save/restore. Export
+        // and import treat the whole '.ls.' subtree as backup-eligible as long
+        // as it stays inside a valid game namespace and carries no dunder
+        // segment (so it can't poison prototypes or escape the namespace).
+        const LS_PROXY_KEY_RE = /^arcade\.v1\.[a-z0-9_-]+\.ls\..+$/;
+        function isLsProxyBackupKey(k) {
+            if (!LS_PROXY_KEY_RE.test(k)) return false;
+            for (const seg of k.split('.')) { if (DUNDER_SEGMENTS.has(seg)) return false; }
+            return true;
+        }
         function handleLsProxyRequest(gameId, data, source, origin) {
             const requestId = data.requestId;
             const reply = { type: 'ls-proxy-response', requestId, ok: false };
@@ -1224,7 +1349,9 @@
                     }
                     case 'setItem':
                         if (typeof data.key === 'string') {
-                            localStorage.setItem(prefix + data.key, String(data.value));
+                            const lsVal = String(data.value);
+                            if (lsVal.length > BRIDGE_VALUE_MAX) break; // parity with state.write cap
+                            localStorage.setItem(prefix + data.key, lsVal);
                             reply.ok = true;
                         }
                         break;
@@ -1258,6 +1385,19 @@
         // widen its reach beyond its own arcade.v1.<gameId> tree plus the
         // shared global.* keys.
         const BRIDGE_VALUE_MAX = 2 * 1024 * 1024; // per-key sanity cap
+        // Per-op caps for the async bridge. A runaway game must not exhaust the
+        // shared origin quota (the qrp2p identity/pairing key stores live there
+        // too — draining it would break P2P persistence arcade-wide).
+        const BRIDGE_STORE_VALUE_MAX = 16 * 1024 * 1024;
+        const BRIDGE_FILE_MAX = 64 * 1024 * 1024;
+        function approxSize(v) {
+            if (v == null) return 0;
+            if (typeof v === 'string') return v.length;
+            if (v instanceof Blob) return v.size;
+            if (v instanceof ArrayBuffer) return v.byteLength;
+            if (ArrayBuffer.isView(v)) return v.byteLength;
+            try { return JSON.stringify(v).length; } catch (e) { return Infinity; }
+        }
         const SETTINGS_KEY_RE = /^arcade\.v1\.global\.(fontScale|theme|reducedMotion|audioVolume|handedness)$/;
 
         function stateSnapshotFor(gameId) {
@@ -1342,6 +1482,9 @@
                             return bridgeReply(gameId, data.id, true, v === undefined ? null : v);
                         }
                         case 'set':
+                            if (approxSize(data.value) > BRIDGE_STORE_VALUE_MAX) {
+                                return bridgeReply(gameId, data.id, false, undefined, 'store value too large (max 16 MB)');
+                            }
                             await idbPut(db, String(data.key), data.value);
                             return bridgeReply(gameId, data.id, true, true);
                         case 'del':
@@ -1382,6 +1525,7 @@
                         const n = String(data.name);
                         if (!BRIDGE_FILE_NAME_RE.test(n)) return bridgeReply(gameId, data.id, false, undefined, 'bad file name');
                         if (!(data.blob instanceof Blob)) return bridgeReply(gameId, data.id, false, undefined, 'not a Blob');
+                        if (data.blob.size > BRIDGE_FILE_MAX) return bridgeReply(gameId, data.id, false, undefined, 'file too large (max 64 MB)');
                         if (opfs) {
                             const root = await navigator.storage.getDirectory();
                             const d = await root.getDirectoryHandle(dir, { create: true });
@@ -1518,6 +1662,8 @@
                     // game can apply them before first paint; `peers` seeds
                     // the game's roster with already-connected devices.
                     helloedGames.add(gameId);
+                    // The game's SDK is alive — clear any loading veil/error card.
+                    if (window.__arcade.onGameHelloed) window.__arcade.onGameHelloed(gameId);
                     postToIframe(gameId, {
                         type: 'arcade:welcome',
                         version: 2,
@@ -1669,15 +1815,19 @@
         // flashes steady green then fades away so the screen stays clean.
         const netWatermark = document.getElementById('net-watermark');
         const netWatermarkLabel = document.getElementById('net-watermark-label');
+        const netActivityLive = document.getElementById('net-activity-live');
         let netWatermarkTimer = null;
+        let prevNetStatus = 'idle';
         function setNetworkActivity(status) {
             if (!netWatermark) return;
             if (netWatermarkTimer) { clearTimeout(netWatermarkTimer); netWatermarkTimer = null; }
             netWatermark.classList.remove('is-active', 'is-reconnecting', 'is-connected');
-            if (status === 'connecting') {
-                netWatermarkLabel.textContent = 'connecting…';
-                netWatermark.classList.add('is-active', 'is-reconnecting');
-            } else if (status === 'interrupted') {
+            // Note: 'connecting' does NOT light the watermark. A fresh ceremony
+            // is watched in the Multiplayer modal (its own stage tracker); an
+            // abandoned pending offer would otherwise shimmer here for the whole
+            // 5-min transport timeout. The watermark is only for a LIVE session
+            // repairing itself ('interrupted') or a just-settled 'connected'.
+            if (status === 'interrupted') {
                 netWatermarkLabel.textContent = 'reconnecting…';
                 netWatermark.classList.add('is-active', 'is-reconnecting');
             } else if (status === 'connected') {
@@ -1688,7 +1838,17 @@
                     netWatermark.classList.remove('is-active', 'is-connected');
                 }, 4000);
             }
-            // idle / paused: leave hidden.
+            // idle / paused / connecting: leave hidden.
+
+            // Accessibility: mirror meaningful transitions into a polite live
+            // region so a screen-reader user hears the same signal the watermark
+            // shows. Only announce edges, and skip the noisy 'connecting' churn.
+            if (netActivityLive && status !== prevNetStatus) {
+                if (status === 'interrupted') netActivityLive.textContent = 'Multiplayer connection interrupted — reconnecting…';
+                else if (status === 'connected') netActivityLive.textContent = prevNetStatus === 'interrupted' ? 'Multiplayer reconnected.' : 'Multiplayer connected.';
+                else if (status === 'idle') netActivityLive.textContent = '';
+            }
+            prevNetStatus = status;
         }
         window.__arcade.setNetworkActivity = setNetworkActivity;
 
@@ -1978,7 +2138,8 @@
             const out = {};
             for (let i = 0; i < localStorage.length; i++) {
                 const k = localStorage.key(i);
-                if (!k || !isSafeArcadeKey(k) || noExport.has(k)) continue;
+                if (!k || noExport.has(k)) continue;
+                if (!isSafeArcadeKey(k) && !isLsProxyBackupKey(k)) continue;
                 const v = localStorage.getItem(k);
                 if (typeof v === 'string') out[k] = v;
             }
@@ -2127,9 +2288,16 @@
             // Gate 5: per-key allowlist + value type
             const cleanData = {};
             const droppedKeys = [];
+            let protectedSkipped = 0;
             for (const k of Object.keys(parsed.data)) {
-                if (!isSafeArcadeKey(k) || typeof parsed.data[k] !== 'string') {
+                if ((!isSafeArcadeKey(k) && !isLsProxyBackupKey(k)) || typeof parsed.data[k] !== 'string') {
                     droppedKeys.push(k);
+                    continue;
+                }
+                if (IMPORT_PROTECTED_KEYS.has(k)) {
+                    // Device identity / trust records are never overwritten by an
+                    // import (see IMPORT_PROTECTED_KEYS) — skip silently-but-noted.
+                    protectedSkipped++;
                     continue;
                 }
                 cleanData[k] = parsed.data[k];
@@ -2164,6 +2332,7 @@
                 + 'overwriting their current values. Saved data not in the file is kept as-is.\n'
                 + asyncSummary
                 + (droppedKeys.length ? droppedKeys.length + ' invalid keys will be ignored.\n' : '')
+                + (protectedSkipped ? 'This device\'s identity and saved connections are kept as-is (not overwritten).\n' : '')
                 + '\nYour current state will be auto-saved to your Downloads folder first.\nContinue?';
             if (!window.confirm(summary)) return;
             // Gate 8: auto-backup current state (if non-empty)

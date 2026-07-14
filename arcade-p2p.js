@@ -93,6 +93,26 @@ const RDV_BROKER_URLS = [
     'wss://broker.hivemq.com:8884/mqtt',
 ];
 
+// A user (or a network that blocks the public brokers' WSS ports) can point
+// rendezvous at their own MQTT-over-WSS broker(s) by setting
+// arcade.v1._meta.rdvBrokers to a JSON array of wss:// URLs. Empty/invalid ⇒
+// the built-in fleet. The brokers only ever see ciphertext on rotating topics,
+// so trusting a self-hosted one costs nothing beyond the metadata a public one
+// already sees.
+function rdvBrokerUrls() {
+    try {
+        const raw = localStorage.getItem('arcade.v1._meta.rdvBrokers');
+        if (raw) {
+            const arr = JSON.parse(raw);
+            const urls = Array.isArray(arr)
+                ? arr.filter((u) => typeof u === 'string' && /^wss:\/\//i.test(u))
+                : [];
+            if (urls.length) return urls;
+        }
+    } catch (e) {}
+    return RDV_BROKER_URLS;
+}
+
 let rdv = null;
 let rdvReconnecting = false; // an episode is actively repairing a dead link
 
@@ -101,8 +121,9 @@ function rdvCarrierFactory() {
     if (typeof window !== 'undefined' && window.__arcadeRdvCarrierFactory) {
         return window.__arcadeRdvCarrierFactory();
     }
-    return new MultiCarrier(RDV_BROKER_URLS.map((url) => {
-        const label = new URL(url).hostname.split('.').slice(-2)[0]; // mosquitto / emqx / hivemq
+    return new MultiCarrier(rdvBrokerUrls().map((url) => {
+        let label = url;
+        try { label = new URL(url).hostname.split('.').slice(-2)[0]; } catch (e) {} // mosquitto / emqx / hivemq
         return new MqttCarrier({ url, onLog: (msg) => ArcadeDiag.log('mqtt', `[${label}] ${msg}`) });
     }));
 }
@@ -245,6 +266,17 @@ function hostLinkPeerId() {
         if (s.type === 'host') return pid;
     }
     return null;
+}
+
+// Is a transport peerId still a reachable seat? Live in `peers`, or stashed
+// AND actively repairing via rendezvous. A stash with no active episode is a
+// departure — its binding is stale. Shared by the identity-rebind guard (a
+// live seat's binding can't be hijacked) and targeted-send (never claim
+// delivery into a dead seat).
+function seatReachable(peerId) {
+    if (!addon || peerId === undefined || peerId === null) return false;
+    if (addon.peerNode.peers.has(peerId)) return true;
+    return !!(addon.peerNode.sessionStash && addon.peerNode.sessionStash.has(peerId) && rdvReconnecting);
 }
 
 // Roster: the per-device view of every DIRECT link (a host sees all joiners;
@@ -391,10 +423,18 @@ function setStatus(next) {
     if (next === sdkStatus) return;
     ArcadeDiag.log('bridge', `status ${sdkStatus} → ${next}`);
     sdkStatus = next;
-    // 'idle' means the session truly ended — indirect (through-the-host)
-    // addressing and the host's announced wire caps die with it. Identities
-    // re-announce on the next session.
-    if (next === 'idle') { indirectPeers.clear(); hostCaps = new Set(); }
+    // 'idle' means the session truly ended (a rendezvous repair holds
+    // 'interrupted', never 'idle') — direct bindings, indirect (through-the-
+    // host) addressing, and the host's announced wire caps all die with it.
+    // Identities re-announce on the next session. Clearing identityLinks too
+    // stops departed-seat bindings from lingering past the session (B-p2p-1).
+    if (next === 'idle') {
+        const hadLinks = identityLinks.size > 0;
+        identityLinks.clear();
+        indirectPeers.clear();
+        hostCaps = new Set();
+        if (hadLinks) notifyRosterChange();
+    }
     syncWakeLock();
     for (const fn of statusListeners) {
         try { fn(sdkStatus); } catch (e) {}
@@ -554,7 +594,7 @@ async function ensureAddon() {
                     // an anonymous targeted frame would reach the addressee
                     // attributable to nobody — and (before the fromDevice-key
                     // check below existed) could read as host-authored.
-                    if (isHub && identityLinks.has(env.to)) {
+                    if (isHub && identityLinks.has(env.to) && seatReachable(identityLinks.get(env.to))) {
                         const senderDev = deviceIdForPeerId(d.peerId);
                         if (senderDev) {
                             env.fromDevice = senderDev;
@@ -608,6 +648,15 @@ async function ensureAddon() {
                 // (The hub itself never takes this branch: it holds direct
                 // links to everyone, and the transport strips any forged
                 // inbound `relayed` flag before dispatch anyway.)
+                // A relayed identity must never override a LIVE direct binding:
+                // otherwise a joiner could relay-claim a directly-connected
+                // peer's deviceId and steal its broadcast attribution (S-sec-2).
+                // Strict live-link check so a stale binding doesn't wrongly block
+                // a legitimate relayed (re)appearance.
+                if (identityLinks.has(env.deviceId) && mp.peerNode.peers.has(identityLinks.get(env.deviceId))) {
+                    ArcadeDiag.log('bridge', `ignored relayed identity for ${env.deviceId}: already a live direct seat`);
+                    return;
+                }
                 const firstSighting = !indirectPeers.has(env.deviceId);
                 indirectPeers.set(env.deviceId, d.from);
                 if (firstSighting) {
@@ -626,6 +675,20 @@ async function ensureAddon() {
                 }
             }
             if (!d.relayed) {
+                // Refuse to rebind a deviceId whose CURRENT link is still LIVE (a
+                // real peer entry, connected or interrupted): a direct peer
+                // announcing another live seat's deviceId would otherwise capture
+                // that seat's inbound targeted frames and get its own frames
+                // host-stamped with the victim's identity (S-sec-1). Uses a strict
+                // live-link check, NOT seatReachable — a merely stashed/repairing
+                // session must yield to a fresh manual re-ceremony (that's exactly
+                // how a user recovers a dead link), which mints a new peerId.
+                const boundPeerId = identityLinks.get(env.deviceId);
+                if (boundPeerId !== undefined && boundPeerId !== d.peerId
+                        && mp.peerNode.peers.has(boundPeerId)) {
+                    ArcadeDiag.log('bridge', `refused identity rebind: ${env.deviceId} still live on ${boundPeerId} (claim from ${d.peerId})`);
+                    return;
+                }
                 identityLinks.set(env.deviceId, d.peerId);
                 // On a joiner, the direct link IS the host — record which
                 // wire capabilities it announced (empty for an older host,
@@ -943,7 +1006,13 @@ export const ArcadeP2P = {
         if (!addon.peerNode.isHost && !hostCaps.has('peer.sendTo')) return false;
         const env = { arcade: 1, gameId, payload, to };
         const directLink = identityLinks.get(to);
-        if (directLink !== undefined) return addon.sendTo(directLink, env);
+        if (directLink !== undefined) {
+            // A binding can outlive its link (departed seat whose stash lingers
+            // with no active repair) — refuse rather than report phantom
+            // delivery into a dead session (B-p2p-1).
+            if (!seatReachable(directLink)) return false;
+            return addon.sendTo(directLink, env);
+        }
         if (!addon.peerNode.isHost && indirectPeers.has(to)) {
             const hostLink = hostLinkPeerId();
             if (hostLink) return addon.sendTo(hostLink, env);

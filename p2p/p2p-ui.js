@@ -339,36 +339,99 @@ export class P2PUIManager {
         setTimeout(() => { this.ui.shareToast.style.display = 'none'; }, 3000);
     }
 
+    // ==========================================
+    // CONNECTION-STATE RENDERING (single source of truth)
+    // Badge text and the Host/Join buttons are derived from the peers map in
+    // ONE place, so every entry point (restore, start-over, live status events)
+    // agrees. The transport has one global role and one relay loop, so the
+    // buttons must respect it: only a host can invite more players, and Join is
+    // offered only when no link is live or stashed.
+    // ==========================================
+
+    /** Snapshot of the transport's connection inventory. */
+    _connectionState() {
+        let connected = 0, interrupted = 0, finalizing = 0, pending = 0;
+        this.peerNode.peers.forEach(p => {
+            if (p.status === 'connected') connected++;
+            else if (p.status === 'interrupted') interrupted++;
+            else if (p.status === 'finalizing') finalizing++;
+            else pending++;
+        });
+        const stashed = this.peerNode.sessionStash ? this.peerNode.sessionStash.size : 0;
+        return {
+            connected, interrupted, finalizing, pending, stashed,
+            // "Committed to a role": mirrors PeerManager._hasEstablishedLinks.
+            established: this.peerNode.peers.size > 0 || stashed > 0,
+            isHost: this.peerNode.isHost,
+        };
+    }
+
+    /** Update the status badge from the aggregate state (role-agnostic). */
+    _renderBadge() {
+        const s = this._connectionState();
+        let text, cls;
+        if (s.connected) { text = 'Connected'; cls = 'p2p-status-connected'; }
+        else if (s.interrupted) { text = 'Reconnecting…'; cls = 'p2p-status-connecting'; }
+        else if (s.finalizing) { text = 'Waiting for them to scan your code…'; cls = 'p2p-status-connecting'; }
+        else if (s.pending) { text = 'Connecting…'; cls = 'p2p-status-connecting'; }
+        else { text = 'Not connected'; cls = 'p2p-status-disconnected'; }
+        this.ui.statusBadge.textContent = text;
+        this.ui.statusBadge.className = cls;
+    }
+
+    /**
+     * Show the Host/Join buttons consistent with the transport's role.
+     * No established links → both (fresh start). Host node with links → Host
+     * only (invite another player). Joiner with links → neither (a joiner is a
+     * leaf of the star and cannot add players itself).
+     */
+    _renderChoiceButtons() {
+        const s = this._connectionState();
+        this.ui.choice.style.display = 'block';
+        const guide = this.ui.choice.querySelector('.p2p-guide');
+        if (!s.established) {
+            this.ui.btnHost.style.display = 'block';
+            this.ui.btnJoin.style.display = 'block';
+            this.ui.btnHost.textContent = 'Host';
+            if (guide) guide.textContent = "Scan each other's screens to connect.";
+        } else if (s.isHost) {
+            this.ui.btnHost.style.display = 'block';
+            this.ui.btnHost.textContent = 'Invite another player';
+            this.ui.btnJoin.style.display = 'none';
+            if (guide) guide.textContent = 'Add another player, or close this to keep playing.';
+        } else {
+            // A joiner is a leaf of the star — it can't add players itself.
+            this.ui.btnHost.style.display = 'none';
+            this.ui.btnJoin.style.display = 'none';
+            if (guide) guide.textContent = "You're connected. Only the host can add more players.";
+        }
+    }
+
     /**
      * Puts the modal into a coherent screen for the CURRENT connection state.
      * Called on every show() — closing the window mid-ceremony must never
      * strand the user in a dead-end (no buttons, stale step bar) on reopen.
      */
     _restoreUIState() {
-        const peers = Array.from(this.peerNode.peers.values());
-        // 'interrupted' is a live session being repaired — treat it like
-        // connected here, never like a pending ceremony.
-        const connected = peers.some(p => p.status === 'connected' || p.status === 'interrupted');
-        const pending = peers.some(p => p.status !== 'connected' && p.status !== 'interrupted');
-
-        if (connected) {
-            // A live connection exists. Host/Join stay available so the user
-            // can start another, separate standalone connection.
-            this.cleanupUI();
-            this.ui.choice.style.display = 'block';
-            this.ui.btnHost.style.display = 'block';
-            this.ui.btnJoin.style.display = 'block';
-            return;
-        }
-
+        // Resume a still-valid pending ceremony FIRST — even while another link
+        // is live (a host mid-"invite another") the QR on screen is real work.
+        const pending = Array.from(this.peerNode.peers.values())
+            .some(p => p.status !== 'connected' && p.status !== 'interrupted');
         if (pending && this.rawSDPPayload) {
-            // Mid-ceremony with a still-valid code — resume where they left
-            // off: their code on screen, next step available.
             this.ui.choice.style.display = 'none';
             this.ui.workArea.style.display = 'block';
             this.ui.scannerContainer.style.display = 'none';
             this.ui.qrContainer.style.display = 'block';
             if (this.peerNode.isHost) this.ui.btnScanAns.style.display = 'block';
+            this._renderBadge();
+            return;
+        }
+
+        const s = this._connectionState();
+        if (s.connected || s.interrupted) {
+            this.cleanupUI();
+            this._renderChoiceButtons();
+            this._renderBadge();
             return;
         }
 
@@ -377,12 +440,14 @@ export class P2PUIManager {
 
     /** Abandon any unfinished attempt and return to the first screen. */
     _startOver(log = true) {
+        this._ceremonyPeerId = null;
         this.peerNode.peers.forEach((p, id) => {
             // Abandon unfinished ceremonies only — an 'interrupted' peer is an
-            // established session mid-repair, not a failed attempt.
+            // established session mid-repair, not a failed attempt. Route through
+            // the transport so a terminal 'status' event reaches the bridge
+            // (a direct peers.delete() would wedge the launcher's status).
             if (p.status !== 'connected' && p.status !== 'interrupted') {
-                try { p.connection.close(); } catch(_) {}
-                this.peerNode.peers.delete(id);
+                this.peerNode.disconnectPeer(id);
             }
         });
         this.rawSDPPayload = '';
@@ -397,25 +462,8 @@ export class P2PUIManager {
         this.ui.btnShareSdp.style.display = '';
         this.ui.btnCopySdp.style.display = '';
 
-        const statuses = Array.from(this.peerNode.peers.values()).map(p => p.status);
-        const anyConnected = statuses.includes('connected');
-        const anyInterrupted = statuses.includes('interrupted');
-        // Host/Join always available — each starts a separate standalone
-        // connection, even while another is already live.
-        this.ui.choice.style.display = 'block';
-        this.ui.btnHost.style.display = 'block';
-        this.ui.btnJoin.style.display = 'block';
-
-        if (anyConnected) {
-            this.ui.statusBadge.textContent = 'Connected';
-            this.ui.statusBadge.className = 'p2p-status-connected';
-        } else if (anyInterrupted) {
-            this.ui.statusBadge.textContent = 'Reconnecting…';
-            this.ui.statusBadge.className = 'p2p-status-connecting';
-        } else {
-            this.ui.statusBadge.textContent = 'Not connected';
-            this.ui.statusBadge.className = 'p2p-status-disconnected';
-        }
+        this._renderChoiceButtons();
+        this._renderBadge();
 
         if (log) this.logDiag('info', 'Starting over — previous attempt discarded.');
     }
@@ -451,6 +499,9 @@ export class P2PUIManager {
 
         try {
             const offerData = await this.peerNode.createOffer();
+            // Remember which link THIS ceremony is minting so a status event from
+            // an unrelated (already-live) peer can't close this modal on us.
+            try { this._ceremonyPeerId = JSON.parse(offerData).peerId; } catch (_) { this._ceremonyPeerId = null; }
             this._setStage(0, 'done'); // your code is ready & showing
 
             // QR-first: the code IS the invite. Links are the fallback.
@@ -460,7 +511,11 @@ export class P2PUIManager {
             this.ui.btnShareSdp.textContent = 'Send a link instead';
         } catch (e) {
             this._setStage(0, 'error');
-            this.logDiag('error', 'Could not create your invite code.');
+            // A role-flip guard rejection (hosting while joined) lands here — tell
+            // the user why rather than silently failing.
+            this.logDiag('error', e && e.message ? e.message : 'Could not create your invite code.');
+            this.ui.statusBadge.textContent = e && e.message ? e.message : 'Could not create your invite code.';
+            this.ui.statusBadge.className = 'p2p-status-disconnected';
         }
     }
 
@@ -671,11 +726,12 @@ export class P2PUIManager {
             }
         });
         
-        document.addEventListener('keydown', (e) => {
+        this._escListener = (e) => {
             if (e.key === 'Escape' && this.ui.overlay.style.display !== 'none') {
                 this.hide();
             }
-        });
+        };
+        document.addEventListener('keydown', this._escListener);
 
         this.ui.overlay.addEventListener('keydown', (e) => {
             if (e.key === 'Tab') {
@@ -704,62 +760,31 @@ export class P2PUIManager {
         
         this.peerNode.addEventListener('status', (e) => {
             const { peerId, status } = e.detail;
-            
-            if (this.peerNode.isHost) {
-                let connectedCount = 0, interruptedCount = 0;
-                this.peerNode.peers.forEach(p => {
-                    if (p.status === 'connected') connectedCount++;
-                    else if (p.status === 'interrupted') interruptedCount++;
-                });
 
-                if (connectedCount > 0) {
-                    this.ui.statusBadge.textContent = 'Connected';
-                    this.ui.statusBadge.className = 'p2p-status-connected';
-                    this._setStage(2, 'done');
-                    this.cleanupUI();
+            // Badge always reflects the aggregate — one link recovering while
+            // another is mid-ceremony no longer shows the wrong state.
+            this._renderBadge();
 
-                    this.ui.choice.style.display = 'block';
-                    this.ui.btnHost.style.display = 'block';
-                    this.ui.btnJoin.style.display = 'block';
-                    this.ui.btnScanAns.style.display = 'none';
-                    setTimeout(() => this.hide(), 1800);
-                } else if (interruptedCount > 0) {
-                    this.ui.statusBadge.textContent = 'Reconnecting…';
-                    this.ui.statusBadge.className = 'p2p-status-connecting';
-                } else if (status === 'disconnected') {
-                    this.ui.statusBadge.textContent = 'Not connected';
-                    this.ui.statusBadge.className = 'p2p-status-disconnected';
-                } else {
-                    this.ui.statusBadge.textContent = 'Connecting…';
-                    this.ui.statusBadge.className = 'p2p-status-connecting';
-                }
-            } else {
-                this.ui.statusBadge.className = '';
-                if (status === 'connected') {
-                    this.ui.statusBadge.textContent = 'Connected';
-                    this.ui.statusBadge.classList.add('p2p-status-connected');
-                    this._setStage(2, 'done');
-                    this.cleanupUI();
-                    setTimeout(() => this.hide(), 1500);
-                }
-                else if (status === 'finalizing') {
-                    // Network path is up but they haven't scanned our code yet.
-                    // Keep our code fully visible — the job isn't done.
-                    this.ui.statusBadge.textContent = 'Waiting for them to scan your code…';
-                    this.ui.statusBadge.classList.add('p2p-status-connecting');
-                }
-                else if (status === 'interrupted') {
-                    this.ui.statusBadge.textContent = 'Reconnecting…';
-                    this.ui.statusBadge.classList.add('p2p-status-connecting');
-                }
-                else if (status === 'disconnected' || status === 'failed') {
-                    this.ui.statusBadge.textContent = 'Not connected';
-                    this.ui.statusBadge.classList.add('p2p-status-disconnected');
-                }
-                else {
-                    this.ui.statusBadge.textContent = 'Connecting…';
-                    this.ui.statusBadge.classList.add('p2p-status-connecting');
-                }
+            // Only the ceremony's OWN link completing (or failing) should tear
+            // down the ceremony UI. An unrelated live peer flapping
+            // interrupted→connected must not destroy an on-screen invite QR.
+            const isCeremonyPeer = this._ceremonyPeerId && peerId === this._ceremonyPeerId;
+            if (!isCeremonyPeer) return;
+
+            if (status === 'connected') {
+                this._setStage(2, 'done');
+                this._ceremonyPeerId = null;
+                this.cleanupUI();
+                this._renderChoiceButtons();
+                this.ui.btnScanAns.style.display = 'none';
+                setTimeout(() => this.hide(), 1600);
+            } else if (status === 'failed' || status === 'disconnected') {
+                // This ceremony's link died before completing — surface it on
+                // the step tracker instead of a silent close.
+                const step = this._stageStates ? this._stageStates.findIndex(st => st !== 'done') : -1;
+                if (step >= 0) this._setStage(step, 'error');
+                this.logDiag('error', 'This connection attempt failed — start over and rescan.');
+                this._ceremonyPeerId = null;
             }
         });
 
@@ -792,12 +817,15 @@ export class P2PUIManager {
                 this._setStage(0, 'done'); // scanned their code
                 try {
                     const answerData = await this.peerNode.createAnswer(offerData);
+                    // The answer is keyed by the host's peerId — that's the link
+                    // this join ceremony owns.
+                    try { this._ceremonyPeerId = JSON.parse(answerData).peerId; } catch (_) { this._ceremonyPeerId = null; }
 
                     // Their turn to scan: show OUR code big and clear.
                     await this.displayQRCode(answerData,
                         "Now have the host tap Scan their code and scan this.");
                     this._setStage(1, 'done'); // your code is showing
-                    this.ui.btnShareSdp.textContent = '📤 Can’t scan? Send a reply link instead';
+                    this.ui.btnShareSdp.textContent = 'Send a reply link back';
 
                     // Bonus: same-browser auto-connect channels
                     const encoded = this.rawSDPPayload; // set by displayQRCode
@@ -805,7 +833,7 @@ export class P2PUIManager {
                     this._attemptAutoReturn(answerObj, encoded);
                 } catch (e) {
                     this._setStage(1, 'error');
-                    this.logDiag('error', 'Could not prepare your reply code.');
+                    this.logDiag('error', e && e.message ? e.message : 'Could not prepare your reply code.');
                 }
             });
         });
@@ -1026,6 +1054,10 @@ export class P2PUIManager {
         if (this._messageListener) {
             window.removeEventListener('message', this._messageListener);
             this._messageListener = null;
+        }
+        if (this._escListener) {
+            document.removeEventListener('keydown', this._escListener);
+            this._escListener = null;
         }
         // Remove injected DOM
         this.ui?.overlay?.remove();
