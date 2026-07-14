@@ -245,7 +245,7 @@ WebRTC can't skip the offer/answer ceremony — DTLS fingerprints must flow both
 - The receiving bridge upserts `arcade.v1._meta.knownPeers[deviceId]` — `name` is a local, user-editable label seeded from the peer's self-reported `remoteName`, plus `firstConnectedAt` / `lastConnectedAt` / `timesConnected`.
 - **First contact with a new device** (`ArcadeP2P.onPeerIdentity`'s `isNew` flag): the launcher prompts "Name this connection", pre-filled with the peer's self-reported name as a suggestion — accept it as-is or type something else. Reconnecting later never re-prompts; the stored `name` is never silently overwritten by later handshakes.
 - The **Multiplayer dialog** (`index.html`, opened via the menu's single "Multiplayer" item — device name, "New connection", and the full saved-connections manager all live behind it) is the full-featured saved-connections manager — see below. Names/rename/delete render instantly from localStorage with no P2P module load; the dialog live-refreshes when `arcade-p2p.js` reports a fresh handshake via `ArcadeP2P.onPeerIdentity`.
-- Multi-peer safe: a host with several joiners (via "Invite another player") re-announces to each newly-connected peerId individually, so late joiners aren't left without a name exchange.
+- Multi-peer safe: a host holding several standalone connections re-announces to each newly-connected peerId individually, so late joiners aren't left without a name exchange.
 
 ### One-tap reconnect + identity pinning (IMPLEMENTED, transport v1.8)
 

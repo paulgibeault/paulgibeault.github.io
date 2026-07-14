@@ -436,6 +436,13 @@
 
     <div class="launcher-toast" id="launcher-toast" role="status" aria-live="polite"></div>
 
+    <!-- Quiet, non-blocking network-activity mark (bottom corner). Replaces the
+         old interruption toast — a reconnect shows as a soft shimmer, not a banner. -->
+    <div class="net-watermark" id="net-watermark" aria-hidden="true">
+        <span class="net-watermark__glyph">⚇</span>
+        <span class="net-watermark__label" id="net-watermark-label"></span>
+    </div>
+
     <!-- ========== GAME VIEW ========== -->
     <div id="view-game" class="hidden">
         <div class="game-topbar">
@@ -918,16 +925,30 @@
                             : status === 'interrupted' ? 'Reconnecting…'
                             : 'Connecting…';
                     }
+                    // A soft corner watermark carries live/reconnect activity so
+                    // an interruption no longer throws a blocking banner.
+                    setNetworkActivity(status);
                     if (status === 'connected') {
-                        showToast(prevPeerStatus === 'interrupted' ? 'Multiplayer reconnected!' : 'Multiplayer connected!');
+                        if (prevPeerStatus === 'interrupted') {
+                            showToast('Multiplayer reconnected!');
+                        } else {
+                            // Name the peer when the roster already knows it;
+                            // otherwise stay generic (the name lands a beat later).
+                            let who = '';
+                            try {
+                                const live = ArcadeP2P.connectedPeers().filter(p => p.status === 'connected' && p.name);
+                                if (live.length === 1) who = live[0].name;
+                            } catch (_) {}
+                            showToast(who ? 'Connected to ' + who : 'Multiplayer connected!');
+                        }
                         // Tell the other launcher which handshaken games are
                         // mounted here, so its games get a ready signal.
                         for (const gid of pool.keys()) {
                             if (helloedGames.has(gid)) ArcadeP2P.announceGame(gid);
                         }
-                    } else if (status === 'interrupted') {
-                        showToast('Multiplayer connection interrupted — reconnecting…');
                     }
+                    // 'interrupted' intentionally shows no toast — the watermark
+                    // signals it quietly.
                     prevPeerStatus = status;
                 });
                 ArcadeP2P.onRosterChange((peers) => {
@@ -1007,6 +1028,39 @@
                     showToast(name + ' hung up. Call them back from Multiplayer anytime.');
                     if (window.__arcade.renderKnownPeers) window.__arcade.renderKnownPeers();
                 });
+                // Cross-game "someone messaged you" toast. Peer payloads are
+                // game-defined and opaque, and a single burst (e.g. a chat
+                // file transfer) is many messages — so throttle to one toast
+                // per sender+game per window and only fire when that game
+                // isn't the one you're looking at.
+                const msgToastThrottle = new Map();
+                const MSG_TOAST_WINDOW_MS = 10000;
+                function resolvePeerName(deviceId) {
+                    if (!deviceId) return 'Someone';
+                    try {
+                        const hit = ArcadeP2P.connectedPeers().find(p => p.deviceId === deviceId && p.name);
+                        if (hit) return hit.name;
+                    } catch (_) {}
+                    try {
+                        const known = JSON.parse(localStorage.getItem('arcade.v1._meta.knownPeers') || '{}');
+                        if (known[deviceId] && known[deviceId].name) return known[deviceId].name;
+                    } catch (_) {}
+                    return 'Someone';
+                }
+                function resolveGameTitle(gameId) {
+                    const el = document.querySelector('.launcher-btn[data-game-id="' + (gameId || '') + '"] .launcher-btn__name');
+                    return (el && el.textContent.trim()) || gameId || 'a game';
+                }
+                function maybeMessageToast(targetGameId, fromDeviceId) {
+                    // Suppress when you're already looking at that game.
+                    if (targetGameId && targetGameId === activeGameId) return;
+                    const key = (fromDeviceId || 'peer') + '|' + (targetGameId || '');
+                    const now = Date.now();
+                    const last = msgToastThrottle.get(key) || 0;
+                    if (now - last < MSG_TOAST_WINDOW_MS) return;
+                    msgToastThrottle.set(key, now);
+                    showToast('💬 ' + resolvePeerName(fromDeviceId) + ' — ' + resolveGameTitle(targetGameId));
+                }
                 ArcadeP2P.onMessage((targetGameId, payload, fromDeviceId, meta) => {
                     // Route by the sender's gameId — both devices run the same
                     // game for a session, so target == sender's id. Messages
@@ -1016,6 +1070,7 @@
                     // window before it, and for older peers that never send one).
                     // meta { relayed, to } lets games distinguish broadcast
                     // from targeted delivery and sanity-check frame origins.
+                    maybeMessageToast(targetGameId, fromDeviceId);
                     postToIframe(targetGameId, {
                         type: 'arcade:peer.message',
                         payload: payload,
@@ -1607,6 +1662,35 @@
             toastTimer = setTimeout(() => toast.classList.remove('visible'), opts.duration || 3500);
         }
         window.__arcade.showToast = showToast; // used by the Connections dialog module
+
+        // ---- network-activity watermark ----
+        // A quiet corner mark that replaces the interruption toast. Live
+        // ceremony/reconnect states shimmer softly; a completed connection
+        // flashes steady green then fades away so the screen stays clean.
+        const netWatermark = document.getElementById('net-watermark');
+        const netWatermarkLabel = document.getElementById('net-watermark-label');
+        let netWatermarkTimer = null;
+        function setNetworkActivity(status) {
+            if (!netWatermark) return;
+            if (netWatermarkTimer) { clearTimeout(netWatermarkTimer); netWatermarkTimer = null; }
+            netWatermark.classList.remove('is-active', 'is-reconnecting', 'is-connected');
+            if (status === 'connecting') {
+                netWatermarkLabel.textContent = 'connecting…';
+                netWatermark.classList.add('is-active', 'is-reconnecting');
+            } else if (status === 'interrupted') {
+                netWatermarkLabel.textContent = 'reconnecting…';
+                netWatermark.classList.add('is-active', 'is-reconnecting');
+            } else if (status === 'connected') {
+                netWatermarkLabel.textContent = 'connected';
+                netWatermark.classList.add('is-active', 'is-connected');
+                // Good news is brief — fade the mark out once it's settled.
+                netWatermarkTimer = setTimeout(() => {
+                    netWatermark.classList.remove('is-active', 'is-connected');
+                }, 4000);
+            }
+            // idle / paused: leave hidden.
+        }
+        window.__arcade.setNetworkActivity = setNetworkActivity;
 
         // ---- canonical checksum ----
         async function checksumData(data) {

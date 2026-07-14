@@ -475,8 +475,8 @@ async function ensureAddon() {
         });
 
         // Tracks which transport peerIds we've already announced our identity
-        // to, so a second peer joining an already-'connected' host (via
-        // "Invite another player") still gets our broadcast, without
+        // to, so a second peer joining an already-'connected' host (a fresh
+        // standalone connection via Host) still gets our broadcast, without
         // re-announcing on every redundant status event for a peer we've
         // already greeted.
         const announcedTo = new Set();

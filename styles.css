@@ -657,6 +657,48 @@ body.app-in-game .launcher-menu[data-open="true"] .launcher-menu__panel {
 .launcher-toast.visible { opacity: 1; }
 .launcher-toast.error { border-color: var(--tactical-red); }
 
+/* ---- NETWORK-ACTIVITY WATERMARK ----
+   Quiet bottom-corner mark that replaces the interruption toast. Sits above
+   the game view (z 3000/3002) but below toasts (z 4000) so a reconnect during
+   play reads as a soft shimmer, never a blocking banner. Hidden until active. */
+.net-watermark {
+    position: fixed;
+    left: 14px;
+    bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    z-index: 3500;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.5s ease;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+}
+.net-watermark.is-active { opacity: 0.45; }
+.net-watermark__glyph { font-size: 0.95rem; line-height: 1; }
+.net-watermark__label { text-transform: lowercase; }
+
+/* Live ceremony / reconnect — amber, gently pulsing. */
+.net-watermark.is-reconnecting { color: var(--field-gold); }
+.net-watermark.is-reconnecting .net-watermark__glyph {
+    animation: net-watermark-pulse 1.4s ease-in-out infinite;
+}
+/* Settled — steady green, then the JS fades the whole mark out. */
+.net-watermark.is-connected { color: var(--online-green); }
+
+@keyframes net-watermark-pulse {
+    0%, 100% { opacity: 0.35; }
+    50%      { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .net-watermark.is-reconnecting .net-watermark__glyph { animation: none; }
+}
+
 /* ---- "In Development" overlay banner ----
    Apply .in-dev-wrap to a relatively-clipped image container
    (e.g. .launcher-btn__image-wrap, .project-card__image-wrap)

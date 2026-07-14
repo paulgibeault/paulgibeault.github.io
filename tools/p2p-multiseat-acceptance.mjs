@@ -34,9 +34,9 @@ for (const label of ['H', 'A', 'B']) {
 const launcherPage = (label) => harness.launcherPage(label, contexts[label]);
 
 // Each host-side ceremony mints a fresh link while earlier ones stay live —
-// exactly the "Invite another player" flow (openUI({mode:'host'}) → fresh
-// code). waitHost:false — the host's aggregate status isn't what a second
-// link proves.
+// the host tapping Host again for another standalone connection
+// (openUI({mode:'host'}) → fresh code). waitHost:false — the host's aggregate
+// status isn't what a second link proves.
 const connectJoiner = (H, J) => harness.ceremony(H, J, { waitHost: false });
 
 try {

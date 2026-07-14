@@ -148,7 +148,8 @@ export async function startP2PHarness({ port, dropPort }) {
 
     // Signaling ceremony at the transport level — stands in for QR / link
     // tennis (p2p/PROTOCOL.md §4). Each host-side createOffer() mints a
-    // fresh link, which is exactly the "Invite another player" flow.
+    // fresh link — the same path as tapping Host again for another
+    // standalone connection.
     // Returns the packed payloads so suites can assert their shape.
     // waitHost: false when the host already holds other live links (its
     // aggregate status is not what this ceremony proves).

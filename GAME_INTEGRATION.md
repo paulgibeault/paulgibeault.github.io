@@ -518,7 +518,7 @@ Rules of the road:
 - [ ] Don't cache `status()` at init: a game mounted mid-session receives
       `'connected'` in its welcome, and live transitions arrive via `onStatus`.
 
-Multi-seat rules (host + several joiners over "Invite another player"):
+Multi-seat rules (host holding several standalone connections):
 
 - [ ] **Feature-detect, don't version-check**: gate targeted sends / roster /
       meta on `Arcade.peer.caps()` at lobby time. A session's host should
