@@ -997,6 +997,26 @@ export class PeerManager extends EventTarget {
         this._teardownPeer(peerId, 'disconnected');
     }
 
+    /**
+     * Connection-liveness snapshot for UI, so callers don't reach into the
+     * internal `peers`/`sessionStash`/`isHost` state to derive it themselves.
+     */
+    statusSummary() {
+        let connected = 0, interrupted = 0, finalizing = 0, pending = 0;
+        this.peers.forEach((p) => {
+            if (p.status === 'connected') connected++;
+            else if (p.status === 'interrupted') interrupted++;
+            else if (p.status === 'finalizing') finalizing++;
+            else pending++;
+        });
+        const stashed = this.sessionStash.size;
+        return {
+            connected, interrupted, finalizing, pending, stashed,
+            established: this.peers.size > 0 || stashed > 0,
+            isHost: this.isHost,
+        };
+    }
+
     /** Drops one peer's stashed session, if any — a deliberate "start over". */
     forgetSession(peerId) {
         this.sessionStash.delete(peerId);

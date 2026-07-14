@@ -60,17 +60,29 @@ S-sdk-4 (corrupt-JSON warn-once), S-sdk-5 (warn on `ready` before `init`);
 G-ux-2 (non-blocking `window.__arcade.dialog` replacing the P2P confirm/prompt
 that froze the heartbeat); G-ux-3 (tappable message toast).
 
-**Not yet done (follow-ups):** the full Phase 4 structural refactors — P4-a
-unified seat record (note: `indirectPeers` is relay-tag-keyed, not peerId-keyed,
-so it stays separate from the peerId seat map), P4-d index.html split, P4-e
-transport API. The *bugs* they target are all fixed surgically, so these are pure
-maintainability refactors best done as focused, separately-reviewed PRs (P4-b/c
-are largely covered by the `_renderBadge`/`_renderChoiceButtons` helpers and the
-per-peer rdv Set already added). Also: S-sec-4a (persistent cross-episode replay
-cache — the compensating decrypt rate-limit and honest PROTOCOL.md are in);
-S-sdk-2/6; T-4 (harness carrier hooks + day-rollover scenario); D-4 (tick shipped
-items in framework-evolution.md / implementation-roadmap.md); PROTOCOL.md §10
-registry tidy.
+**Phase 4 landed (validated across all P2P suites):**
+
+- **P4-a — unified seat record** (`arcade-p2p.js`). Four parallel structures
+  (`identityLinks`, `announcedTo`, `autoPairMintedFor`, and the linear reverse
+  lookup) collapsed into one `seats` Map keyed by peerId (`{deviceId, announced,
+  minted}`) + an O(1) `deviceIndex` reverse map. One `dropSeat`/`unbindDevice`
+  owns a seat's whole lifecycle; `deviceIdForPeerId` is now O(1). `indirectPeers`
+  stays separate (it's relay-tag-keyed, not peerId-keyed).
+- **P4-b/c** — already covered by the `_renderBadge`/`_renderChoiceButtons`
+  helpers and the per-peer `rdvReconnecting` Set added earlier.
+- **P4-e — transport `statusSummary()`**: the connection-liveness snapshot moved
+  onto `PeerManager`, so the UI's `_connectionState()` no longer iterates
+  `peerNode.peers`/`sessionStash` directly.
+
+**Still open (best as focused PRs):** P4-d (extract the ~950-line storage-bridge
++ save/import block from index.html into modules) — deliberately deferred: it's
+security-critical (the opaque-frame boundary), the payoff is purely
+organizational/testability, and the closure interdependencies make a clean
+extraction involved enough to warrant its own review. Also: S-sec-4a (persistent
+cross-episode replay cache — the compensating decrypt rate-limit and honest
+PROTOCOL.md are in); S-sdk-2/6; T-4 (harness carrier hooks + day-rollover
+scenario); D-4 (tick shipped items in framework-evolution.md /
+implementation-roadmap.md).
 
 ---
 

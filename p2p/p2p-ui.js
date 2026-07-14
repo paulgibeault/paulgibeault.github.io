@@ -348,22 +348,9 @@ export class P2PUIManager {
     // offered only when no link is live or stashed.
     // ==========================================
 
-    /** Snapshot of the transport's connection inventory. */
+    /** Snapshot of the transport's connection inventory (transport owns it). */
     _connectionState() {
-        let connected = 0, interrupted = 0, finalizing = 0, pending = 0;
-        this.peerNode.peers.forEach(p => {
-            if (p.status === 'connected') connected++;
-            else if (p.status === 'interrupted') interrupted++;
-            else if (p.status === 'finalizing') finalizing++;
-            else pending++;
-        });
-        const stashed = this.peerNode.sessionStash ? this.peerNode.sessionStash.size : 0;
-        return {
-            connected, interrupted, finalizing, pending, stashed,
-            // "Committed to a role": mirrors PeerManager._hasEstablishedLinks.
-            established: this.peerNode.peers.size > 0 || stashed > 0,
-            isHost: this.peerNode.isHost,
-        };
+        return this.peerNode.statusSummary();
     }
 
     /** Update the status badge from the aggregate state (role-agnostic). */

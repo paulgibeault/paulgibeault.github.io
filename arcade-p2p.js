@@ -211,7 +211,37 @@ const peerIdentityListeners = []; // fn({deviceId, name, remoteName, isNew, fing
 const pairRequestListeners = [];  // fn({deviceId, name}) — peer wants auto-reconnect, user undecided
 const remoteByeListeners = [];    // fn({deviceId, name}) — peer hung up on purpose
 const presenceListeners = [];     // fn({gameId, deviceId, name, kind}) — remote game mounted/listening
-const identityLinks = new Map();  // deviceId → transport peerId of its DIRECT link
+// One record per DIRECT-link seat, keyed by transport peerId. Consolidates what
+// used to be four parallel structures (identityLinks, announcedTo,
+// autoPairMintedFor, and the reverse lookup) so a single place owns a seat's
+// whole lifecycle — the root fix for the stale-binding class (nothing used to
+// own "this seat left, forget everything"). `deviceIndex` is the O(1) reverse
+// lookup that replaces the old linear scan over identityLinks.
+//   seat = { deviceId: string|null, announced: bool, minted: bool }
+// Lifecycle: `announced`/`minted` reset on a link's terminal disconnect (a
+// reconnect re-announces / re-mints); the deviceId binding is KEPT until the
+// session goes fully idle, so a rendezvous repair can re-adopt it (seatReachable
+// gates any use of a binding whose link isn't currently live). A deliberate
+// hang-up / start-over forgets the seat outright via unbindDevice().
+// (indirectPeers below stays separate — it is keyed by relay TAG, not peerId.)
+const seats = new Map();        // peerId → seat
+const deviceIndex = new Map();  // deviceId → peerId of its direct link
+function getSeat(peerId) {
+    let s = seats.get(peerId);
+    if (!s) { s = { deviceId: null, announced: false, minted: false }; seats.set(peerId, s); }
+    return s;
+}
+function bindSeatDevice(peerId, deviceId) {
+    const s = getSeat(peerId);
+    s.deviceId = deviceId;
+    deviceIndex.set(deviceId, peerId);
+}
+// Forget everything about one deviceId's seat (deliberate hang-up / start-over).
+function unbindDevice(deviceId) {
+    const pid = deviceIndex.get(deviceId);
+    deviceIndex.delete(deviceId);
+    if (pid !== undefined) seats.delete(pid);
+}
 
 // Devices known only THROUGH the host (star topology): other joiners, whose
 // identity frames arrive host-relayed. Maps deviceId → the relay `from` tag,
@@ -235,10 +265,8 @@ function identityFrame() {
 }
 
 function deviceIdForPeerId(peerId) {
-    for (const [devId, pid] of identityLinks) {
-        if (pid === peerId) return devId;
-    }
-    return null;
+    const s = seats.get(peerId);
+    return s ? s.deviceId : null;
 }
 
 function deviceIdForRelayFrom(from) {
@@ -297,7 +325,7 @@ function rosterSnapshot() {
     if (!addon) return [];
     const known = readKnownPeers();
     const out = [];
-    for (const [deviceId, peerId] of identityLinks) {
+    for (const [deviceId, peerId] of deviceIndex) {
         const p = addon.peerNode.peers.get(peerId);
         let status = null;
         if (p) {
@@ -427,13 +455,14 @@ function setStatus(next) {
     ArcadeDiag.log('bridge', `status ${sdkStatus} → ${next}`);
     sdkStatus = next;
     // 'idle' means the session truly ended (a rendezvous repair holds
-    // 'interrupted', never 'idle') — direct bindings, indirect (through-the-
-    // host) addressing, and the host's announced wire caps all die with it.
-    // Identities re-announce on the next session. Clearing identityLinks too
-    // stops departed-seat bindings from lingering past the session (B-p2p-1).
+    // 'interrupted', never 'idle') — seats, indirect (through-the-host)
+    // addressing, and the host's announced wire caps all die with it.
+    // Identities re-announce on the next session. Clearing the seats too stops
+    // departed-seat bindings from lingering past the session (B-p2p-1).
     if (next === 'idle') {
-        const hadLinks = identityLinks.size > 0;
-        identityLinks.clear();
+        const hadLinks = deviceIndex.size > 0;
+        seats.clear();
+        deviceIndex.clear();
         indirectPeers.clear();
         hostCaps = new Set();
         if (hadLinks) notifyRosterChange();
@@ -517,19 +546,14 @@ async function ensureAddon() {
             ArcadeDiag.log('p2p', (d.type && d.type !== 'info' ? d.type.toUpperCase() + ': ' : '') + d.msg);
         });
 
-        // Tracks which transport peerIds we've already announced our identity
-        // to, so a second peer joining an already-'connected' host (a fresh
-        // standalone connection via Host) still gets our broadcast, without
-        // re-announcing on every redundant status event for a peer we've
-        // already greeted.
-        const announcedTo = new Set();
-        // peerIds whose identity envelope already triggered a pairing mint.
-        // Identity frames ride the replayable app-message path (outbox +
-        // replay on reconnect), so the SAME announcement can be delivered
-        // twice — and a second enablePair() mints a second random, which is
-        // how a pair used to end up committed to two different keys on the
-        // two devices (permanently deaf rendezvous). One mint per link.
-        const autoPairMintedFor = new Set();
+        // seat.announced tracks whether we've announced our identity to a peerId
+        // yet, so a second peer joining an already-'connected' host still gets
+        // our broadcast without re-announcing on every redundant status event.
+        // seat.minted tracks whether a peerId's identity envelope already
+        // triggered a pairing mint: identity frames ride the replayable
+        // app-message path, so the SAME announcement can arrive twice — and a
+        // second enablePair() mints a second random, the classic
+        // committed-to-two-different-keys (permanently deaf) bug. One mint per link.
         mp.addEventListener('status', (e) => {
             const { peerId, status } = e.detail || {};
             applyStatus(mp);
@@ -539,15 +563,23 @@ async function ensureAddon() {
                 // of how it got here.
                 const devId = deviceIdForPeerId(peerId);
                 if (devId) setKnownPeerPaused(devId, false);
-                if (peerId && !announcedTo.has(peerId)) {
-                    announcedTo.add(peerId);
-                    try {
-                        mp.send(identityFrame());
-                    } catch (err) {}
+                if (peerId) {
+                    const seat = getSeat(peerId);
+                    if (!seat.announced) {
+                        seat.announced = true;
+                        try {
+                            mp.send(identityFrame());
+                        } catch (err) {}
+                    }
                 }
             } else if (peerId && (status === 'disconnected' || status === 'failed' || status === 'closed')) {
-                announcedTo.delete(peerId);
-                autoPairMintedFor.delete(peerId);
+                // Terminal disconnect: reset announce/mint so a reconnect
+                // re-announces and re-mints, but KEEP the deviceId binding — a
+                // rendezvous repair re-adopts it (seatReachable gates its use;
+                // a deliberate hang-up forgets it via unbindDevice, and full
+                // idle clears every seat).
+                const seat = seats.get(peerId);
+                if (seat) { seat.announced = false; seat.minted = false; }
             }
         });
 
@@ -597,11 +629,11 @@ async function ensureAddon() {
                     // an anonymous targeted frame would reach the addressee
                     // attributable to nobody — and (before the fromDevice-key
                     // check below existed) could read as host-authored.
-                    if (isHub && identityLinks.has(env.to) && seatReachable(identityLinks.get(env.to))) {
+                    if (isHub && deviceIndex.has(env.to) && seatReachable(deviceIndex.get(env.to))) {
                         const senderDev = deviceIdForPeerId(d.peerId);
                         if (senderDev) {
                             env.fromDevice = senderDev;
-                            mp.sendTo(identityLinks.get(env.to), env);
+                            mp.sendTo(deviceIndex.get(env.to), env);
                         }
                     }
                     return;
@@ -656,7 +688,7 @@ async function ensureAddon() {
                 // peer's deviceId and steal its broadcast attribution (S-sec-2).
                 // Strict live-link check so a stale binding doesn't wrongly block
                 // a legitimate relayed (re)appearance.
-                if (identityLinks.has(env.deviceId) && mp.peerNode.peers.has(identityLinks.get(env.deviceId))) {
+                if (deviceIndex.has(env.deviceId) && mp.peerNode.peers.has(deviceIndex.get(env.deviceId))) {
                     ArcadeDiag.log('bridge', `ignored relayed identity for ${env.deviceId}: already a live direct seat`);
                     return;
                 }
@@ -686,13 +718,13 @@ async function ensureAddon() {
                 // live-link check, NOT seatReachable — a merely stashed/repairing
                 // session must yield to a fresh manual re-ceremony (that's exactly
                 // how a user recovers a dead link), which mints a new peerId.
-                const boundPeerId = identityLinks.get(env.deviceId);
+                const boundPeerId = deviceIndex.get(env.deviceId);
                 if (boundPeerId !== undefined && boundPeerId !== d.peerId
                         && mp.peerNode.peers.has(boundPeerId)) {
                     ArcadeDiag.log('bridge', `refused identity rebind: ${env.deviceId} still live on ${boundPeerId} (claim from ${d.peerId})`);
                     return;
                 }
-                identityLinks.set(env.deviceId, d.peerId);
+                bindSeatDevice(d.peerId, env.deviceId);
                 // On a joiner, the direct link IS the host — record which
                 // wire capabilities it announced (empty for an older host,
                 // which gates targeted sends off; see WIRE_CAPS).
@@ -706,7 +738,7 @@ async function ensureAddon() {
                 // A completed handshake means this connection is live on
                 // purpose — clear any leftover hang-up flag. (The status
                 // handler's clear above misses FRESH ceremonies, because at
-                // 'connected' time this identityLinks binding didn't exist.)
+                // 'connected' time this seat's deviceId binding didn't exist.)
                 setKnownPeerPaused(env.deviceId, false);
                 if (detail.fingerprintChanged) fingerprintSuspects.add(env.deviceId);
                 // A manual ceremony with an auto-reconnect peer is a fresh
@@ -717,10 +749,11 @@ async function ensureAddon() {
                 // waits for an explicit user decision (the launcher confirms
                 // via onPeerIdentity's fingerprintChanged flag).
                 const known = readKnownPeers();
+                const seat = getSeat(d.peerId);
                 if (known[env.deviceId] && known[env.deviceId].autoReconnect && rdv
                         && !isFingerprintSuspect(env.deviceId, known)
-                        && !autoPairMintedFor.has(d.peerId)) {
-                    autoPairMintedFor.add(d.peerId);
+                        && !seat.minted) {
+                    seat.minted = true;
                     rdv.enablePair(d.peerId, env.deviceId).catch(() => {});
                     stampLiveSession();
                 }
@@ -779,7 +812,7 @@ async function ensureAddon() {
             // The other device opted in; ours decides based on the stored
             // flag, or asks the user via the launcher's onPairRequest hook.
             const { peerId } = e.detail || {};
-            const deviceId = [...identityLinks.entries()].find(([, pid]) => pid === peerId)?.[0];
+            const deviceId = deviceIdForPeerId(peerId);
             if (!deviceId) return;
             const known = readKnownPeers();
             const flag = known[deviceId] && known[deviceId].autoReconnect;
@@ -924,7 +957,7 @@ export const ArcadeP2P = {
      * currently live (never connected this session, or dropped on its own).
      */
     connectionState(deviceId) {
-        const peerId = identityLinks.get(deviceId);
+        const peerId = deviceIndex.get(deviceId);
         if (addon && peerId) {
             const p = addon.peerNode.peers.get(peerId);
             if (p) {
@@ -1011,7 +1044,7 @@ export const ArcadeP2P = {
         // only the addressee's direct link, so they need no such gate.
         if (!addon.peerNode.isHost && !hostCaps.has('peer.sendTo')) return false;
         const env = { arcade: 1, gameId, payload, to };
-        const directLink = identityLinks.get(to);
+        const directLink = deviceIndex.get(to);
         if (directLink !== undefined) {
             // A binding can outlive its link (departed seat whose stash lingers
             // with no active repair) — refuse rather than report phantom
@@ -1065,7 +1098,7 @@ export const ArcadeP2P = {
         writeKnownPeers(known);
         fingerprintSuspects.delete(deviceId);
         await ensureAddon(); // rdv is only populated once the addon has loaded
-        const peerId = identityLinks.get(deviceId);
+        const peerId = deviceIndex.get(deviceId);
         const livePeer = peerId ? addon.peerNode.peers.get(peerId) : null;
         if (livePeer && livePeer.status === 'connected') {
             // The link is live: enabling here is a fresh trust event, so mint
@@ -1136,7 +1169,7 @@ export const ArcadeP2P = {
         // episode for the very link we're hanging up (and litter the
         // dead-drop with an offer nobody should answer).
         await rdv.pausePair(deviceId).catch(() => {});
-        const peerId = identityLinks.get(deviceId);
+        const peerId = deviceIndex.get(deviceId);
         if (peerId && addon.peerNode.peers.has(peerId)) {
             const byeSent = rdv.sendBye(peerId);
             if (!byeSent) {
@@ -1197,13 +1230,13 @@ export const ArcadeP2P = {
     async startOverKnownPeer(deviceId) {
         ArcadeDiag.log('bridge', `user action: Start Over ${deviceId} (forgetting session + pairing secret)`);
         await ensureAddon(); // rdv/addon are only populated once the addon has loaded
-        const peerId = identityLinks.get(deviceId);
+        const peerId = deviceIndex.get(deviceId);
         if (peerId) {
             addon.peerNode.disconnectPeer(peerId);
             addon.peerNode.forgetSession(peerId);
         }
         await rdv.disablePair(deviceId).catch(() => {});
-        identityLinks.delete(deviceId);
+        unbindDevice(deviceId);
         const known = readKnownPeers();
         if (known[deviceId]) {
             known[deviceId].autoReconnect = false;
@@ -1278,7 +1311,7 @@ export const ArcadeP2P = {
     _recordPeerIdentity: recordPeerIdentity,
 
     /** Test hook — deviceId → direct-link peerId snapshot. */
-    _identityLinks() { return Object.fromEntries(identityLinks); },
+    _identityLinks() { return Object.fromEntries(deviceIndex); },
 
     /** Test hook — deviceId → relay-tag snapshot (through-the-host peers). */
     _indirectPeers() { return Object.fromEntries(indirectPeers); }
