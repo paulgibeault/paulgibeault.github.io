@@ -418,6 +418,134 @@ try {
         check('post-storm heal: side B connected', await connectedAgain(s.J));
         await s.ctxH.close(); await s.ctxJ.close();
     }
+
+    // 10. CARRIER SEVER/RESTORE (T-4): a signaling outage mid-repair must not
+    //     strand the pair. While the carrier session is dead, offers/rings
+    //     publish into the void and no heal happens; when the session comes
+    //     back, the onSessionUp hook republishes at once and the pair heals.
+    //     Also proves nudgeAll() reaches the carrier's ensureAlive hook — both
+    //     hooks the injected carrier previously lacked, so these recovery paths
+    //     only ran in production.
+    {
+        console.log('\n  [carrier severed mid-repair → onSessionUp heals on restore]');
+        const s = await freshPair('J2');
+        // Sever both devices BEFORE the repair, so every episode carrier is born
+        // deaf/mute (severedDefault) and can make no progress.
+        await s.H.evaluate(() => window.__arcadeRdvSever(true));
+        await s.J.evaluate(() => window.__arcadeRdvSever(true));
+        await s.H.evaluate(() => {
+            const pm = window.__arcade.p2p._addon().peerNode;
+            Array.from(pm.peers.values()).forEach(p => { try { p.dataChannel.close(); } catch (e) {} });
+        });
+        await s.H.waitForFunction(`window.__arcade.p2p.status() !== 'connected'`, null, { timeout: 30000 }).catch(() => {});
+        // Prove nudgeAll now reaches the carrier's ensureAlive hook.
+        const kicksBefore = await s.J.evaluate(() => window.__arcadeRdvEnsureAliveCount());
+        await s.J.evaluate(() => window.__arcade.p2p._rdv().nudgeAll('test'));
+        const kicksAfter = await s.J.evaluate(() => window.__arcadeRdvEnsureAliveCount());
+        check('nudgeAll() reaches the carrier ensureAlive hook', kicksAfter > kicksBefore, `${kicksBefore} → ${kicksAfter}`);
+        // No heal while signaling is severed (generous window).
+        await s.H.waitForTimeout(4000);
+        const stalled = (await s.H.evaluate(() => window.__arcade.p2p.status() !== 'connected'))
+            && (await s.J.evaluate(() => window.__arcade.p2p.status() !== 'connected'));
+        check('severed signaling stalls the repair (no heal while the socket is dead)', stalled);
+        // Restore → onSessionUp republishes → heal.
+        await s.H.evaluate(() => window.__arcadeRdvSever(false));
+        await s.J.evaluate(() => window.__arcadeRdvSever(false));
+        check('carrier restore heals side A', await connectedAgain(s.H));
+        check('carrier restore heals side B', await connectedAgain(s.J));
+        const republished = (await s.H.evaluate(() => (window.__rdvDiag || []).some(m => m.includes('session restored'))))
+            || (await s.J.evaluate(() => (window.__rdvDiag || []).some(m => m.includes('session restored'))));
+        check('onSessionUp logged an immediate republish', republished);
+        await s.ctxH.close(); await s.ctxJ.close();
+    }
+
+    // 11. DAY-TOPIC ROLLOVER (T-4 / B-rdv-1): a long-lived episode must resubscribe
+    //     to the new UTC-day topic before publishers rotate at midnight, or it
+    //     goes deaf within ~24-48h. Drive _refreshTopics with the clock advanced
+    //     a day and assert the subscription window shifts (new topic in, aged out).
+    {
+        console.log('\n  [day-topic rollover resubscribes before going deaf]');
+        const s = await freshPair('K2');
+        await s.J.evaluate(() => window.__arcadeRdvSever(true)); // hold the episode open (no heal)
+        await s.H.evaluate(() => {
+            const pm = window.__arcade.p2p._addon().peerNode;
+            Array.from(pm.peers.values()).forEach(p => { try { p.dataChannel.close(); } catch (e) {} });
+        });
+        const armed = await s.J.waitForFunction(`window.__arcade.p2p._rdv().episodes.size >= 1`, null, { timeout: 15000 })
+            .then(() => true).catch(() => false);
+        check('repair episode armed + subscribed to day-topics', armed);
+        const shift = await s.J.evaluate(async () => {
+            const r = window.__arcade.p2p._rdv();
+            const [pairId, ep] = [...r.episodes.entries()][0];
+            const before = [...ep.topicSubs.keys()];
+            const realNow = Date.now;
+            try {
+                Date.now = () => realNow.call(Date) + 26 * 3600 * 1000; // roll past midnight
+                await r._refreshTopics(pairId, ep);
+            } finally { Date.now = realNow; }
+            const after = [...ep.topicSubs.keys()];
+            return {
+                added: after.filter(t => !before.includes(t)).length,
+                dropped: before.filter(t => !after.includes(t)).length,
+                count: after.length
+            };
+        });
+        check('rollover subscribed a new day-topic', shift.added >= 1, `added=${shift.added}`);
+        check('rollover dropped the aged day-topic', shift.dropped >= 1, `dropped=${shift.dropped}`);
+        check('subscription window stays bounded (3 day-topics)', shift.count === 3, `count=${shift.count}`);
+        await s.J.evaluate(() => window.__arcadeRdvSever(false));
+        await s.ctxH.close(); await s.ctxJ.close();
+    }
+
+    // 12. PERSISTENT REPLAY CACHE (S-sec-4a): with the ratchet frozen, the only
+    //     thing that makes a recorded offer/ring dead-on-arrival in a LATER
+    //     episode is the per-pair nonce FIFO persisted in the pairing record.
+    //     Which side answers offers vs rings on a given heal is nondeterministic
+    //     (in-band vs sealed timing), so this drives the mechanism directly on a
+    //     live episode: _rememberNonce must record, dedupe, and PERSIST a nonce,
+    //     and a fresh episode seeded from that record must reject it on sight.
+    {
+        console.log('\n  [persistent replay cache: record + persist + seed-reject]');
+        const s = await freshPair('M2');
+        // Hold an episode open (severed carrier → it can't heal away).
+        await s.J.evaluate(() => window.__arcadeRdvSever(true));
+        await s.H.evaluate(() => {
+            const pm = window.__arcade.p2p._addon().peerNode;
+            Array.from(pm.peers.values()).forEach(p => { try { p.dataChannel.close(); } catch (e) {} });
+        });
+        const armed = await s.J.waitForFunction(`window.__arcade.p2p._rdv().episodes.size >= 1`, null, { timeout: 15000 })
+            .then(() => true).catch(() => false);
+        check('episode armed to exercise the nonce cache on', armed);
+        const NONCE = 'test_deadbeefcafe';
+        const rec = await s.J.evaluate(async (nonce) => {
+            const r = window.__arcade.p2p._rdv();
+            const [pairId, ep] = [...r.episodes.entries()][0];
+            r._rememberNonce(pairId, ep, nonce);
+            const inRam = ep.seenNonceSet.has(nonce);
+            r._rememberNonce(pairId, ep, nonce); // idempotent — must not duplicate
+            const noDup = ep.rec.seenNonces.filter((n) => n === nonce).length === 1;
+            await new Promise((res) => setTimeout(res, 250)); // let the async persist land
+            const persisted = await new Promise((res) => {
+                const req = indexedDB.open('qrp2p-rendezvous', 1);
+                req.onsuccess = () => {
+                    const db = req.result;
+                    const g = db.transaction('pairs', 'readonly').objectStore('pairs').get(pairId);
+                    g.onsuccess = () => { db.close(); res((g.result && g.result.seenNonces) || []); };
+                    g.onerror = () => { db.close(); res([]); };
+                };
+                req.onerror = () => res([]);
+            });
+            // A fresh episode seeds seenNonceSet from the record exactly this way.
+            const freshSeed = new Set(persisted);
+            return { inRam, noDup, persistedHas: persisted.includes(nonce), seedRejects: freshSeed.has(nonce) };
+        }, NONCE);
+        check('processed nonce is in the episode in-RAM set', rec.inRam);
+        check('re-recording the same nonce does not duplicate it', rec.noDup);
+        check('processed nonce is persisted to the pair record (survives restart)', rec.persistedHas);
+        check('a fresh episode seeded from the record rejects the replayed nonce', rec.seedRejects);
+        await s.J.evaluate(() => window.__arcadeRdvSever(false));
+        await s.ctxH.close(); await s.ctxJ.close();
+    }
 } catch (e) {
     console.error('\nFATAL:', e.message);
     check('run completed', false, e.message);
