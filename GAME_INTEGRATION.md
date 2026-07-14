@@ -474,7 +474,8 @@ Arcade.peer.onMessage((payload, fromPeer, meta) => ...);  // fromPeer = sender's
                                    // meta = { relayed, to: 'me'|'all' } (cap 'peer.meta')
 
 Arcade.peer.self();                // { deviceId, name } for THIS device (null before first pairing)
-Arcade.peer.remote();              // most recently seen remote device, or null (single-peer helper)
+Arcade.peer.remote();              // DEPRECATED — most recently seen remote device, or null.
+                                   //   Single-peer helper; prefer peers() (roster, multi-seat aware).
 Arcade.peer.peers();               // [{ deviceId, name, status, direct }] — the multi-peer roster
 Arcade.peer.onPeersChange(r => ...);  // full roster on any join/leave/rename/status change
 Arcade.peer.onReady(({ deviceId }) => ...);  // remote has THIS game mounted & listening

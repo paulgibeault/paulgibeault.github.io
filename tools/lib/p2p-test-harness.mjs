@@ -43,30 +43,77 @@ const FORCE_LOCAL_ICE = `
 
 function httpCarrierScript(dropPort) {
     return `
-    window.__arcadeRdvCarrierFactory = () => ({
-        base: 'http://127.0.0.1:${dropPort}',
-        subs: new Map(),
-        timer: null,
-        async connect() { if (!this.timer) this.timer = setInterval(() => this._poll(), 120); },
-        async _poll() {
-            for (const [topic, st] of this.subs) {
-                try {
-                    const r = await fetch(this.base + '/sub?t=' + topic + '&since=' + st.next);
-                    const j = await r.json();
-                    st.next = j.next;
-                    j.msgs.forEach(m => st.cbs.forEach(cb => { try { cb(m); } catch (e) {} }));
-                } catch (e) {}
+    // Every carrier this factory mints is registered so a test can sever/restore
+    // the whole page's signaling at once (window.__arcadeRdvSever). A severed
+    // carrier drops polls (receives nothing) and swallows publishes (QoS-0 loss
+    // into a dead socket) — the failure the real MqttCarrier hides behind an
+    // internal redial. Restoring fires onSessionUp (the hook rendezvous sets to
+    // republish immediately) so the T-4 scenarios can exercise session recovery
+    // and the nudgeAll→ensureAlive kick the injected carrier previously lacked.
+    window.__arcadeRdvCarriers = window.__arcadeRdvCarriers || new Set();
+    window.__arcadeRdvSeveredDefault = window.__arcadeRdvSeveredDefault || false;
+    window.__arcadeRdvSever = (on) => {
+        window.__arcadeRdvSeveredDefault = !!on;
+        for (const c of window.__arcadeRdvCarriers) c._setSevered(!!on);
+    };
+    // Sum of ensureAlive() calls across live carriers — lets a test assert
+    // nudgeAll() actually reached the carrier layer.
+    window.__arcadeRdvEnsureAliveCount = () => {
+        let n = 0; for (const c of window.__arcadeRdvCarriers) n += c.ensureAliveCount; return n;
+    };
+    window.__arcadeRdvCarrierFactory = () => {
+        const carrier = {
+            base: 'http://127.0.0.1:${dropPort}',
+            subs: new Map(),
+            timer: null,
+            severed: window.__arcadeRdvSeveredDefault,
+            ensureAliveCount: 0,
+            onSessionUp: null,
+            _setSevered(on) {
+                const was = this.severed;
+                this.severed = !!on;
+                if (was && !this.severed) {
+                    // Session restored: pick up anything published while we were
+                    // deaf, then fire the republish hook (set by rendezvous after
+                    // its first connect()).
+                    this._poll();
+                    if (typeof this.onSessionUp === 'function') { try { this.onSessionUp(); } catch (e) {} }
+                }
+            },
+            ensureAlive() {
+                this.ensureAliveCount++;
+                if (!this.severed) this._poll(); // a kick: poll now, don't wait for the timer
+            },
+            async connect() { if (!this.timer) this.timer = setInterval(() => this._poll(), 120); },
+            async _poll() {
+                if (this.severed) return; // dead socket: receives nothing
+                for (const [topic, st] of this.subs) {
+                    try {
+                        const r = await fetch(this.base + '/sub?t=' + topic + '&since=' + st.next);
+                        const j = await r.json();
+                        st.next = j.next;
+                        j.msgs.forEach(m => st.cbs.forEach(cb => { try { cb(m); } catch (e) {} }));
+                    } catch (e) {}
+                }
+            },
+            async publish(topic, payload) {
+                if (this.severed) return; // QoS-0 into a dead socket: lost
+                await fetch(this.base + '/pub?t=' + topic, { method: 'POST', body: payload });
+            },
+            subscribe(topic, cb) {
+                if (!this.subs.has(topic)) this.subs.set(topic, { next: 0, cbs: new Set() });
+                const st = this.subs.get(topic);
+                st.cbs.add(cb);
+                return () => st.cbs.delete(cb);
+            },
+            close() {
+                clearInterval(this.timer); this.timer = null; this.subs.clear();
+                window.__arcadeRdvCarriers.delete(carrier);
             }
-        },
-        async publish(topic, payload) { await fetch(this.base + '/pub?t=' + topic, { method: 'POST', body: payload }); },
-        subscribe(topic, cb) {
-            if (!this.subs.has(topic)) this.subs.set(topic, { next: 0, cbs: new Set() });
-            const st = this.subs.get(topic);
-            st.cbs.add(cb);
-            return () => st.cbs.delete(cb);
-        },
-        close() { clearInterval(this.timer); this.timer = null; this.subs.clear(); }
-    });
+        };
+        window.__arcadeRdvCarriers.add(carrier);
+        return carrier;
+    };
 `;
 }
 

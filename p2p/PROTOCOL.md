@@ -314,8 +314,10 @@ implementation** — see the frozen-ratchet note in §7.5. With it disabled the
 epoch never advances (`pairBase_n = pairBase_0` for the pair's life), so the
 forward-secrecy / post-compromise-recovery properties it would provide are
 **not** in force today. Confidentiality against the relay still holds (the base
-never touches a broker); what's lost is the *cross-episode* replay and
-key-rotation guarantees. See §7.4 and §8 for what actually defends replay now.
+never touches a broker); what the frozen ratchet costs is forward secrecy /
+key rotation on the signaling keys between manual pairings. Cross-episode replay
+is defended separately, by the persistent per-pair nonce cache (§7.4), so it does
+NOT depend on the ratchet. See §7.4 and §8 for what actually defends replay now.
 
 ### 7.3 Topics
 
@@ -353,14 +355,19 @@ asking the caller role to publish a fresh offer (§7.5). Rules:
   `completed + 1 … + 3` (crash-recovery skew) and rejects anything at or below
   its completed epoch. **With the ratchet frozen (§7.5) the completed epoch
   stays 0 for the pair's life**, so this is a fixed window (epochs 1–3), not a
-  moving floor — a recorded blob is therefore NOT "dead on arrival" across
-  episodes the way a live ratchet would make it. What defends replay today:
-  (a) per-episode `deadNonces`/`seenRings` sets (below) inside one episode;
-  (b) a per-episode decrypt-attempt **rate limit** (~10/s) that caps the work a
-  hostile broker can induce by streaming recorded/junk blobs; (c) the one-time
-  ICE credentials in any replayed *ceremony* payload, which are inert (§4). A
-  persistent cross-episode nonce cache — which would restore the "dead on
-  arrival" property without needing the ratchet — is a tracked follow-up.
+  moving floor. The epoch alone therefore does not make a recorded blob "dead on
+  arrival" across episodes — that property is restored by a **persistent
+  cross-episode nonce cache** instead (below). What defends replay today:
+  (a) a bounded per-pair FIFO of processed offer/ring nonces (`rec.seenNonces`,
+  cap 512) persisted in the pairing record, seeded into every new episode — a
+  recorded offer/ring replayed in ANY later episode is rejected on sight, which
+  is what makes it dead on arrival without needing the ratchet; (b) per-episode
+  `deadNonces`/`seenRings` sets (below) inside one episode; (c) a per-episode
+  decrypt-attempt **rate limit** (~10/s) that caps the work a hostile broker can
+  induce by streaming recorded/junk blobs; (d) the one-time ICE credentials in
+  any replayed *ceremony* payload, which are inert (§4). Only fresh legitimate
+  nonces are appended to the FIFO (replays are rejected before they reach it),
+  so a broker cannot pump the record's size.
 - **Exchange nonces** protect *within* the epoch window, where a relay can
   still delay or duplicate blobs (epochs advance only on success, so an
   abandoned attempt leaves valid-looking litter). Offers and rings carry a
@@ -488,7 +495,7 @@ outage throws, which the episode's republish schedule absorbs.
 | Relay reads/forges signaling | AEAD with pairing-derived keys; decrypt-then-parse (§7.4) |
 | Relay/observer links a pair across days | daily HMAC topics, no identifiers; standing subscriptions are pseudonymous and per-day (§7.5, §9) |
 | Replay/duplication WITHIN an episode | per-episode exchange nonces (`deadNonces`/`seenRings`) + stalled-exchange retirement (§7.4) |
-| Replayed rendezvous blobs ACROSS episodes | **partial** — ratchet frozen (§7.5), so the epoch floor is fixed at 0, not moving; mitigated by a per-episode decrypt **rate limit** and inert ceremony ICE creds (§7.4). A persistent cross-episode nonce cache to fully close this is tracked follow-up |
+| Replayed rendezvous blobs ACROSS episodes | **defended** — even with the ratchet frozen (§7.5, epoch floor fixed at 0), a bounded per-pair FIFO of processed offer/ring nonces (`rec.seenNonces`, cap 512) is persisted in the pairing record and seeded into every new episode, so a recorded offer/ring replayed in any later episode is rejected on sight (§7.4). Defense-in-depth: per-episode decrypt **rate limit** and inert ceremony ICE creds |
 | Hostile broker induces decrypt work (junk-blob flood) | ≤16 KB frame cap + per-episode decrypt-attempt rate limit (~10/s) (§7.4) |
 | Reflection (offer ↔ answer ↔ ring) | direction tag in AAD (§7.4) |
 | Recorded traffic + later key theft (forward secrecy) | **NOT provided today** — the per-reconnect ratchet that would bind keys to each new DTLS transcript is specified but frozen (§7.5); base confidentiality against the relay still holds |

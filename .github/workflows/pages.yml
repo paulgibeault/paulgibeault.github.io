@@ -29,6 +29,7 @@ jobs:
         run: |
           set -e
           for f in arcade-sdk.js arcade-p2p.js arcade-known-peers.js arcade-diag.js \
+                   arcade-storage-core.js arcade-storage-bridge.js arcade-save.js \
                    p2p/*.js tools/*.mjs; do
             echo "checking $f"
             node --check "$f"
@@ -36,6 +37,9 @@ jobs:
 
       - name: Rendezvous unit tests (crypto AAD/tamper + MQTT codec resync — no browser)
         run: node tools/rendezvous-unit.mjs
+
+      - name: Save-validation unit tests (import gates + key allowlists — no browser)
+        run: node tools/save-validation-unit.mjs
 
       - name: Install deps + browsers
         run: |

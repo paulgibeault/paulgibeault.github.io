@@ -74,15 +74,38 @@ that froze the heartbeat); G-ux-3 (tappable message toast).
   onto `PeerManager`, so the UI's `_connectionState()` no longer iterates
   `peerNode.peers`/`sessionStash` directly.
 
-**Still open (best as focused PRs):** P4-d (extract the ~950-line storage-bridge
-+ save/import block from index.html into modules) — deliberately deferred: it's
-security-critical (the opaque-frame boundary), the payoff is purely
-organizational/testability, and the closure interdependencies make a clean
-extraction involved enough to warrant its own review. Also: S-sec-4a (persistent
-cross-episode replay cache — the compensating decrypt rate-limit and honest
-PROTOCOL.md are in); S-sdk-2/6; T-4 (harness carrier hooks + day-rollover
-scenario); D-4 (tick shipped items in framework-evolution.md /
-implementation-roadmap.md).
+**Landed in a third pass (2026-07-14, `multiplayer-refactoring` branch — all
+suites green: store, bridge, export, p2p, multiseat, reconnect, plus the new
+save-validation unit test):**
+
+- **P4-d — storage/save extraction.** The ~1,000-line storage-bridge +
+  save/import block is out of `index.html` (2936 → 2145 lines) into three ES
+  modules: `arcade-storage-core.js` (the single audit surface for every key
+  allowlist / size cap / checksum / IDB helper), `arcade-storage-bridge.js`
+  (`initStorageBridge(host)` — ls-proxy + state/store/files/storage ops), and
+  `arcade-save.js` (`initSaveLoad(host)` + a pure, Node-testable
+  `validateSaveBundle`). The launcher's single message router keeps the #50
+  trust boundary and delegates authenticated messages through
+  `window.__arcade.storageHost` with a pending-message queue. Folded in the
+  S-lnc dedup (`readKnownPeers` for `resolvePeerName`/`tryResumeOnLaunch`). New
+  `tools/save-validation-unit.mjs` (35 checks) + sw.js v28.
+- **S-sec-4a — persistent cross-episode replay cache.** Bounded per-pair nonce
+  FIFO (`rec.seenNonces`, cap 512) in the IDB pairing record, seeded into every
+  episode and checked at the offer/ring sites; PROTOCOL.md §7.2/7.4/§8 updated —
+  cross-episode replay is now defended and no longer depends on the ratchet.
+- **T-4 — harness carrier hooks + scenarios.** Added `ensureAlive`/`onSessionUp`
+  + a sever/restore control to the test carrier; three new reconnect scenarios
+  (carrier sever→onSessionUp heal, day-topic rollover / B-rdv-1, replay-cache
+  white-box).
+- **S-sdk-2/6, D-4.** `peer.remote()` doc-deprecated (SDK + GAME_INTEGRATION.md);
+  SDK dedup (one monotonic clock helper, `onStorageError` via `makeSubscriber`,
+  cached `devModeOn`); shipped items ticked in framework-evolution.md /
+  implementation-roadmap.md.
+
+**Still open (genuinely deferred):** S-sec-4b→ nothing further; TURN config for
+G-res-1 (#33); the per-game `acceptance.mjs` + `--pool` CI wiring (needs a
+catalog-registered fixture, issue #40); the multi-pair concurrent-rendezvous
+harness scenario (T-4's stretch item).
 
 ---
 

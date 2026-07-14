@@ -196,6 +196,17 @@ function waitGathering(pc, timeoutMs = 10000) {
 // Epoch acceptance window above the completed epoch (crash-recovery skew).
 const EPOCH_WINDOW = 3;
 
+// Persistent cross-episode replay cache (S-sec-4a). The signaling ratchet is
+// frozen (see _settleEpisode), so `rec.epoch` never advances and the AEAD key
+// lives for the pairing's life; per-episode deadNonces/seenRings reset each
+// episode, so without this a broker could replay a recorded offer/ring in a
+// LATER episode to provoke presence disclosure + publish spam. Each processed
+// offer/ring nonce is remembered in a bounded FIFO on the pair record so a
+// replay is dead on arrival regardless of episode. Cap keeps the record small;
+// only fresh legitimate nonces are ever appended (replays are rejected first),
+// so the list can't be pumped.
+const SEEN_NONCE_CAP = 512;
+
 // How often a live episode re-checks its day-topic window. Publishers rotate to
 // a new UTC-day HMAC topic at midnight; re-subscribing well within a day keeps a
 // long-quiet/standby episode reachable across the rollover (B-rdv day-deafness).
@@ -322,6 +333,31 @@ export class RendezvousManager extends EventTarget {
             if (out) await dbPut(pairId, out);
             return out || rec;
         });
+    }
+
+    /**
+     * Remember a processed offer/ring nonce so a broker can't replay that frame
+     * in a LATER episode (S-sec-4a). Adds to the episode's in-RAM mirror for
+     * O(1) checks and persists a bounded FIFO on the pair record. The episode's
+     * own `rec.seenNonces` is kept in sync so _settleEpisode's whole-record
+     * write preserves the additions; a concurrent proactive _updateRec persists
+     * them even if the episode never settles (e.g. the browser is killed).
+     */
+    _rememberNonce(pairId, ep, nonce) {
+        if (!nonce || ep.seenNonceSet.has(nonce)) return;
+        ep.seenNonceSet.add(nonce);
+        if (!Array.isArray(ep.rec.seenNonces)) ep.rec.seenNonces = [];
+        ep.rec.seenNonces.push(nonce);
+        while (ep.rec.seenNonces.length > SEEN_NONCE_CAP) ep.rec.seenNonces.shift();
+        this._updateRec(pairId, r => {
+            if (!r) return null; // pair gone (forgotten mid-episode) — nothing to persist
+            const list = Array.isArray(r.seenNonces) ? r.seenNonces : [];
+            if (list.includes(nonce)) return r;
+            list.push(nonce);
+            while (list.length > SEEN_NONCE_CAP) list.shift();
+            r.seenNonces = list;
+            return r;
+        }).catch(() => {});
     }
 
     /**
@@ -652,7 +688,8 @@ export class RendezvousManager extends EventTarget {
         const check = await RC.keyCheck(base);
         const rec = {
             base, role, epoch: 0, enabled: true,
-            pairedAt: Date.now(), lastPeerId: peerId, lastSeenAt: Date.now()
+            pairedAt: Date.now(), lastPeerId: peerId, lastSeenAt: Date.now(),
+            seenNonces: [] // bounded FIFO of processed offer/ring nonces (S-sec-4a)
         };
         const prev = this.pairExchanges.get(peerId);
         if (prev && prev.timer) prev.timer();
@@ -1028,6 +1065,10 @@ export class RendezvousManager extends EventTarget {
                 phase: quiet ? 'quiet' : 'active', standbyOnly, announced: false,
                 offerNonce: null, sealedOffer: null, ringNonce: null, sealedRing: null,
                 answeredNonce: null, deadNonces: new Set(), seenRings: new Set(),
+                // Persistent cross-episode replay defense (S-sec-4a): seed from
+                // the record's history so a replayed prior-episode offer/ring is
+                // rejected on sight. Grows as this episode processes new nonces.
+                seenNonceSet: new Set(Array.isArray(rec.seenNonces) ? rec.seenNonces : []),
                 lastShadowAt: 0, publishOnce: null, publishScheduled: false, answering: false,
                 ownBlobs: new Set(), undecryptable: 0, lastNudgeAt: 0, republishWindowLogged: false
             };
@@ -1288,8 +1329,11 @@ export class RendezvousManager extends EventTarget {
         try { ring = JSON.parse(txt); } catch (e) { return true; }
         if (ring.peerId !== ep.peerId) return true;
         if (ring.n) {
-            if (ep.seenRings.has(ring.n)) return true; // replayed doorbell
+            // Replayed doorbell — this episode (seenRings) or any prior one
+            // (persistent seenNonceSet). A recorded ring must not re-provoke.
+            if (ep.seenRings.has(ring.n) || ep.seenNonceSet.has(ring.n)) return true;
             ep.seenRings.add(ring.n);
+            this._rememberNonce(pairId, ep, ring.n);
         }
         const live = this.pm.peers.get(ep.peerId);
         if (live && live.status === 'connected') return true;
@@ -1323,7 +1367,9 @@ export class RendezvousManager extends EventTarget {
         let payload;
         try { payload = await ConnectionUtils.decodePayload(packed); } catch (e) { return true; }
         if (typeof payload.peerId !== 'string') return true;
-        if (payload.n && ep.deadNonces.has(payload.n)) return true; // retired exchange
+        // Retired this episode (deadNonces) or seen in any prior one
+        // (persistent seenNonceSet) — a recorded offer replayed later is silence.
+        if (payload.n && (ep.deadNonces.has(payload.n) || ep.seenNonceSet.has(payload.n))) return true;
         const live = this.pm.peers.get(payload.peerId);
         if (live && live.status === 'connected') return true; // in-band won / already connected
         if (ep.exchanged) {
@@ -1335,6 +1381,11 @@ export class RendezvousManager extends EventTarget {
         }
         this._diag(`pair ${pairId}: offer received (epoch ${usedEpoch}, nonce ${payload.n || 'none'}) — answering`);
         ep.answering = true;
+        // Persist this offer's nonce now (not at retirement): the winning offer
+        // never enters deadNonces, so recording here is what makes a replay of
+        // it in a future episode dead on arrival. A same-nonce republish this
+        // episode is caught by the seenNonceSet check above (ignored, correct).
+        this._rememberNonce(pairId, ep, payload.n);
         try {
             ep.exchanged = true;
             ep.standbyOnly = false;

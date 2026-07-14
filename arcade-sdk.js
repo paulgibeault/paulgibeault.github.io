@@ -664,14 +664,20 @@
     // ─── Dev-mode tracing ─────────────────────────────────────────
     // When arcade.v1._meta.dev === 'true' (set by ?dev=1 on either launcher
     // or game), every postMessage in/out is logged with console.debug. Safe
-    // in production: the flag is opt-in and the cost is one localStorage
-    // read per message.
-    function devModeOn() {
+    // in production: the flag is opt-in. The value is CACHED (it changed a
+    // localStorage read into a per-message hot-path cost) and refreshed on the
+    // events that can flip it: boot, a bridged welcome/state.changed/replaced
+    // for _meta.dev, and a direct-mode storage event on that key.
+    var DEV_KEY = 'arcade.v1._meta.dev';
+    var devModeCached = false;
+    function refreshDevMode() {
         var prev = sdkInternalRead;
         sdkInternalRead = true;
-        try { return rawGet('arcade.v1._meta.dev') === 'true'; }
+        try { devModeCached = rawGet(DEV_KEY) === 'true'; }
+        catch (e) { devModeCached = false; }
         finally { sdkInternalRead = prev; }
     }
+    function devModeOn() { return devModeCached; }
     function honorDevQueryParam() {
         try {
             var p = new URLSearchParams(window.location.search).get('dev');
@@ -1025,6 +1031,7 @@
                 // snapshot BEFORE ready resolves, so post-ready reads see
                 // real state. Must precede resolveReady().
                 if (storageMode === 'bridged' && !dupWelcome) seedInitialSnapshot(data.state);
+                refreshDevMode(); // snapshot may carry _meta.dev
                 applyRoster(data.peers);
                 if (applySettings(data.settings)) fire(listeners.settingsChange, snapshotSettings());
                 if (!dupWelcome) resolveReady();
@@ -1096,6 +1103,7 @@
                         if (typeof data.state[k] === 'string') lsCache.set(k, data.state[k]);
                     });
                 }
+                refreshDevMode(); // the replaced snapshot may flip _meta.dev
                 fire(listeners.stateReplaced);
                 // Replay key-change subscriptions — storage events also fire,
                 // but a launcher-driven event is more reliable across browsers.
@@ -1112,6 +1120,7 @@
                     var raw = (typeof data.value === 'string') ? data.value : null;
                     if (raw === null) lsCache['delete'](data.key);
                     else lsCache.set(data.key, raw);
+                    if (data.key === DEV_KEY) refreshDevMode();
                     var parsed = null;
                     if (raw !== null) { try { parsed = JSON.parse(raw); } catch (err) { parsed = null; } }
                     fireKeyChange(data.key, parsed);
@@ -1150,6 +1159,7 @@
     }
     function onStorage(e) {
         if (!e.key) return;
+        if (e.key === DEV_KEY) refreshDevMode(); // direct-mode ?dev toggle mid-session
         if (!keyChangeListeners.has(e.key)) return;
         var v = null;
         if (e.newValue !== null) {
@@ -1255,6 +1265,7 @@
         }
 
         honorDevQueryParam();
+        refreshDevMode();
         injectBaseStyle();
         hydrateSettingsFromStorage();
         applySuspendedToDOM();
@@ -1612,7 +1623,10 @@
             } catch (e) { return null; }
         },
         // Most recently seen remote device ({ deviceId, name }) or null.
-        // Single-peer convenience — multi-peer games should use peers().
+        // DEPRECATED single-peer convenience — prefer peers() (full roster,
+        // multi-seat aware). Kept for older single-peer games; retired once the
+        // legacy arcade:peer.identity wire message is dropped (all launchers now
+        // send the peer.roster cap, which peers() reads).
         remote: function () {
             var best = null;
             for (var k in remotePeers) {
@@ -1930,11 +1944,7 @@
     function createSessionTimer(opts) {
         var persistKey = (opts && typeof opts.persistKey === 'string' && opts.persistKey)
             ? opts.persistKey : null;
-        function now() {
-            return (typeof performance !== 'undefined' && performance.now)
-                ? performance.now() : Date.now();
-        }
-        var startedAt = now();
+        var startedAt = nowMs();
         var baseOffset = 0;
         if (persistKey) {
             var stored = stateApi.get(persistKey);
@@ -1948,11 +1958,11 @@
 
         function isPaused() { return manualPaused || lifecyclePaused; }
         function freezePause() {
-            if (pauseStartedAt === null) pauseStartedAt = now();
+            if (pauseStartedAt === null) pauseStartedAt = nowMs();
         }
         function unfreezePause() {
             if (pauseStartedAt !== null) {
-                accumPaused += now() - pauseStartedAt;
+                accumPaused += nowMs() - pauseStartedAt;
                 pauseStartedAt = null;
             }
         }
@@ -1976,7 +1986,7 @@
             if (persistKey) {
                 var s = stateApi.get(persistKey);
                 baseOffset = (typeof s === 'number' && s >= 0) ? s : 0;
-                startedAt = now();
+                startedAt = nowMs();
                 accumPaused = 0;
                 pauseStartedAt = isPaused() ? startedAt : null;
             } else {
@@ -1987,8 +1997,8 @@
         var tracker = {
             elapsedMs: function () {
                 var paused = accumPaused;
-                if (pauseStartedAt !== null) paused += now() - pauseStartedAt;
-                var ms = baseOffset + (now() - startedAt - paused);
+                if (pauseStartedAt !== null) paused += nowMs() - pauseStartedAt;
+                var ms = baseOffset + (nowMs() - startedAt - paused);
                 return ms < 0 ? 0 : ms;
             },
             pause: function () {
@@ -2005,7 +2015,7 @@
             // lifecycle), it stays paused — elapsed will stay at 0 until resume.
             reset: function () {
                 if (stopped) return;
-                startedAt = now();
+                startedAt = nowMs();
                 accumPaused = 0;
                 baseOffset = 0;
                 pauseStartedAt = isPaused() ? startedAt : null;
@@ -2516,14 +2526,7 @@
         onFramedChange: makeSubscriber(listeners.framedChange),
         // Fired when a localStorage write fails (typically quota). Returns an
         // unsubscribe fn. Data was NOT saved — warn the user / shed load.
-        onStorageError: function (fn) {
-            if (typeof fn !== 'function') return function () {};
-            storageErrorListeners.push(fn);
-            return function () {
-                var i = storageErrorListeners.indexOf(fn);
-                if (i >= 0) storageErrorListeners.splice(i, 1);
-            };
-        }
+        onStorageError: makeSubscriber(storageErrorListeners)
     };
 
     Object.defineProperty(window, 'Arcade', {

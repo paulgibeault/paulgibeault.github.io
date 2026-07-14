@@ -127,7 +127,7 @@ Cheap, high sovereignty value; topics are broker-agnostic so mixed fleets intero
 ## Workstream C — Make it adoptable by others
 
 **C1. Add a LICENSE** (MIT/Apache-2.0) and propagate one to the vendored `p2p/` (from
-`QRCodeP2P`). *Nothing else matters until this exists — today forking is legally impossible.* Hours.
+`QRCodeP2P`). ✅ **DONE** — Apache-2.0 `LICENSE` committed at the repo root.
 
 **C2. Data-drive the catalog** — this is keystone #1. `catalog.json`
 (`{id,name,subtitle,url,icon,permissions,version}`) rendered into the grid; kills the
@@ -136,8 +136,10 @@ Cheap, high sovereignty value; topics are broker-agnostic so mixed fleets intero
 
 **C3. CI test gate** (also `fleet-hardening` D1, "highest leverage"): a workflow that stages the
 launcher + a fixture app via `dev.sh`, runs `acceptance.mjs` (per-game + `--pool`) and
-`p2p-acceptance.mjs` headless, and blocks the Pages deploy. The harnesses already exist — pure
-wiring. Protects every other item here from silent regression.
+`p2p-acceptance.mjs` headless, and blocks the Pages deploy. ✅ **DONE** —
+`.github/workflows/pages.yml` gates deploy on the rendezvous + save-validation unit tests and the
+store / bridge / export / p2p / multiseat / reconnect acceptance suites. (The per-game `acceptance.mjs`
++ `--pool` still need a catalog-registered fixture; tracked in issue #40.)
 
 **C4. De-brand / parameterize the launcher** — one config object (fleet name, origin, theme,
 manifest fields); replace the 7 hardcoded `paulgibeault.github.io` URLs with relative/derived ones;
@@ -212,17 +214,16 @@ model and shouldn't be back-doored in. Make it a deliberate v2, not an accident.
 
 ## Security items to fold into `fleet-hardening-plan.md` (found beyond the #21 list)
 
-- **Fingerprint pin overwritten before re-trust** (`arcade-p2p.js:226-228`): an imposter's
-  fingerprint overwrites the stored pin even when the user *declines*; suspicion is RAM-only, so a
-  reload silently trusts the imposter. #21's A4 gates the *mint*, not the *pin rotation*. **Real
-  auth bug — add to #21.**
+- ✅ **DONE — Fingerprint pin overwritten before re-trust** (`arcade-p2p.js`): a declined
+  fingerprint is now held pending (`pinPendingFingerprint`) and survives reload, so the stored pin is
+  never overwritten until the user explicitly re-trusts. (Covered by p2p-acceptance's "changed
+  fingerprint flagged, trusted pin kept, new fp held pending" check.)
 - **Same-origin apps can use the P2P key stores** (see strategic decision above) — elevate from
   "deferred" at least to "documented trust boundary + move key stores out of app reach."
-- **No carrier-level inbound size cap:** public MQTT brokers accept arbitrarily large PUBLISH; the
-  parser buffers them and `MultiCarrier` retains up to 64 payloads/topic. #21's #8 caps decrypt
-  *attempts*, not bytes buffered. Add a ~4–16 KB max-blob guard at the parser.
-- **Blob transfer can silently wedge** on queue overflow with no integrity check or abort frame
-  (extends #21 #5's missing-TTL) — add a per-blob hash + `blob-abort`.
+- ✅ **DONE — No carrier-level inbound size cap:** the MQTT codec now skips oversize PUBLISH frames
+  at the parser (unit-tested in `tools/rendezvous-unit.mjs` — "oversize-skip resync").
+- ✅ **DONE — Blob transfer can silently wedge** on queue overflow: per-blob hash integrity +
+  `blob-abort` + TTL landed in #51 (covered by bridge-acceptance's blob integrity/abort/TTL checks).
 - **Handshake 300 ms race** (`arcade-sdk.js:95`): a framed app on a slow boot can resolve `ready`
   as standalone then flip to framed — `context.framed` changes after `ready` with no doc warning.
 - **Eviction suspend-hint is a no-op** (`index.html:787-789`): async `postMessage` then synchronous
@@ -233,8 +234,9 @@ model and shouldn't be back-doored in. Make it a deliberate v2, not an accident.
 
 ## Suggested sequence
 
-1. **Now, cheap, high-leverage:** C1 LICENSE · C3 CI gate · A4 storage-error/persist() · D2
-   `html.escape` (+ fixes the live sowduku XSS) · the fingerprint-pin + inbound-size security items.
+1. **Now, cheap, high-leverage:** ~~C1 LICENSE~~ ✅ · ~~C3 CI gate~~ ✅ · A4 storage-error/persist() ·
+   D2 `html.escape` (+ fixes the live sowduku XSS) · ~~the fingerprint-pin + inbound-size security
+   items~~ ✅ (all landed).
 2. **Foundation:** C2 `catalog.json` · A1 `Arcade.store`/`files` · A3 UI bridge · D1 rng/daily/share.
 3. **Sovereignty payload:** B1 per-app+encrypted export · B2 auto-backup · **B3 state sync** ·
    B4 backup-to-peer.

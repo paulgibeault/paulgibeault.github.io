@@ -14,8 +14,8 @@ as issues, because they depend on Phase 1 landing first.
 
 ## Phase 0 — Framework quick-wins + security (days, low risk) — ✅ IMPLEMENTED 2026-07-10
 
-Landed on branch `framework/phase0-hardening` (not yet committed/PR'd). All items done; P2P
-acceptance green (`node tools/p2p-acceptance.mjs`), JS syntax sweep green.
+Committed and merged to `main`. All items done; P2P acceptance green
+(`node tools/p2p-acceptance.mjs`), JS syntax sweep green.
 
 Order chosen so each PR is independently shippable and bisectable.
 
@@ -140,7 +140,7 @@ Phase 1 storage landing first.
 - [#30](https://github.com/paulgibeault/paulgibeault.github.io/issues/30) Automatic local backup (rolling IDB snapshot + File System Access folder)
 - [#31](https://github.com/paulgibeault/paulgibeault.github.io/issues/31) Backup-to-trusted-peer
 - [#32](https://github.com/paulgibeault/paulgibeault.github.io/issues/32) Cross-device user identity (Ed25519 cross-sign) + recovery + `revoke(deviceId)`
-- [#33](https://github.com/paulgibeault/paulgibeault.github.io/issues/33) Self-hostable broker + TURN config (`_meta.rdvBrokers`)
+- ✅ [#33](https://github.com/paulgibeault/paulgibeault.github.io/issues/33) Self-hostable broker + TURN config (`_meta.rdvBrokers`) — **DONE** (G-res-1: `_meta.rdvBrokers` override landed in #54; the cheapest resilience win, promoted out of the deferred pile). TURN config still open.
 
 **Platform surface:**
 - [#34](https://github.com/paulgibeault/paulgibeault.github.io/issues/34) Data-driven catalog (`catalog.json`) — kills index/profile/sw triplication *(keystone)*
@@ -156,7 +156,7 @@ Phase 1 storage landing first.
 - [#40](https://github.com/paulgibeault/paulgibeault.github.io/issues/40) Adoptability epic — de-brand, starter template, SDK versioning, framework/content split, PWA polish
 
 **Security / robustness (not in batch 1):**
-- [#41](https://github.com/paulgibeault/paulgibeault.github.io/issues/41) P2P robustness follow-ups: blob integrity/abort; 300 ms handshake race; eviction suspend-hint no-op
+- ✅ [#41](https://github.com/paulgibeault/paulgibeault.github.io/issues/41) P2P robustness follow-ups: blob integrity/abort — **DONE** (closed by #51: per-blob hash + `blob-abort` + TTL). Handshake race and eviction suspend-hint addressed in the #54 remediation.
 - [#43](https://github.com/paulgibeault/paulgibeault.github.io/issues/43) Document first-party trust boundary + move P2P key stores out of app reach *(Phase-1 P1.3)*
 
 **v2 epic:**
