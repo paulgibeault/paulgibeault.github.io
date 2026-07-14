@@ -548,7 +548,13 @@
         openMultiplayerPanel: null,
         loadP2P: null,
         broadcastSettings: null,
-        p2p: null
+        p2p: null,
+        // storageHost: launcher-owned glue handed to the extracted storage
+        // modules; storage: the bridge dispatch handles the router delegates to
+        // (see arcade-storage-bridge.js / arcade-save.js, wired in the module
+        // block after this IIFE runs — null until then, router queues meanwhile).
+        storageHost: null,
+        storage: null
     };
 
     // ==========================================
@@ -764,41 +770,11 @@
     // PLATFORM CONTROLLER — iframe pool, postMessage protocol, save/load
     // ==========================================
     (function platformController() {
+        // KEY_PREFIX stays here for stateSnapshotFor (below); the key
+        // predicates, size caps, save/import constants, and all the storage
+        // allowlists now live in arcade-storage-core.js — the single audit
+        // surface shared by the storage bridge and save/import modules.
         const KEY_PREFIX = 'arcade.v1.';
-        // Anything outside this namespace is rejected on import, so an imported
-        // file can never poison non-arcade keys on the origin's localStorage.
-        const KEY_RE = /^arcade\.v1\.[a-z0-9_-]+(\.[a-zA-Z0-9_.-]+)+$/;
-        // Dunder path segments are rejected outright: keys are inert in
-        // localStorage, but game code walks key paths and merges stored
-        // values, so a save file must never smuggle prototype-polluting
-        // segments past the allowlist.
-        const DUNDER_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
-        function isSafeArcadeKey(k) {
-            if (!KEY_RE.test(k)) return false;
-            for (const seg of k.split('.')) {
-                if (DUNDER_SEGMENTS.has(seg)) return false;
-            }
-            return true;
-        }
-        // Keys an import must NOT overwrite, even though export includes them for
-        // inspection. The save checksum is integrity, not authenticity — anyone
-        // can craft a valid file — so a malicious save could otherwise replace
-        // this device's identity or its TOFU trust records (fingerprint pins,
-        // auto-reconnect flags in knownPeers), laundering a future impostor past
-        // the fingerprint-changed warning. Restoring device identity/trust is a
-        // deliberate, separate action, never a silent side effect of a save load.
-        const IMPORT_PROTECTED_KEYS = new Set([
-            KEY_PREFIX + '_meta.knownPeers',
-            KEY_PREFIX + '_meta.deviceId',
-            KEY_PREFIX + '_meta.deviceName'
-        ]);
-        const SAVE_FORMAT = 'pauls-arcade-save';
-        // Schema 2 adds `stores` (Arcade.store IndexedDB) and `files`
-        // (Arcade.files OPFS/IDB blobs). v1 (localStorage-only) files still import.
-        const SAVE_SCHEMA = 2;
-        // Blobs (base64, ~33% inflation) can make a full-fidelity save large.
-        const MAX_IMPORT_BYTES = 64 * 1024 * 1024;
-        const PROBE_KEY = KEY_PREFIX + '_meta.probe';
 
         // Dev-mode tracing — when arcade.v1._meta.dev === 'true' (set by ?dev=1
         // on either launcher or game), log every postMessage in/out. Same flag
@@ -1027,7 +1003,14 @@
         function loadP2P() {
             if (p2pBridge) return Promise.resolve(p2pBridge);
             if (p2pLoadPromise) return p2pLoadPromise;
-            p2pLoadPromise = import('./arcade-p2p.js').then(({ ArcadeP2P }) => {
+            // arcade-known-peers.js is already a static dependency of
+            // arcade-p2p.js, so importing it alongside adds no network fetch —
+            // it just brings readKnownPeers into this closure's scope so the
+            // knownPeers parse isn't hand-rolled here (single owner of that key).
+            p2pLoadPromise = Promise.all([
+                import('./arcade-p2p.js'),
+                import('./arcade-known-peers.js')
+            ]).then(([{ ArcadeP2P }, { readKnownPeers }]) => {
                 let prevPeerStatus = 'idle';
                 ArcadeP2P.onStatus((status) => {
                     broadcast({ type: 'arcade:peer.status', status });
@@ -1170,10 +1153,8 @@
                         const hit = ArcadeP2P.connectedPeers().find(p => p.deviceId === deviceId && p.name);
                         if (hit) return hit.name;
                     } catch (_) {}
-                    try {
-                        const known = JSON.parse(localStorage.getItem('arcade.v1._meta.knownPeers') || '{}');
-                        if (known[deviceId] && known[deviceId].name) return known[deviceId].name;
-                    } catch (_) {}
+                    const known = readKnownPeers();
+                    if (known[deviceId] && known[deviceId].name) return known[deviceId].name;
                     return 'Someone';
                 }
                 function maybeMessageToast(targetGameId, fromDeviceId) {
@@ -1259,27 +1240,32 @@
             // arcade is merely open.
             let lastLive = 0;
             try { lastLive = parseInt(localStorage.getItem('arcade.v1._meta.lastLiveSession') || '0', 10); } catch (e) {}
-            let callable = false;
-            try {
-                const known = JSON.parse(localStorage.getItem('arcade.v1._meta.knownPeers') || '{}');
-                callable = Object.values(known).some((p) => p && p.autoReconnect && !p.paused);
-            } catch (e) {}
-            const boot = (lastLive && Date.now() - lastLive < 6 * 3600 * 1000) || callable;
-            // The connection log (Multiplayer dialog) starts with this
-            // decision, so a reconnect that never even booted is visible.
-            import('./arcade-diag.js').then(({ ArcadeDiag }) => {
-                ArcadeDiag.log('boot', 'launch: last live session '
-                    + (lastLive ? Math.round((Date.now() - lastLive) / 60000) + 'm ago' : 'none')
-                    + ', callable auto-reconnect peer: ' + (callable ? 'yes' : 'no')
-                    + ' → ' + (boot ? 'booting multiplayer bridge' : 'multiplayer stays cold'));
-            }).catch(() => {});
-            if (boot) {
-                loadP2P().then((b) => b.resumeRendezvous()).catch((e) => {
-                    import('./arcade-diag.js').then(({ ArcadeDiag }) => {
-                        ArcadeDiag.log('boot', 'resume-on-launch failed: ' + (e && e.message));
-                    }).catch(() => {});
-                });
-            }
+            const recentLive = !!(lastLive && Date.now() - lastLive < 6 * 3600 * 1000);
+            // Decide once the callable-peers read is available. knownPeers is
+            // read via readKnownPeers (single owner of that key) rather than a
+            // hand-rolled parse; that means the decision waits one module load,
+            // so on a fetch failure fall back to the lastLive-only signal.
+            const decide = (callable) => {
+                const boot = recentLive || callable;
+                // The connection log (Multiplayer dialog) starts with this
+                // decision, so a reconnect that never even booted is visible.
+                import('./arcade-diag.js').then(({ ArcadeDiag }) => {
+                    ArcadeDiag.log('boot', 'launch: last live session '
+                        + (lastLive ? Math.round((Date.now() - lastLive) / 60000) + 'm ago' : 'none')
+                        + ', callable auto-reconnect peer: ' + (callable ? 'yes' : 'no')
+                        + ' → ' + (boot ? 'booting multiplayer bridge' : 'multiplayer stays cold'));
+                }).catch(() => {});
+                if (boot) {
+                    loadP2P().then((b) => b.resumeRendezvous()).catch((e) => {
+                        import('./arcade-diag.js').then(({ ArcadeDiag }) => {
+                            ArcadeDiag.log('boot', 'resume-on-launch failed: ' + (e && e.message));
+                        }).catch(() => {});
+                    });
+                }
+            };
+            import('./arcade-known-peers.js').then(({ readKnownPeers }) => {
+                decide(Object.values(readKnownPeers()).some((p) => p && p.autoReconnect && !p.paused));
+            }).catch(() => decide(false));
         }
 
         // Invite/reply links target the LAUNCHER URL — one stable re-entry
@@ -1338,96 +1324,11 @@
             for (const [gid] of pool) postToIframe(gid, msg);
         }
 
-        // localStorage proxy: hecknsic (and potentially other games) install a
-        // postMessage-backed shim that overrides window.localStorage when running
-        // in any iframe and blocks module init on a 'dump' reply. Without this
-        // handler the game hangs forever after rendering its static HUD.
-        // Per-game keys live under arcade.v1.<gameId>.ls.<key> so they ride
-        // along with the launcher's save/load bundling and can't collide.
-        function lsPrefix(gameId) { return KEY_PREFIX + gameId + '.ls.'; }
-        // A legacy ls-proxy key stores its sub-key verbatim, so it can contain
-        // characters (spaces, ':', '/') that the stricter isSafeArcadeKey regex
-        // rejects — which would silently drop it from every save/restore. Export
-        // and import treat the whole '.ls.' subtree as backup-eligible as long
-        // as it stays inside a valid game namespace and carries no dunder
-        // segment (so it can't poison prototypes or escape the namespace).
-        const LS_PROXY_KEY_RE = /^arcade\.v1\.[a-z0-9_-]+\.ls\..+$/;
-        function isLsProxyBackupKey(k) {
-            if (!LS_PROXY_KEY_RE.test(k)) return false;
-            for (const seg of k.split('.')) { if (DUNDER_SEGMENTS.has(seg)) return false; }
-            return true;
-        }
-        function handleLsProxyRequest(gameId, data, source, origin) {
-            const requestId = data.requestId;
-            const reply = { type: 'ls-proxy-response', requestId, ok: false };
-            try {
-                const prefix = lsPrefix(gameId);
-                switch (data.op) {
-                    case 'dump': {
-                        const dump = {};
-                        for (let i = 0; i < localStorage.length; i++) {
-                            const k = localStorage.key(i);
-                            if (k && k.indexOf(prefix) === 0) {
-                                dump[k.slice(prefix.length)] = localStorage.getItem(k);
-                            }
-                        }
-                        reply.ok = true;
-                        reply.data = dump;
-                        break;
-                    }
-                    case 'setItem':
-                        if (typeof data.key === 'string') {
-                            const lsVal = String(data.value);
-                            if (lsVal.length > BRIDGE_VALUE_MAX) break; // parity with state.write cap
-                            localStorage.setItem(prefix + data.key, lsVal);
-                            reply.ok = true;
-                        }
-                        break;
-                    case 'removeItem':
-                        if (typeof data.key === 'string') {
-                            localStorage.removeItem(prefix + data.key);
-                            reply.ok = true;
-                        }
-                        break;
-                    case 'clear': {
-                        // Scoped clear — only touches this game's namespace.
-                        const toRemove = [];
-                        for (let i = 0; i < localStorage.length; i++) {
-                            const k = localStorage.key(i);
-                            if (k && k.indexOf(prefix) === 0) toRemove.push(k);
-                        }
-                        for (const k of toRemove) localStorage.removeItem(k);
-                        reply.ok = true;
-                        break;
-                    }
-                }
-            } catch (err) { /* leave ok:false */ }
-            // '*': an opaque-origin requester can't be named as targetOrigin.
-            try { source.postMessage(reply, '*'); } catch (err) {}
-        }
-
-        // ---- storage bridge (opaque-origin frames) ----
-        // Games run sandboxed without allow-same-origin (see ensureIframe),
-        // so the launcher is their storage custodian. Everything here derives
-        // paths from the FRAME's mounted gameId — nothing a frame sends can
-        // widen its reach beyond its own arcade.v1.<gameId> tree plus the
-        // shared global.* keys.
-        const BRIDGE_VALUE_MAX = 2 * 1024 * 1024; // per-key sanity cap
-        // Per-op caps for the async bridge. A runaway game must not exhaust the
-        // shared origin quota (the qrp2p identity/pairing key stores live there
-        // too — draining it would break P2P persistence arcade-wide).
-        const BRIDGE_STORE_VALUE_MAX = 16 * 1024 * 1024;
-        const BRIDGE_FILE_MAX = 64 * 1024 * 1024;
-        function approxSize(v) {
-            if (v == null) return 0;
-            if (typeof v === 'string') return v.length;
-            if (v instanceof Blob) return v.size;
-            if (v instanceof ArrayBuffer) return v.byteLength;
-            if (ArrayBuffer.isView(v)) return v.byteLength;
-            try { return JSON.stringify(v).length; } catch (e) { return Infinity; }
-        }
-        const SETTINGS_KEY_RE = /^arcade\.v1\.global\.(fontScale|theme|reducedMotion|audioVolume|handedness)$/;
-
+        // The storage bridge (opaque-frame custodian: ls-proxy, state.write,
+        // store.op, files.op, storage.op) now lives in arcade-storage-bridge.js;
+        // the router below delegates authenticated messages to it via
+        // window.__arcade.storage. stateSnapshotFor stays here because the
+        // arcade:hello → arcade:welcome path needs it synchronously.
         function stateSnapshotFor(gameId) {
             const out = {};
             const own = KEY_PREFIX + gameId + '.';
@@ -1452,209 +1353,27 @@
             return out;
         }
 
-        function bridgeKeyWritable(gameId, key) {
-            if (typeof key !== 'string' || key.length > 512) return false;
-            if (key === KEY_PREFIX + '_meta.dev') return true;
-            if (!isSafeArcadeKey(key)) return false;
-            return key.startsWith(KEY_PREFIX + gameId + '.')
-                || key.startsWith(KEY_PREFIX + 'global.');
-        }
-
-        function handleBridgedStateWrite(gameId, data) {
-            const key = data.key;
-            if (!bridgeKeyWritable(gameId, key)) return;
-            const value = (data.value === undefined) ? null : data.value;
-            if (value !== null && (typeof value !== 'string' || value.length > BRIDGE_VALUE_MAX)) {
-                postToIframe(gameId, { type: 'arcade:state.writeError', key: key, error: 'value rejected (must be a string ≤ 2 MB)' });
-                return;
-            }
-            try {
-                if (value === null) localStorage.removeItem(key);
-                else localStorage.setItem(key, value);
-            } catch (e) {
-                postToIframe(gameId, { type: 'arcade:state.writeError', key: key, error: 'storage quota exceeded' });
-                return;
-            }
-            // Shared keys: other frames' storage events never fire for a
-            // launcher-document write — push the change to them explicitly.
-            const shared = key.startsWith(KEY_PREFIX + 'global.') || key === KEY_PREFIX + '_meta.dev';
-            if (!shared) return;
-            for (const gid of pool.keys()) {
-                if (gid !== gameId) postToIframe(gid, { type: 'arcade:state.changed', key: key, value: value });
-            }
-            // A game writing a launcher-managed setting (e.g. handedness)
-            // must reach every frame's settings stream too.
-            if (SETTINGS_KEY_RE.test(key)) window.__arcade.broadcastSettings();
-        }
-
-        function bridgeReply(gameId, id, ok, value, error) {
-            const msg = { type: 'arcade:bridge.result', id: id, ok: ok };
-            if (ok) msg.value = value === undefined ? null : value;
-            else msg.error = String(error || 'operation failed');
-            postToIframe(gameId, msg);
-        }
-        function validRpcId(id) { return typeof id === 'string' && id.length >= 1 && id.length <= 32; }
-
-        const STORE_NAME_RE = /^[a-z0-9_-]{1,64}$/i;
-        async function handleStoreOp(gameId, data) {
-            if (!validRpcId(data.id)) return;
-            const name = (data.name === undefined || data.name === null) ? 'default' : String(data.name);
-            if (!STORE_NAME_RE.test(name)) return bridgeReply(gameId, data.id, false, undefined, 'bad store name');
-            const dbName = KEY_PREFIX + gameId + '.store.' + name;
-            try {
-                const db = await idbOpen(dbName);
-                try {
-                    switch (data.op) {
-                        case 'get': {
-                            const v = await idbGet(db, String(data.key));
-                            return bridgeReply(gameId, data.id, true, v === undefined ? null : v);
-                        }
-                        case 'set':
-                            if (approxSize(data.value) > BRIDGE_STORE_VALUE_MAX) {
-                                return bridgeReply(gameId, data.id, false, undefined, 'store value too large (max 16 MB)');
-                            }
-                            await idbPut(db, String(data.key), data.value);
-                            return bridgeReply(gameId, data.id, true, true);
-                        case 'del':
-                            await idbDel(db, String(data.key));
-                            return bridgeReply(gameId, data.id, true, true);
-                        case 'keys': {
-                            const rows = await idbAll(db);
-                            return bridgeReply(gameId, data.id, true, rows.map((r) => r.key));
-                        }
-                        case 'entries': {
-                            const rows = await idbAll(db);
-                            return bridgeReply(gameId, data.id, true, rows.map((r) => [r.key, r.value]));
-                        }
-                        case 'clear':
-                            await idbClear(db);
-                            return bridgeReply(gameId, data.id, true, true);
-                        default:
-                            return bridgeReply(gameId, data.id, false, undefined, 'unknown store op');
-                    }
-                } finally { db.close(); }
-            } catch (e) {
-                return bridgeReply(gameId, data.id, false, undefined, (e && e.message) || 'store op failed');
+        // Storage-bridge delegation. The router owns the trust boundary and
+        // hands each already-authenticated storage message to the bridge module
+        // (window.__arcade.storage, wired after this IIFE runs). A message that
+        // arrives before the module loads is queued and replayed on init —
+        // dropping one would hang a game whose ls-proxy shim blocks boot on the
+        // 'dump' reply. In practice no game auto-mounts at parse time, so the
+        // queue is defence-in-depth, not a hot path.
+        const pendingStorageMsgs = [];
+        function dispatchStorageMessage(gameId, data, source, origin) {
+            const S = window.__arcade.storage;
+            if (!S) { pendingStorageMsgs.push([gameId, data, source, origin]); return; }
+            switch (data.type) {
+                case 'ls-proxy-request': S.lsProxy(gameId, data, source, origin); break;
+                case 'arcade:state.write': S.stateWrite(gameId, data); break;
+                case 'arcade:store.op': S.storeOp(gameId, data); break;
+                case 'arcade:files.op': S.filesOp(gameId, data); break;
+                case 'arcade:storage.op': S.storageOp(gameId, data); break;
             }
         }
-
-        // Mirrors the SDK's direct-mode backend choice exactly (OPFS when
-        // navigator.storage.getDirectory exists, per-app IDB '.files'
-        // otherwise) so data written before this launcher version — or via
-        // save import — is found where the game itself would have put it.
-        const BRIDGE_FILE_NAME_RE = /^[a-z0-9._-]{1,128}$/i;
-        async function handleFilesOp(gameId, data) {
-            if (!validRpcId(data.id)) return;
-            const dir = KEY_PREFIX + gameId;
-            const opfs = !!(navigator.storage && navigator.storage.getDirectory);
-            try {
-                switch (data.op) {
-                    case 'put': {
-                        const n = String(data.name);
-                        if (!BRIDGE_FILE_NAME_RE.test(n)) return bridgeReply(gameId, data.id, false, undefined, 'bad file name');
-                        if (!(data.blob instanceof Blob)) return bridgeReply(gameId, data.id, false, undefined, 'not a Blob');
-                        if (data.blob.size > BRIDGE_FILE_MAX) return bridgeReply(gameId, data.id, false, undefined, 'file too large (max 64 MB)');
-                        if (opfs) {
-                            const root = await navigator.storage.getDirectory();
-                            const d = await root.getDirectoryHandle(dir, { create: true });
-                            const fh = await d.getFileHandle(n, { create: true });
-                            const w = await fh.createWritable();
-                            await w.write(data.blob); await w.close();
-                        } else {
-                            const db = await idbOpen(dir + '.files');
-                            try { await idbPut(db, n, { blob: data.blob, size: data.blob.size, type: data.blob.type }); }
-                            finally { db.close(); }
-                        }
-                        return bridgeReply(gameId, data.id, true, true);
-                    }
-                    case 'get': {
-                        const n = String(data.name);
-                        if (!BRIDGE_FILE_NAME_RE.test(n)) return bridgeReply(gameId, data.id, true, null);
-                        if (opfs) {
-                            try {
-                                const root = await navigator.storage.getDirectory();
-                                const d = await root.getDirectoryHandle(dir, { create: false });
-                                const fh = await d.getFileHandle(n, { create: false });
-                                return bridgeReply(gameId, data.id, true, await fh.getFile());
-                            } catch (e) { return bridgeReply(gameId, data.id, true, null); }
-                        }
-                        try {
-                            const db = await idbOpen(dir + '.files');
-                            let rec; try { rec = await idbGet(db, n); } finally { db.close(); }
-                            return bridgeReply(gameId, data.id, true, (rec && rec.blob instanceof Blob) ? rec.blob : null);
-                        } catch (e) { return bridgeReply(gameId, data.id, true, null); }
-                    }
-                    case 'list': {
-                        const items = [];
-                        if (opfs) {
-                            try {
-                                const root = await navigator.storage.getDirectory();
-                                const d = await root.getDirectoryHandle(dir, { create: false });
-                                for await (const h of d.values()) {
-                                    if (h.kind !== 'file') continue;
-                                    const f = await h.getFile();
-                                    items.push({ name: h.name, size: f.size });
-                                }
-                            } catch (e) { /* no dir yet → [] */ }
-                            return bridgeReply(gameId, data.id, true, items);
-                        }
-                        try {
-                            const db = await idbOpen(dir + '.files');
-                            let rows; try { rows = await idbAll(db); } finally { db.close(); }
-                            for (const r of rows) {
-                                items.push({ name: String(r.key), size: (r.value && r.value.size) || 0 });
-                            }
-                        } catch (e) {}
-                        return bridgeReply(gameId, data.id, true, items);
-                    }
-                    case 'delete': {
-                        const n = String(data.name);
-                        if (!BRIDGE_FILE_NAME_RE.test(n)) return bridgeReply(gameId, data.id, true, false);
-                        if (opfs) {
-                            try {
-                                const root = await navigator.storage.getDirectory();
-                                const d = await root.getDirectoryHandle(dir, { create: false });
-                                await d.removeEntry(n);
-                                return bridgeReply(gameId, data.id, true, true);
-                            } catch (e) { return bridgeReply(gameId, data.id, true, false); }
-                        }
-                        try {
-                            const db = await idbOpen(dir + '.files');
-                            try { await idbDel(db, n); } finally { db.close(); }
-                            return bridgeReply(gameId, data.id, true, true);
-                        } catch (e) { return bridgeReply(gameId, data.id, true, false); }
-                    }
-                    default:
-                        return bridgeReply(gameId, data.id, false, undefined, 'unknown files op');
-                }
-            } catch (e) {
-                return bridgeReply(gameId, data.id, false, undefined, (e && e.message) || 'files op failed');
-            }
-        }
-
-        async function handleStorageOp(gameId, data) {
-            if (!validRpcId(data.id)) return;
-            try {
-                switch (data.op) {
-                    case 'estimate': {
-                        if (navigator.storage && navigator.storage.estimate) {
-                            const est = await navigator.storage.estimate();
-                            return bridgeReply(gameId, data.id, true, { usage: est.usage, quota: est.quota });
-                        }
-                        return bridgeReply(gameId, data.id, true, { usage: undefined, quota: undefined });
-                    }
-                    case 'persisted':
-                        return bridgeReply(gameId, data.id, true,
-                            (navigator.storage && navigator.storage.persisted) ? await navigator.storage.persisted() : false);
-                    case 'persist':
-                        return bridgeReply(gameId, data.id, true,
-                            (navigator.storage && navigator.storage.persist) ? await navigator.storage.persist() : false);
-                    default:
-                        return bridgeReply(gameId, data.id, false, undefined, 'unknown storage op');
-                }
-            } catch (e) {
-                return bridgeReply(gameId, data.id, false, undefined, (e && e.message) || 'storage op failed');
-            }
+        function replayPendingStorageMessages() {
+            while (pendingStorageMsgs.length) dispatchStorageMessage(...pendingStorageMsgs.shift());
         }
 
         window.addEventListener('message', (e) => {
@@ -1677,7 +1396,7 @@
             if (devModeOn()) console.debug('[Arcade launcher ← ' + gameId + ']', data);
 
             if (t === 'ls-proxy-request') {
-                handleLsProxyRequest(gameId, data, e.source, e.origin);
+                dispatchStorageMessage(gameId, data, e.source, e.origin);
                 return;
             }
 
@@ -1742,17 +1461,17 @@
                     // never another app's namespace, never other _meta.*
                     // (device identity stays read-only), and structurally
                     // never the qrp2p-* key stores.
-                    handleBridgedStateWrite(gameId, data);
+                    dispatchStorageMessage(gameId, data, e.source, e.origin);
                     break;
                 case 'arcade:store.op':
                     // Async — replies with arcade:bridge.result when done.
-                    handleStoreOp(gameId, data);
+                    dispatchStorageMessage(gameId, data, e.source, e.origin);
                     break;
                 case 'arcade:files.op':
-                    handleFilesOp(gameId, data);
+                    dispatchStorageMessage(gameId, data, e.source, e.origin);
                     break;
                 case 'arcade:storage.op':
-                    handleStorageOp(gameId, data);
+                    dispatchStorageMessage(gameId, data, e.source, e.origin);
                     break;
                 case 'arcade:ui.toast':
                     // Game asked the launcher to display a toast.
@@ -1934,548 +1653,19 @@
         }
         window.__arcade.setNetworkActivity = setNetworkActivity;
 
-        // ---- canonical checksum ----
-        async function checksumData(data) {
-            const keys = Object.keys(data).sort();
-            const parts = new Array(keys.length);
-            for (let i = 0; i < keys.length; i++) {
-                parts[i] = JSON.stringify(keys[i]) + ':' + JSON.stringify(data[keys[i]]);
-            }
-            const canonical = '{' + parts.join(',') + '}';
-            const buf = new TextEncoder().encode(canonical);
-            const hash = await crypto.subtle.digest('SHA-256', buf);
-            const bytes = new Uint8Array(hash);
-            let hex = '';
-            for (let i = 0; i < bytes.length; i++) {
-                hex += bytes[i].toString(16).padStart(2, '0');
-            }
-            return 'sha256:' + hex;
-        }
-
-        // ---- async per-app storage (Arcade.store / Arcade.files) ----
-        // The SDK keeps large/binary app data in per-app IndexedDB databases
-        // (arcade.v1.<gameId>.store.<name> and arcade.v1.<gameId>.files) and
-        // OPFS dirs (arcade.v1.<gameId>). The launcher enumerates them so a
-        // save bundle is a full-fidelity backup, not just localStorage. The
-        // allowlist regexes below never match the P2P key stores (qrp2p-*),
-        // so device identity/pairing secrets are never exported.
-        const STORE_DB_RE = /^arcade\.v1\.[a-z0-9_-]+\.store\.[a-z0-9_-]{1,64}$/i;
-        const FILE_GID_RE = /^arcade\.v1\.[a-z0-9_-]+$/i;
-        const FILE_NAME_RE = /^[a-z0-9._-]{1,128}$/i;
-
-        function hasDunderSegment(s) {
-            return s.split('.').some((seg) => DUNDER_SEGMENTS.has(seg));
-        }
-
-        // Recursive key-sorted stringify → a deterministic canonical form so the
-        // checksum is stable regardless of property order.
-        function stableStringify(v) {
-            if (v === null || typeof v !== 'object') return JSON.stringify(v);
-            if (Array.isArray(v)) return '[' + v.map(stableStringify).join(',') + ']';
-            const keys = Object.keys(v).sort();
-            return '{' + keys.map((k) => JSON.stringify(k) + ':' + stableStringify(v[k])).join(',') + '}';
-        }
-        async function checksumBundle(data, stores, files) {
-            const canonical = stableStringify({ data: data, stores: stores, files: files });
-            const buf = new TextEncoder().encode(canonical);
-            const hash = await crypto.subtle.digest('SHA-256', buf);
-            const bytes = new Uint8Array(hash);
-            let hex = '';
-            for (let i = 0; i < bytes.length; i++) hex += bytes[i].toString(16).padStart(2, '0');
-            return 'sha256:' + hex;
-        }
-
-        // Minimal IndexedDB helpers (the SDK's stores all use a single 'kv'
-        // object store; opening with this upgrade is compatible).
-        function idbOpen(name) {
-            return new Promise((resolve, reject) => {
-                const req = indexedDB.open(name, 1);
-                req.onupgradeneeded = () => {
-                    const db = req.result;
-                    if (!db.objectStoreNames.contains('kv')) db.createObjectStore('kv');
-                };
-                req.onsuccess = () => resolve(req.result);
-                req.onerror = () => reject(req.error);
-            });
-        }
-        function idbAll(db) {
-            return new Promise((resolve, reject) => {
-                const tx = db.transaction('kv', 'readonly');
-                const s = tx.objectStore('kv');
-                const keysReq = s.getAllKeys();
-                const valsReq = s.getAll();
-                tx.oncomplete = () => {
-                    const out = [];
-                    for (let i = 0; i < keysReq.result.length; i++) {
-                        out.push({ key: keysReq.result[i], value: valsReq.result[i] });
-                    }
-                    resolve(out);
-                };
-                tx.onerror = () => reject(tx.error);
-            });
-        }
-        function idbPut(db, key, value) {
-            return new Promise((resolve, reject) => {
-                const tx = db.transaction('kv', 'readwrite');
-                tx.objectStore('kv').put(value, key);
-                tx.oncomplete = () => resolve();
-                tx.onerror = () => reject(tx.error);
-            });
-        }
-        function idbGet(db, key) {
-            return new Promise((resolve, reject) => {
-                const req = db.transaction('kv', 'readonly').objectStore('kv').get(key);
-                req.onsuccess = () => resolve(req.result);
-                req.onerror = () => reject(req.error);
-            });
-        }
-        function idbDel(db, key) {
-            return new Promise((resolve, reject) => {
-                const tx = db.transaction('kv', 'readwrite');
-                tx.objectStore('kv').delete(key);
-                tx.oncomplete = () => resolve();
-                tx.onerror = () => reject(tx.error);
-            });
-        }
-        function idbClear(db) {
-            return new Promise((resolve, reject) => {
-                const tx = db.transaction('kv', 'readwrite');
-                tx.objectStore('kv').clear();
-                tx.oncomplete = () => resolve();
-                tx.onerror = () => reject(tx.error);
-            });
-        }
-        function blobToB64(blob) {
-            return new Promise((resolve, reject) => {
-                const r = new FileReader();
-                r.onerror = () => reject(new Error('blob read failed'));
-                r.onload = () => {
-                    const s = String(r.result);
-                    const i = s.indexOf(',');
-                    resolve(i >= 0 ? s.slice(i + 1) : '');
-                };
-                r.readAsDataURL(blob);
-            });
-        }
-        function b64ToBlob(b64, type) {
-            const bin = atob(b64);
-            const bytes = new Uint8Array(bin.length);
-            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-            return new Blob([bytes], { type: type || 'application/octet-stream' });
-        }
-        // indexedDB.databases() is Chromium/Safari-only (absent in Firefox).
-        // Store enumeration needs it; without it we still export localStorage
-        // and (deterministically-named) OPFS files, just not IndexedDB stores.
-        async function listArcadeDbNames() {
-            if (!indexedDB.databases) return null;
-            try {
-                const dbs = await indexedDB.databases();
-                return dbs.map((d) => d && d.name).filter(Boolean);
-            } catch (e) { return null; }
-        }
-        function opfsRoot() {
-            if (navigator.storage && navigator.storage.getDirectory) return navigator.storage.getDirectory();
-            return Promise.resolve(null);
-        }
-        async function gatherGameIds(data, dbNames) {
-            const ids = new Set();
-            for (const k of Object.keys(data || {})) {
-                const m = /^arcade\.v1\.([a-z0-9_-]+)\./i.exec(k);
-                if (m && m[1] !== '_meta' && m[1] !== 'global') ids.add(m[1]);
-            }
-            for (const n of (dbNames || [])) {
-                const m = /^arcade\.v1\.([a-z0-9_-]+)\.(?:store\.|files$)/i.exec(n);
-                if (m) ids.add(m[1]);
-            }
-            const root = await opfsRoot();
-            if (root && root.values) {
-                try {
-                    for await (const h of root.values()) {
-                        const m = /^arcade\.v1\.([a-z0-9_-]+)$/i.exec(h.name);
-                        if (h.kind === 'directory' && m) ids.add(m[1]);
-                    }
-                } catch (e) {}
-            }
-            return ids;
-        }
-        async function collectStores(dbNames) {
-            const out = {};
-            if (!dbNames) return out;
-            for (const name of dbNames) {
-                if (!STORE_DB_RE.test(name)) continue;
-                try {
-                    const db = await idbOpen(name);
-                    const rows = await idbAll(db);
-                    db.close();
-                    const kv = {};
-                    for (const r of rows) {
-                        try { JSON.stringify(r.value); kv[String(r.key)] = r.value; } catch (e) { /* skip non-JSON */ }
-                    }
-                    out[name] = kv;
-                } catch (e) {}
-            }
-            return out;
-        }
-        async function collectFiles(gameIds, dbNames) {
-            const out = {};
-            const root = await opfsRoot();
-            const dbSet = dbNames ? new Set(dbNames) : null;
-            for (const gid of gameIds) {
-                const dir = 'arcade.v1.' + gid;
-                const items = [];
-                if (root) {
-                    try {
-                        const d = await root.getDirectoryHandle(dir, { create: false });
-                        for await (const h of d.values()) {
-                            if (h.kind !== 'file') continue;
-                            const f = await h.getFile();
-                            items.push({ name: h.name, type: f.type || '', size: f.size, b64: await blobToB64(f) });
-                        }
-                    } catch (e) {}
-                }
-                // IDB fallback backend — only open if it actually exists (avoid
-                // creating empty DBs); when we can't enumerate, try anyway.
-                if (!dbSet || dbSet.has(dir + '.files')) {
-                    try {
-                        const db = await idbOpen(dir + '.files');
-                        const rows = await idbAll(db);
-                        db.close();
-                        for (const r of rows) {
-                            const rec = r.value || {};
-                            if (rec.blob instanceof Blob) {
-                                items.push({ name: String(r.key), type: rec.type || rec.blob.type || '', size: rec.size || rec.blob.size, b64: await blobToB64(rec.blob) });
-                            }
-                        }
-                    } catch (e) {}
-                }
-                if (items.length) out[dir] = items;
-            }
-            return out;
-        }
-        async function writeStores(stores) {
-            let count = 0;
-            for (const name of Object.keys(stores || {})) {
-                if (!STORE_DB_RE.test(name) || hasDunderSegment(name)) continue;
-                const kv = stores[name];
-                if (!kv || typeof kv !== 'object' || Array.isArray(kv)) continue;
-                try {
-                    const db = await idbOpen(name);
-                    for (const k of Object.keys(kv)) { await idbPut(db, k, kv[k]); count++; }
-                    db.close();
-                } catch (e) {}
-            }
-            return count;
-        }
-        async function writeFiles(files) {
-            let count = 0;
-            const root = await opfsRoot();
-            for (const dir of Object.keys(files || {})) {
-                if (!FILE_GID_RE.test(dir) || hasDunderSegment(dir)) continue;
-                const items = Array.isArray(files[dir]) ? files[dir] : [];
-                for (const it of items) {
-                    if (!it || typeof it.name !== 'string' || !FILE_NAME_RE.test(it.name) || typeof it.b64 !== 'string') continue;
-                    let blob;
-                    try { blob = b64ToBlob(it.b64, it.type); } catch (e) { continue; }
-                    let wrote = false;
-                    if (root) {
-                        try {
-                            const d = await root.getDirectoryHandle(dir, { create: true });
-                            const fh = await d.getFileHandle(it.name, { create: true });
-                            const w = await fh.createWritable();
-                            await w.write(blob); await w.close();
-                            wrote = true;
-                        } catch (e) {}
-                    }
-                    if (!wrote) {
-                        try {
-                            const db = await idbOpen(dir + '.files');
-                            await idbPut(db, it.name, { blob: blob, size: blob.size, type: blob.type });
-                            db.close();
-                            wrote = true;
-                        } catch (e) {}
-                    }
-                    if (wrote) count++;
-                }
-            }
-            return count;
-        }
-
-        function collectArcadeKeys() {
-            // Save-export governance: the SDK's state.set(key, v,
-            // {exportable:false}) lists local-only keys (telemetry, caches)
-            // in arcade.v1.<gameId>._noExport — those never inflate a save.
-            const noExport = new Set();
-            for (let i = 0; i < localStorage.length; i++) {
-                const k = localStorage.key(i);
-                if (!k || !/^arcade\.v1\.[a-z0-9_-]+\._noExport$/.test(k)) continue;
-                try {
-                    const list = JSON.parse(localStorage.getItem(k));
-                    if (Array.isArray(list)) {
-                        for (const item of list) {
-                            if (typeof item === 'string') noExport.add(item);
-                        }
-                    }
-                } catch (e) {}
-            }
-            const out = {};
-            for (let i = 0; i < localStorage.length; i++) {
-                const k = localStorage.key(i);
-                if (!k || noExport.has(k)) continue;
-                if (!isSafeArcadeKey(k) && !isLsProxyBackupKey(k)) continue;
-                const v = localStorage.getItem(k);
-                if (typeof v === 'string') out[k] = v;
-            }
-            return out;
-        }
-
-        function isoStamp() {
-            return new Date().toISOString().replace(/[:.]/g, '-').replace('Z', '');
-        }
-
-        function downloadJSON(filename, obj) {
-            const json = JSON.stringify(obj, null, 2);
-            const blob = new Blob([json], { type: 'application/json' });
-            try {
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = filename;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                setTimeout(() => URL.revokeObjectURL(url), 1000);
-                return true;
-            } catch (err) {
-                // Fallback: open in a new tab so the user can save manually.
-                try {
-                    const w = window.open();
-                    if (w) {
-                        w.document.body.style.cssText = 'font-family:monospace;white-space:pre;padding:20px;';
-                        w.document.body.textContent = json;
-                        return true;
-                    }
-                } catch (e) {}
-                return false;
-            }
-        }
-
-        async function buildBundle(data) {
-            const dbNames = await listArcadeDbNames();
-            const gameIds = await gatherGameIds(data, dbNames);
-            const stores = await collectStores(dbNames);
-            const files = await collectFiles(gameIds, dbNames);
-            return {
-                format: SAVE_FORMAT,
-                schemaVersion: SAVE_SCHEMA,
-                exportedAt: new Date().toISOString(),
-                appVersion: '1.0.0',
-                checksum: await checksumBundle(data, stores, files),
-                data: data,
-                stores: stores,
-                files: files
-            };
-        }
-
-        function countFiles(files) {
-            let n = 0;
-            for (const k of Object.keys(files || {})) n += (files[k] || []).length;
-            return n;
-        }
-
-        // ---- save (export) ----
-        async function exportSave() {
-            const data = collectArcadeKeys();
-            let bundle;
-            try {
-                bundle = await buildBundle(data);
-            } catch (err) {
-                showToast('Save failed: could not serialize data.', { error: true });
-                return;
-            }
-            const keyCount = Object.keys(data).length;
-            const storeCount = Object.keys(bundle.stores).length;
-            const fileCount = countFiles(bundle.files);
-            if (keyCount === 0 && storeCount === 0 && fileCount === 0) {
-                showToast('Nothing to save — no arcade data found.', { error: true });
-                return;
-            }
-            const ok = downloadJSON('pauls-arcade-save-' + isoStamp() + '.json', bundle);
-            const extra = (storeCount || fileCount) ? ' + ' + storeCount + ' stores, ' + fileCount + ' files' : '';
-            if (ok) showToast('Saved ' + keyCount + ' keys' + extra + ' to your Downloads folder.');
-            else showToast('Save failed: browser blocked the download.', { error: true });
-        }
-
-        // ---- load (import) ----
-        function quotaProbe() {
-            try {
-                localStorage.setItem(PROBE_KEY, '1');
-                localStorage.removeItem(PROBE_KEY);
-                return true;
-            } catch (e) { return false; }
-        }
-
-        function snapshotKeys(keys) {
-            const snap = {};
-            for (const k of keys) snap[k] = localStorage.getItem(k);
-            return snap;
-        }
-
-        function restoreSnapshot(snap) {
-            for (const k of Object.keys(snap)) {
-                const v = snap[k];
-                try {
-                    if (v === null) localStorage.removeItem(k);
-                    else localStorage.setItem(k, v);
-                } catch (e) { /* best-effort restore */ }
-            }
-        }
-
-        function readFileText(file) {
-            return new Promise((resolve, reject) => {
-                const r = new FileReader();
-                r.onerror = () => reject(new Error('read failed'));
-                r.onabort = () => reject(new Error('read aborted'));
-                r.onload = () => resolve(r.result);
-                r.readAsText(file);
-            });
-        }
-
-        async function importSaveFile(file) {
-            // Gate 1: size
-            if (!file || file.size > MAX_IMPORT_BYTES) {
-                showToast('File rejected: size exceeds 64 MB.', { error: true });
-                return;
-            }
-            // Gate 2: read
-            let text;
-            try { text = await readFileText(file); }
-            catch (e) { showToast('Could not read file.', { error: true }); return; }
-            // Gate 3: parse
-            let parsed;
-            try { parsed = JSON.parse(text); }
-            catch (e) { showToast('Not valid JSON.', { error: true }); return; }
-            // Gate 4: shape — accept schema v1 (localStorage-only) through the
-            // current SAVE_SCHEMA (adds stores/files).
-            if (!parsed || typeof parsed !== 'object'
-                || parsed.format !== SAVE_FORMAT
-                || !(parsed.schemaVersion >= 1 && parsed.schemaVersion <= SAVE_SCHEMA)
-                || !parsed.data || typeof parsed.data !== 'object'
-                || Array.isArray(parsed.data)) {
-                showToast('File is not a valid arcade save.', { error: true });
-                return;
-            }
-            const isV2 = parsed.schemaVersion >= 2;
-            const parsedStores = (isV2 && parsed.stores && typeof parsed.stores === 'object' && !Array.isArray(parsed.stores)) ? parsed.stores : {};
-            const parsedFiles = (isV2 && parsed.files && typeof parsed.files === 'object' && !Array.isArray(parsed.files)) ? parsed.files : {};
-            // Gate 5: per-key allowlist + value type
-            const cleanData = {};
-            const droppedKeys = [];
-            let protectedSkipped = 0;
-            for (const k of Object.keys(parsed.data)) {
-                if ((!isSafeArcadeKey(k) && !isLsProxyBackupKey(k)) || typeof parsed.data[k] !== 'string') {
-                    droppedKeys.push(k);
-                    continue;
-                }
-                if (IMPORT_PROTECTED_KEYS.has(k)) {
-                    // Device identity / trust records are never overwritten by an
-                    // import (see IMPORT_PROTECTED_KEYS) — skip silently-but-noted.
-                    protectedSkipped++;
-                    continue;
-                }
-                cleanData[k] = parsed.data[k];
-            }
-            const cleanKeys = Object.keys(cleanData);
-            if (cleanKeys.length === 0) {
-                showToast('Save contained no valid arcade keys.', { error: true });
-                return;
-            }
-            // Gate 6: checksum (over the file's original sections — we verify
-            // what was signed, not what we filtered, to detect tampering). v1
-            // uses the flat-data checksum; v2 covers data + stores + files.
-            let expected;
-            try {
-                expected = isV2
-                    ? await checksumBundle(parsed.data, parsedStores, parsedFiles)
-                    : await checksumData(parsed.data);
-            }
-            catch (e) { showToast('Could not verify checksum.', { error: true }); return; }
-            if (typeof parsed.checksum !== 'string' || parsed.checksum !== expected) {
-                showToast('Checksum mismatch — file may be corrupt.', { error: true });
-                return;
-            }
-            // Gate 7: confirm with user. Import merges: keys in the file
-            // overwrite their current values, keys NOT in the file are kept
-            // — the copy must say so.
-            const storeEntryCount = Object.keys(parsedStores).reduce((n, s) => n + Object.keys(parsedStores[s] || {}).length, 0);
-            const importFileCount = countFiles(parsedFiles);
-            const asyncSummary = (storeEntryCount || importFileCount)
-                ? 'It will also restore ' + storeEntryCount + ' stored records and ' + importFileCount + ' files.\n' : '';
-            const summary = 'This will import ' + cleanKeys.length + ' arcade keys from the file, '
-                + 'overwriting their current values. Saved data not in the file is kept as-is.\n'
-                + asyncSummary
-                + (droppedKeys.length ? droppedKeys.length + ' invalid keys will be ignored.\n' : '')
-                + (protectedSkipped ? 'This device\'s identity and saved connections are kept as-is (not overwritten).\n' : '')
-                + '\nYour current state will be auto-saved to your Downloads folder first.\nContinue?';
-            if (!window.confirm(summary)) return;
-            // Gate 8: auto-backup current state (if non-empty)
-            const currentData = collectArcadeKeys();
-            if (Object.keys(currentData).length > 0) {
-                try {
-                    const backup = await buildBundle(currentData);
-                    const ok = downloadJSON('pauls-arcade-autobackup-' + isoStamp() + '.json', backup);
-                    if (!ok && !window.confirm('Auto-backup download was blocked. Continue without backup?')) {
-                        return;
-                    }
-                } catch (e) {
-                    if (!window.confirm('Auto-backup failed. Continue without backup?')) return;
-                }
-            }
-            // Gate 9: quota probe
-            if (!quotaProbe()) {
-                showToast('localStorage is full — cannot import.', { error: true });
-                return;
-            }
-            // Gate 10: stage + commit. Snapshot keys we will overwrite.
-            const snap = snapshotKeys(cleanKeys);
-            try {
-                for (const k of cleanKeys) {
-                    localStorage.setItem(k, cleanData[k]);
-                }
-            } catch (err) {
-                restoreSnapshot(snap);
-                showToast('Write failed mid-import — prior state restored.', { error: true });
-                return;
-            }
-            // Async storage (stores/files) is written AFTER the localStorage
-            // commit. It can't share the synchronous snapshot/rollback above, so
-            // it's best-effort — the auto-backup taken at Gate 8 is the safety
-            // net if a write fails midway.
-            let asyncNote = '';
-            if (isV2) {
-                try {
-                    const sc = await writeStores(parsedStores);
-                    const fc = await writeFiles(parsedFiles);
-                    if (sc || fc) asyncNote = ' (+' + sc + ' records, ' + fc + ' files)';
-                } catch (e) {
-                    asyncNote = ' — note: some app data could not be restored (your auto-backup has the original)';
-                }
-            }
-            // Notify mounted iframes. Opaque frames can't see storage events
-            // — each gets its fresh post-import snapshot to reseed its cache.
-            for (const gid of pool.keys()) {
-                postToIframe(gid, { type: 'arcade:state.replaced', state: stateSnapshotFor(gid) });
-            }
-            showToast('Imported ' + cleanKeys.length + ' keys' + asyncNote + ' successfully.');
-        }
-
-        btnSave.addEventListener('click', () => { exportSave(); });
-        btnLoad.addEventListener('click', () => { fileLoad.click(); });
-        fileLoad.addEventListener('change', () => {
-            const f = fileLoad.files && fileLoad.files[0];
-            // Reset so picking the same file twice still fires 'change'.
-            fileLoad.value = '';
-            if (f) importSaveFile(f);
-        });
+        // Launcher-owned glue handed to the extracted storage modules. They
+        // receive exactly these capabilities — nothing reaches into the pool or
+        // the p2p bridge directly. stateSnapshotFor stays local (the hello path
+        // needs it synchronously); the modules only call it to reseed frames
+        // after an import.
+        window.__arcade.storageHost = {
+            postToIframe: postToIframe,
+            listMountedGameIds: () => [...pool.keys()],
+            stateSnapshotFor: stateSnapshotFor,
+            showToast: showToast,
+            broadcastSettings: () => window.__arcade.broadcastSettings(),
+            replayPendingStorageMessages: replayPendingStorageMessages
+        };
     })();
 
     // ==========================================
@@ -2538,6 +1728,25 @@
             hideInstallUI();
         });
     })();
+</script>
+
+<script type="module">
+    // ==========================================
+    // STORAGE MODULES — wire the extracted opaque-frame storage bridge and the
+    // save/import machinery to the launcher via window.__arcade.storageHost.
+    // Runs after the classic script above has built storageHost; module blocks
+    // execute in document order after parse, always before the load event the
+    // acceptance tests wait on. Replaying the pending queue flushes any storage
+    // message that raced module load (none in practice — no game auto-mounts at
+    // parse time — but a dropped ls-proxy 'dump' would hang a game).
+    // ==========================================
+    import { initStorageBridge } from './arcade-storage-bridge.js';
+    import { initSaveLoad } from './arcade-save.js';
+
+    const storageHost = window.__arcade.storageHost;
+    window.__arcade.storage = initStorageBridge(storageHost);
+    initSaveLoad(storageHost);
+    storageHost.replayPendingStorageMessages();
 </script>
 
 <script type="module">

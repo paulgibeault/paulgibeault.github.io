@@ -11,6 +11,7 @@
     "p2p-multiseat": "node tools/p2p-multiseat-acceptance.mjs",
     "p2p-reconnect": "node tools/p2p-reconnect-acceptance.mjs",
     "rendezvous-unit": "node tools/rendezvous-unit.mjs",
+    "save-unit": "node tools/save-validation-unit.mjs",
     "store-acceptance": "node tools/store-acceptance.mjs",
     "bridge-acceptance": "node tools/bridge-acceptance.mjs",
     "export-roundtrip": "node tools/export-roundtrip-acceptance.mjs"
