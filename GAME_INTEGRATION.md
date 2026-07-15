@@ -594,6 +594,46 @@ the host + two joiners version (targeted sends, roster, meta).
 
 ---
 
+## 7c. Determinism & sharing helpers
+
+Three games hand-rolled the same mulberry32 PRNG, two disagreed on when a
+"daily" puzzle rolls over, and every shareable-code format was reinvented.
+The SDK now owns all three primitives — use them instead of copies:
+
+```js
+// Seeded PRNG (mulberry32) whose whole state is one u32 — persistable mid-game.
+const rng = Arcade.rng('room-42');        // number or string seed (string → FNV-1a)
+rng();                                    // float in [0, 1)
+rng.int(1, 6); rng.pick(arr); rng.shuffle(deck);   // deck is a copy
+const s = rng.getState();                 // save with your game state…
+rng.setState(s);                          // …restore: the sequence continues exactly
+Arcade.rng.hash('any string');            // FNV-1a → u32 (stable across devices)
+
+// Daily puzzles. THE PLATFORM RULE: "today" is the DEVICE-LOCAL calendar
+// date — dailies roll at the player's midnight, not UTC's. Do not hand-roll
+// this with toISOString() (that's UTC): hecknsic (UTC) and sowduku (local)
+// disagreeing on "today" is the live bug this helper kills.
+Arcade.daily.dateStr();                   // 'YYYY-MM-DD', device-local
+const daily = Arcade.daily.seed();        // deterministic per game per day
+const bonus = Arcade.daily.seed('bonus'); // salts give independent streams
+// (seed() folds in your gameId — call it after Arcade.init.)
+
+// Share codes: versioned base64url over JSON. decode() VALIDATES — it
+// returns { v, data } or null, never throws, and strips prototype-polluting
+// keys, so pasted garbage can't hurt you. Bump v when your payload shape
+// changes and reject versions you don't speak.
+const code = Arcade.share.encode({ board, moves }, { v: 2 });
+const parsed = Arcade.share.decode(userInput);
+if (parsed && parsed.v === 2) load(parsed.data);
+```
+
+`Arcade.random.seeded(seed)` remains as a legacy alias of the stateless
+variant; prefer `Arcade.rng`. Feature-detect on older launcher-served SDKs
+with `typeof Arcade.rng === 'function'` — everything here is purely local
+(no launcher messages involved).
+
+---
+
 ## 8. Standalone mode must keep working
 
 The launcher is one of two ways to run the game; the GitHub Pages URL is the other.

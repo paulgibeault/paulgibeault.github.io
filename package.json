@@ -12,6 +12,7 @@
     "p2p-reconnect": "node tools/p2p-reconnect-acceptance.mjs",
     "rendezvous-unit": "node tools/rendezvous-unit.mjs",
     "save-unit": "node tools/save-validation-unit.mjs",
+    "sdk-helpers": "node tools/sdk-helpers-acceptance.mjs",
     "store-acceptance": "node tools/store-acceptance.mjs",
     "bridge-acceptance": "node tools/bridge-acceptance.mjs",
     "export-roundtrip": "node tools/export-roundtrip-acceptance.mjs",

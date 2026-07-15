@@ -49,6 +49,9 @@ jobs:
       - name: Store/files acceptance (IndexedDB + OPFS)
         run: node tools/store-acceptance.mjs
 
+      - name: SDK helpers acceptance (rng determinism, local-daily rule, share codes)
+        run: node tools/sdk-helpers-acceptance.mjs
+
       - name: Storage-bridge acceptance (opaque-frame boundary + bridge round-trips)
         run: node tools/bridge-acceptance.mjs
 
