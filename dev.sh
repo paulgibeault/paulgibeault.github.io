@@ -151,7 +151,9 @@ mkdir -p "$STAGE_DIR"
 # Rewrite https://paulgibeault.github.io → local origin in HTML/JS/JSON.
 # Skip sw.js — the launcher itself opts out on loopback, and we don't want
 # stale launcher assets cached during dev.
-for f in index.html profile.html manifest.json arcade-sdk.js styles.css arcade-p2p.js arcade-known-peers.js arcade-diag.js; do
+for f in index.html profile.html manifest.json catalog.json arcade-sdk.js styles.css \
+         arcade-p2p.js arcade-known-peers.js arcade-diag.js arcade-catalog.js \
+         arcade-storage-core.js arcade-storage-bridge.js arcade-save.js; do
   src="$LAUNCHER_DIR/$f"
   if [ -f "$src" ]; then
     sed "s|https://paulgibeault.github.io|$LOCAL_ORIGIN|g" "$src" > "$STAGE_DIR/$f"

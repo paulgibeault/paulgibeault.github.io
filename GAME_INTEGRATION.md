@@ -12,16 +12,28 @@ implementer's checklist.
 ## 1. Identity & hosting
 
 - [ ] Game is hosted at `https://paulgibeault.github.io/<gameId>/` (same-origin with the launcher).
-- [ ] `<gameId>` is kebab-case, matches the GitHub repo slug, and matches the `data-game-id` attribute the launcher uses for this game.
+- [ ] `<gameId>` is kebab-case, matches the GitHub repo slug, and matches the game's `id` in the catalog.
 - [ ] Entry point is `index.html` at the repo root so the GitHub Pages URL above resolves.
 
-| Game           | gameId           | Repo                                           |
-| -------------- | ---------------- | ---------------------------------------------- |
-| Moon Lit       | `moon-lit`       | `paulgibeault/moon-lit`                        |
-| Pi Game        | `pi-game`        | `paulgibeault/pi-game`                         |
-| Si Syndicate   | `si-syn`         | `paulgibeault/si-syn`                          |
-| HecknSic       | `hecknsic`       | `paulgibeault/hecknsic`                        |
-| Cozy Solitaire | `cozy-solitaire` | `paulgibeault/cozy-solitaire`                  |
+**The authoritative game list is [`catalog.json`](catalog.json).** The launcher
+grid, the profile page's game cards, and the service worker's icon precache all
+render from it — the old hand-mirrored copies are gone.
+
+**Registering a new game** takes exactly three steps, none of them HTML edits:
+
+1. Add one entry to `catalog.json`: `id`, `name`, `subtitle`, `icon`
+   (`images/<gameId>.png`), `url` (root-relative, `/<gameId>/`), plus an
+   optional `profile` block (`subtitle`, `alt`, `descLead`, `descBody`,
+   `kicker`, `tags[]`, `codeUrl`) if it should appear on the portfolio page.
+   Entries without a `profile` block render on the launcher only.
+2. Commit the card image at `images/<gameId>.png`.
+3. Bump `CACHE_NAME` in `sw.js` so installed launchers refresh their precache.
+
+**Deep links.** `https://paulgibeault.github.io/#app=<gameId>` boots the
+launcher straight into that game — ids resolve only through `catalog.json`
+(a fragment can never name a URL). The launcher keeps the fragment updated as
+games launch and quit, so the address bar is always shareable. `#p2p-*`
+fragments (invite/reply links) take precedence over `#app=`.
 
 ---
 
@@ -579,6 +591,46 @@ Try it: mount `tools/fixtures/p2p-test-game/` on two devices via the launcher
 and watch the message log; `node tools/p2p-acceptance.mjs` runs the automated
 two-launcher version headlessly, and `node tools/p2p-multiseat-acceptance.mjs`
 the host + two joiners version (targeted sends, roster, meta).
+
+---
+
+## 7c. Determinism & sharing helpers
+
+Three games hand-rolled the same mulberry32 PRNG, two disagreed on when a
+"daily" puzzle rolls over, and every shareable-code format was reinvented.
+The SDK now owns all three primitives — use them instead of copies:
+
+```js
+// Seeded PRNG (mulberry32) whose whole state is one u32 — persistable mid-game.
+const rng = Arcade.rng('room-42');        // number or string seed (string → FNV-1a)
+rng();                                    // float in [0, 1)
+rng.int(1, 6); rng.pick(arr); rng.shuffle(deck);   // deck is a copy
+const s = rng.getState();                 // save with your game state…
+rng.setState(s);                          // …restore: the sequence continues exactly
+Arcade.rng.hash('any string');            // FNV-1a → u32 (stable across devices)
+
+// Daily puzzles. THE PLATFORM RULE: "today" is the DEVICE-LOCAL calendar
+// date — dailies roll at the player's midnight, not UTC's. Do not hand-roll
+// this with toISOString() (that's UTC): hecknsic (UTC) and sowduku (local)
+// disagreeing on "today" is the live bug this helper kills.
+Arcade.daily.dateStr();                   // 'YYYY-MM-DD', device-local
+const daily = Arcade.daily.seed();        // deterministic per game per day
+const bonus = Arcade.daily.seed('bonus'); // salts give independent streams
+// (seed() folds in your gameId — call it after Arcade.init.)
+
+// Share codes: versioned base64url over JSON. decode() VALIDATES — it
+// returns { v, data } or null, never throws, and strips prototype-polluting
+// keys, so pasted garbage can't hurt you. Bump v when your payload shape
+// changes and reject versions you don't speak.
+const code = Arcade.share.encode({ board, moves }, { v: 2 });
+const parsed = Arcade.share.decode(userInput);
+if (parsed && parsed.v === 2) load(parsed.data);
+```
+
+`Arcade.random.seeded(seed)` remains as a legacy alias of the stateless
+variant; prefer `Arcade.rng`. Feature-detect on older launcher-served SDKs
+with `typeof Arcade.rng === 'function'` — everything here is purely local
+(no launcher messages involved).
 
 ---
 

@@ -81,6 +81,8 @@ on launcher boot (one line — today the browser may evict the entire origin und
 
 **A5. Routing / deep links.** Parse `#app=<id>` on boot → `showGame()`; update the fragment on
 launch/quit so apps are bookmarkable and installed PWAs re-open where the user left off.
+✅ **DONE** (#36) — ids resolve only through `catalog.json`; `#p2p-*` fragments take precedence.
+(The A6 neutral-vocabulary half of issue #36 remains open.)
 
 **A6. Neutral vocabulary.** Present `appId`/`Platform.*` names with `gameId`/`Arcade.*` as aliases;
 add an app-integration doc twin to `GAME_INTEGRATION.md`. Cheap now, expensive after more
@@ -133,6 +135,10 @@ Cheap, high sovereignty value; topics are broker-agnostic so mixed fleets intero
 (`{id,name,subtitle,url,icon,permissions,version}`) rendered into the grid; kills the
 `index.html`/`profile.html`/`sw.js` triplication (the code already counts games generically via
 `data-game-id`). Foundation for forks, remote catalogs, permission sheets, deep links.
+✅ **DONE** (#34) — `catalog.json` + `arcade-catalog.js` render the launcher grid AND
+profile.html's game cards; sw.js derives its game-icon precache from the catalog at install;
+game URLs went root-relative (part of C4's de-brand). A committed fixture catalog also
+unblocked the `--pool` CI gate.
 
 **C3. CI test gate** (also `fleet-hardening` D1, "highest leverage"): a workflow that stages the
 launcher + a fixture app via `dev.sh`, runs `acceptance.mjs` (per-game + `--pool`) and

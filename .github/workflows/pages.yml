@@ -30,7 +30,7 @@ jobs:
           set -e
           for f in arcade-sdk.js arcade-p2p.js arcade-known-peers.js arcade-diag.js \
                    arcade-storage-core.js arcade-storage-bridge.js arcade-save.js \
-                   p2p/*.js tools/*.mjs; do
+                   arcade-catalog.js p2p/*.js tools/*.mjs; do
             echo "checking $f"
             node --check "$f"
           done
@@ -49,11 +49,20 @@ jobs:
       - name: Store/files acceptance (IndexedDB + OPFS)
         run: node tools/store-acceptance.mjs
 
+      - name: SDK helpers acceptance (rng determinism, local-daily rule, share codes)
+        run: node tools/sdk-helpers-acceptance.mjs
+
       - name: Storage-bridge acceptance (opaque-frame boundary + bridge round-trips)
         run: node tools/bridge-acceptance.mjs
 
       - name: Export/import roundtrip (store/files in save bundle; P2P excluded)
         run: node tools/export-roundtrip-acceptance.mjs
+
+      - name: Catalog acceptance (grid + profile render from catalog.json)
+        run: node tools/catalog-acceptance.mjs
+
+      - name: Launcher pool acceptance (bounded LRU iframe pool, CI fixture catalog)
+        run: node tools/acceptance.mjs --pool --serve --catalog tools/fixtures/ci-catalog.json
 
       - name: P2P acceptance (real WebRTC, self-contained)
         # Real-WebRTC negotiation is timing-sensitive under headless CI; retry a
@@ -96,14 +105,12 @@ jobs:
           echo "p2p-reconnect failed after 3 attempts"
           exit 1
 
-      # NOTE: the full per-game §13 acceptance (tools/acceptance.mjs) and the
-      # --pool test need a launcher staged with catalog-registered games, which
-      # a bare checkout doesn't have. Wire them in here once a committed
-      # acceptance fixture is registered in the catalog (tracked in issue #40 /
-      # the starter-template work). Run locally meanwhile:
+      # NOTE: the full per-game §13 acceptance (tools/acceptance.mjs) still
+      # needs a real staged game (own SW, state writes, etc.) — wire it in once
+      # the starter-template fixture exists (issue #40). Run locally meanwhile:
       #   ./dev.sh ../si-syn ../hecknsic ../pi-game
       #   npm run acceptance -- http://127.0.0.1:4791/si-syn/
-      #   npm run acceptance -- --pool http://127.0.0.1:4791/
+      # (--pool runs above against the committed CI fixture catalog.)
 
   deploy:
     needs: test

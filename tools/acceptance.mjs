@@ -5,14 +5,21 @@
 //
 //   node tools/acceptance.mjs http://127.0.0.1:4791/si-syn/
 //   node tools/acceptance.mjs --pool http://127.0.0.1:4791/
+//   node tools/acceptance.mjs --pool --serve --catalog tools/fixtures/ci-catalog.json
 //
 // Per-game mode (default): GAME_INTEGRATION §13 checks against the given game.
 // --pool mode: launcher-only test of the bounded LRU iframe pool (issue #7).
-//   Requires at least 3 games staged (e.g. `./dev.sh ../si-syn ../hecknsic ../pi-game`).
+//   Requires at least 3 games in the served catalog (e.g. `./dev.sh ../si-syn
+//   ../hecknsic ../pi-game`, or --serve with the committed CI fixture catalog).
 //
-// Assumes the URL is already reachable — typically by running `./dev.sh
-// ../<game-repo> [...]` in another shell. The launcher must be mounted at
+// Without --serve, assumes the URL is already reachable — typically by running
+// `./dev.sh ../<game-repo> [...]` in another shell, with the launcher at
 // <origin>/ and (for per-game mode) the game at <origin>/<gameId>/.
+//
+// --serve: spin up a hermetic static server over the repo root (no dev.sh
+//   needed). --port <n> picks the port (default 4799). --catalog <path>
+//   serves that file at /catalog.json, so the launcher grid renders committed
+//   fixture games — this is how CI runs --pool on a bare checkout.
 //
 // Setup (once):
 //   npm install
@@ -22,14 +29,46 @@
 
 import { chromium } from 'playwright';
 import { readFile } from 'node:fs/promises';
+import http from 'node:http';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const argv = process.argv.slice(2);
-const poolMode = argv[0] === '--pool';
-const url = poolMode ? argv[1] : argv[0];
+let poolMode = false, serve = false, port = 4799, catalogOverride = null;
+const positional = [];
+for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--pool') poolMode = true;
+    else if (argv[i] === '--serve') serve = true;
+    else if (argv[i] === '--port') port = parseInt(argv[++i], 10);
+    else if (argv[i] === '--catalog') catalogOverride = argv[++i];
+    else positional.push(argv[i]);
+}
+const url = positional[0] || (serve ? `http://127.0.0.1:${port}/` : null);
 if (!url) {
     console.error('usage: node tools/acceptance.mjs <game-url>');
     console.error('       node tools/acceptance.mjs --pool <launcher-url>');
+    console.error('       node tools/acceptance.mjs --pool --serve [--port <n>] [--catalog <path>]');
     process.exit(2);
+}
+
+let server = null;
+if (serve) {
+    const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.json': 'application/json', '.css': 'text/css', '.png': 'image/png' };
+    server = http.createServer(async (req, res) => {
+        try {
+            let p = decodeURIComponent(req.url.split('?')[0]);
+            if (p.endsWith('/')) p += 'index.html';
+            let file = path.join(ROOT, p);
+            if (p === '/catalog.json' && catalogOverride) file = path.resolve(ROOT, catalogOverride);
+            if (!file.startsWith(ROOT)) { res.writeHead(403).end(); return; }
+            const body = await readFile(file);
+            res.writeHead(200, { 'content-type': MIME[path.extname(file)] || 'application/octet-stream' });
+            res.end(body);
+        } catch { res.writeHead(404).end('not found'); }
+    });
+    await new Promise((r) => server.listen(port, '127.0.0.1', r));
 }
 
 let parsed;
@@ -48,6 +87,21 @@ const checks = [];
 const record = (n, name, ok, detail) => checks.push({ n, name, ok, detail: detail || '' });
 
 const browser = await chromium.launch({ headless: true });
+
+// Game frames are sandboxed WITHOUT allow-same-origin (opaque origin), so
+// page-context probes into f.contentWindow.* throw SecurityError. Playwright
+// frame handles evaluate INSIDE the frame via CDP regardless of origin — poll
+// for the frame by URL prefix (skipping the main frame: #app= deep links put
+// the gameId into the launcher URL too).
+async function frameFor(page, urlPrefix, timeoutMs = 10_000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        const f = page.frames().find((fr) => fr !== page.mainFrame() && fr.url().startsWith(urlPrefix));
+        if (f) return f;
+        await new Promise((r) => setTimeout(r, 100));
+    }
+    return null;
+}
 
 try {
     if (poolMode) {
@@ -113,6 +167,8 @@ async function runPerGame() {
         page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
 
         await page.goto(launcherUrl, { waitUntil: 'load', timeout: 10_000 });
+        // The grid is fetch-rendered from catalog.json — wait for it.
+        await page.waitForSelector('.launcher-btn[data-game-id]', { timeout: 10_000 }).catch(() => {});
 
         const btnSel = `.launcher-btn[data-game-id="${gameId}"]`;
         if (!(await page.$(btnSel))) {
@@ -124,15 +180,12 @@ async function runPerGame() {
 
         await page.click(btnSel);
 
-        // Wait for the iframe to be created and the SDK to be present inside.
-        const ready = await page
-            .waitForFunction((gid) => {
-                const f = document.querySelector(`iframe[data-game-id="${gid}"]`);
-                return !!(f && f.contentWindow && f.contentWindow.Arcade?.context);
-            }, gameId, { timeout: 10_000 })
-            .catch(() => null);
-
-        const gameFrame = page.frames().find((f) => f.url().startsWith(gameUrl));
+        // Wait for the frame and the SDK inside it (frame handle — the frame
+        // is opaque-origin, so contentWindow probes from the page throw).
+        const gameFrame = await frameFor(page, gameUrl);
+        const ready = gameFrame && await gameFrame
+            .waitForFunction(() => !!(window.Arcade && window.Arcade.context), null, { timeout: 10_000 })
+            .then(() => true).catch(() => false);
 
         if (!ready || !gameFrame) {
             record(2, 'framed=true after launching from launcher', false,
@@ -281,6 +334,8 @@ async function runPoolMode() {
 
     try {
         await page.goto(launcherUrl, { waitUntil: 'load', timeout: 10_000 });
+        // The grid is fetch-rendered from catalog.json — wait for it.
+        await page.waitForSelector('.launcher-btn[data-game-id]', { timeout: 10_000 });
     } catch (e) {
         record(1, 'launcher loads', false, `goto failed: ${e.message}`);
         await ctx.close();
@@ -311,6 +366,10 @@ async function runPoolMode() {
     const [a, b, c] = games;
 
     async function poolSnapshot() {
+        // Evicted frames stay in the DOM for RETIRE_GRACE_MS (250 ms, #41's
+        // suspend-flush window) before teardown — settle past the grace so the
+        // snapshot reflects the pool, not frames mid-retirement.
+        await page.waitForTimeout(400);
         return page.evaluate(() => {
             const ids = [...document.querySelectorAll('#iframe-host iframe')]
                 .map((f) => f.dataset.gameId);
@@ -323,13 +382,13 @@ async function runPoolMode() {
         await page.waitForTimeout(50);
         await page.click(`.launcher-btn[data-game-id="${g.gameId}"]`);
         // Wait for the SDK in the iframe to come up so we know it's a real,
-        // settled launch (not just an attached <iframe>).
-        await page
-            .waitForFunction((gid) => {
-                const f = document.querySelector(`iframe[data-game-id="${gid}"]`);
-                return !!(f && f.contentWindow && f.contentWindow.Arcade?.context);
-            }, g.gameId, { timeout: 10_000 })
-            .catch(() => {});
+        // settled launch (not just an attached <iframe>). Frame handle, not a
+        // page-context contentWindow probe — the frame is opaque-origin.
+        const fr = await frameFor(page, new URL(g.href, origin).href);
+        if (fr) {
+            await fr.waitForFunction(() => !!(window.Arcade && window.Arcade.context), null, { timeout: 10_000 })
+                .catch(() => {});
+        }
         await page.waitForTimeout(200);
     }
 
@@ -445,19 +504,20 @@ async function runPoolMode() {
     // Pick an evicted game (not the one that survived the trim) to relaunch.
     const evicted = [a, b, c].find((g) => g.gameId !== trimmedTo);
     await page.click(`.launcher-btn[data-game-id="${evicted.gameId}"]`);
-    const reloaded = await page
+    // Real load, proven in two halves: page-side, the iframe element points at
+    // the game URL (src is a parent-document attribute — readable regardless
+    // of frame origin, unlike contentWindow.document, which the opaque-origin
+    // sandbox blocks); frame-side, the document completed and the SDK booted.
+    const srcOk = await page
         .waitForFunction((gid) => {
             const f = document.querySelector(`iframe[data-game-id="${gid}"]`);
-            if (!f) return false;
-            // Real load: iframe is in the DOM, points at the game URL (not
-            // about:blank), and its document has rendered something.
-            try {
-                const doc = f.contentWindow?.document;
-                return f.src && !f.src.endsWith('about:blank') &&
-                    doc?.readyState === 'complete' &&
-                    (doc?.body?.children?.length || 0) > 0;
-            } catch (e) { return false; }
+            return !!(f && f.src && !f.src.endsWith('about:blank'));
         }, evicted.gameId, { timeout: 10_000 })
+        .then(() => true).catch(() => false);
+    const evictedFrame = srcOk ? await frameFor(page, new URL(evicted.href, origin).href) : null;
+    const reloaded = !!evictedFrame && await evictedFrame
+        .waitForFunction(() => document.readyState === 'complete' && !!(window.Arcade && window.Arcade.context),
+            null, { timeout: 10_000 })
         .then(() => true).catch(() => false);
     record(12, 'evicted-by-cap-decrease game reloads on relaunch',
         reloaded, `relaunched=${evicted.gameId}, trimmedTo=${trimmedTo}`);
@@ -481,5 +541,6 @@ async function printAndExit() {
     }
     console.log(`\n ${pass} passed, ${fail} failed`);
     await browser.close().catch(() => {});
+    if (server) server.close();
     process.exit(fail === 0 ? 0 : 1);
 }

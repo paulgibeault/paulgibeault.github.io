@@ -497,10 +497,11 @@
             return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
         };
     }
-    function makeSeededRandom(seed) {
-        var s = (typeof seed === 'number' && isFinite(seed)) ? (seed >>> 0)
+    function coerceSeedU32(seed) {
+        return (typeof seed === 'number' && isFinite(seed)) ? (seed >>> 0)
             : hashStringToU32(String(seed == null ? '' : seed));
-        var next = mulberry32(s);
+    }
+    function attachRngHelpers(next) {
         // Integer in [min, max] inclusive.
         next.int = function (min, max) { return min + Math.floor(next() * (max - min + 1)); };
         next.pick = function (arr) { return arr[Math.floor(next() * arr.length)]; };
@@ -514,6 +515,94 @@
         };
         return next;
     }
+    function makeSeededRandom(seed) {
+        return attachRngHelpers(mulberry32(coerceSeedU32(seed)));
+    }
+    // Arcade.rng(seed) — mulberry32 whose ENTIRE generator state is one u32,
+    // so getState()/setState() make mid-game persistence trivial (save the
+    // number with your game state, restore it, and the sequence continues
+    // exactly where it left off). Same helpers as random.seeded.
+    function makeStatefulRng(seed) {
+        var a = coerceSeedU32(seed);
+        var next = function () {
+            a = (a + 0x6D2B79F5) | 0;
+            var t = Math.imul(a ^ (a >>> 15), 1 | a);
+            t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+        attachRngHelpers(next);
+        next.getState = function () { return a >>> 0; };
+        next.setState = function (s) {
+            if (typeof s !== 'number' || !isFinite(s)) return false;
+            a = s >>> 0;
+            return true;
+        };
+        return next;
+    }
+    var rngApi = makeStatefulRng;
+    // FNV-1a → u32. Stable across devices — the seed derivation for anything
+    // string-shaped (share codes, room names, dates).
+    rngApi.hash = hashStringToU32;
+
+    // Arcade.daily — ONE canonical "today" so every game's daily puzzle rolls
+    // at the same moment on a given device. The platform rule is the
+    // DEVICE-LOCAL calendar date: dailies roll at the player's midnight (the
+    // Wordle convention), and no server or global leaderboard needs a single
+    // worldwide instant — scores are local/P2P. NEVER use toISOString here
+    // (that's UTC — the exact divergence this helper exists to kill).
+    var dailyApi = {
+        // YYYY-MM-DD for the device-local calendar date (or a given Date).
+        dateStr: function (d) {
+            d = d instanceof Date ? d : new Date();
+            var p = function (n) { return (n < 10 ? '0' : '') + n; };
+            return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+        },
+        // Deterministic daily generator — distinct per game (seeded with the
+        // gameId, so two games never share a sequence) and per optional salt
+        // (multiple independent streams within one game). Before Arcade.init
+        // the gameId is empty, so call this after init.
+        seed: function (salt) {
+            return makeStatefulRng(hashStringToU32(
+                String(gameId || '') + '|' + dailyApi.dateStr() + '|' + String(salt == null ? '' : salt)));
+        }
+    };
+
+    // Arcade.share — versioned share codes (base64url over a {v, d} JSON
+    // envelope). encode never produces characters that need URL escaping;
+    // decode is VALIDATE-ONLY and returns null on any garbage (wrong type,
+    // oversize, bad charset, bad base64, bad JSON, bad envelope) — codes
+    // cross devices, so decode must never throw and never let a crafted code
+    // smuggle prototype-polluting keys into the parsed object.
+    var shareApi = {
+        encode: function (obj, opts) {
+            var v = (opts && typeof opts.v === 'number' && isFinite(opts.v)) ? (opts.v >>> 0) : 1;
+            var json = JSON.stringify({ v: v, d: obj === undefined ? null : obj });
+            var bytes = new TextEncoder().encode(json);
+            var bin = '';
+            for (var i = 0; i < bytes.length; i += 0x8000) {
+                bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+            }
+            return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        },
+        decode: function (code) {
+            if (typeof code !== 'string' || !code || code.length > 8192) return null;
+            if (!/^[A-Za-z0-9_-]+$/.test(code)) return null;
+            try {
+                var b64 = code.replace(/-/g, '+').replace(/_/g, '/');
+                while (b64.length % 4) b64 += '=';
+                var bin = atob(b64);
+                var bytes = new Uint8Array(bin.length);
+                for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                var env = JSON.parse(new TextDecoder().decode(bytes), function (k, v) {
+                    if (k === '__proto__' || k === 'constructor' || k === 'prototype') return undefined;
+                    return v;
+                });
+                if (!env || typeof env !== 'object' || Array.isArray(env)
+                    || typeof env.v !== 'number' || !('d' in env)) return null;
+                return { v: env.v >>> 0, data: env.d };
+            } catch (e) { return null; }
+        }
+    };
 
     function logListenerError(e) {
         // Keep listener isolation (one bad handler must not break the rest) but
@@ -2512,7 +2601,12 @@
         // devices seed from the same value to produce identical sequences:
         //   const rng = Arcade.random.seeded(gameCode);
         //   rng() → [0,1)   rng.int(1,6)   rng.pick(arr)   rng.shuffle(arr)
-        random: { seeded: makeSeededRandom },
+        random: { seeded: makeSeededRandom }, // legacy alias — prefer Arcade.rng
+        // Determinism & sharing helpers (#37). Feature-detect with
+        // `typeof Arcade.rng === 'function'` — all purely local, no caps/wire.
+        rng: rngApi,     // stateful mulberry32 (.int/.pick/.shuffle/.getState/.setState); rng.hash = FNV-1a
+        daily: dailyApi, // dateStr() = device-LOCAL YYYY-MM-DD (the platform rule); seed(salt) per-game daily rng
+        share: shareApi, // versioned base64url codes; decode validates, returns null on any garbage
         loop: function (fn) { ensureGameId(); return createLoop(fn); },
         onSuspend: makeSubscriber(listeners.suspend),
         onResume: makeSubscriber(listeners.resume),

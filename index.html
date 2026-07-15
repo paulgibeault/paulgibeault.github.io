@@ -399,60 +399,10 @@
     </header>
 
     <!-- ========== GAME LAUNCHER ========== -->
-    <!-- Game list is mirrored in profile.html (#games section). Update both when adding games. -->
+    <!-- The game grid renders from /catalog.json (see the CATALOG module block
+         near the bottom and arcade-catalog.js). Add games there, not here. -->
     <div id="view-launcher">
         <div class="launcher-grid" id="launcher-grid-container">
-            <a href="https://paulgibeault.github.io/moon-lit/" class="launcher-btn spotlight-card" data-game-id="moon-lit" style="animation-delay: 0.0s">
-                <div class="launcher-btn__image-wrap">
-                    <img class="launcher-btn__image" src="images/moon-lit.png" alt="Moon Lit">
-                </div>
-                <div class="launcher-btn__body">
-                    <h3 class="launcher-btn__name">Moon Lit</h3>
-                    <p class="launcher-btn__subtitle">Lantern matching</p>
-                </div>
-            </a>
-            <a href="https://paulgibeault.github.io/pi-game/" class="launcher-btn" data-game-id="pi-game" style="animation-delay: 0.1s">
-                <div class="launcher-btn__image-wrap"><img class="launcher-btn__image" src="images/pi-game.png" alt="Pi Game"></div>
-                <div class="launcher-btn__body">
-                    <h3 class="launcher-btn__name">Pi Game</h3>
-                    <p class="launcher-btn__subtitle">Memorization</p>
-                </div>
-            </a>
-            <a href="https://paulgibeault.github.io/si-syn/" class="launcher-btn" data-game-id="si-syn" style="animation-delay: 0.2s">
-                <div class="launcher-btn__image-wrap"><img class="launcher-btn__image" src="images/si-syn.png" alt="Silicon Syndicate"></div>
-                <div class="launcher-btn__body">
-                    <h3 class="launcher-btn__name">Si Syndicate</h3>
-                    <p class="launcher-btn__subtitle">Assembly Logic</p>
-                </div>
-            </a>
-            <a href="https://paulgibeault.github.io/hecknsic/" class="launcher-btn" data-game-id="hecknsic" style="animation-delay: 0.3s">
-                <div class="launcher-btn__image-wrap"><img class="launcher-btn__image" src="images/hecknsic.png" alt="HecknSic"></div>
-                <div class="launcher-btn__body">
-                    <h3 class="launcher-btn__name">HecknSic</h3>
-                    <p class="launcher-btn__subtitle">Hex Puzzle</p>
-                </div>
-            </a>
-            <a href="https://paulgibeault.github.io/cozy-solitaire/" class="launcher-btn" data-game-id="cozy-solitaire" style="animation-delay: 0.4s">
-                <div class="launcher-btn__image-wrap"><img class="launcher-btn__image" src="images/cozy-solitaire.png" alt="Cozy Solitaire"></div>
-                <div class="launcher-btn__body">
-                    <h3 class="launcher-btn__name">Solitaire</h3>
-                    <p class="launcher-btn__subtitle">Card Games</p>
-                </div>
-            </a>
-            <a href="https://paulgibeault.github.io/sowduku/" class="launcher-btn" data-game-id="sowduku" style="animation-delay: 0.5s">
-                <div class="launcher-btn__image-wrap"><img class="launcher-btn__image" src="images/sowduku.png" alt="Sowdoku"></div>
-                <div class="launcher-btn__body">
-                    <h3 class="launcher-btn__name">Sowdoku</h3>
-                    <p class="launcher-btn__subtitle">Cozy Logic Puzzle</p>
-                </div>
-            </a>
-            <a href="https://paulgibeault.github.io/p2p-chat/" class="launcher-btn" data-game-id="p2p-chat" style="animation-delay: 0.6s">
-                <div class="launcher-btn__image-wrap"><img class="launcher-btn__image" src="images/p2p-chat.png" alt="P2P Chat"></div>
-                <div class="launcher-btn__body">
-                    <h3 class="launcher-btn__name">P2P Chat</h3>
-                    <p class="launcher-btn__subtitle">Multiplayer Messaging</p>
-                </div>
-            </a>
         </div>
     </div>
 
@@ -532,6 +482,10 @@
     window.__arcade = {
         // fontControl
         getFontScale: null,
+        // catalog module block (bottom of page)
+        catalog: null,
+        // poolCapControl — re-clamped once the catalog renders (gameCount source)
+        setGameCount: null,
         // knownPeers module (bottom of page)
         renderKnownPeers: null,
         renamePeer: null,
@@ -656,7 +610,11 @@
         const input = document.getElementById('menu-pool-cap-input');
         if (!input) return;
 
-        const gameCount = document.querySelectorAll('.launcher-btn[data-game-id]').length || 1;
+        // 1 until the catalog renders (the grid is fetch-built); the catalog
+        // module calls setGameCount with the real count. read() clamps for
+        // DISPLAY only — nothing writes storage until a user 'change', so a
+        // stored cap larger than the pre-catalog placeholder is never lost.
+        let gameCount = document.querySelectorAll('.launcher-btn[data-game-id]').length || 1;
         input.max = String(gameCount);
         input.title = `1–${gameCount}`;
 
@@ -689,6 +647,13 @@
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
         });
+        window.__arcade.setGameCount = function (n) {
+            if (!isFinite(n) || n < 1) return;
+            gameCount = Math.floor(n);
+            input.max = String(gameCount);
+            input.title = `1–${gameCount}`;
+            input.value = String(read());
+        };
     })();
 
     // ==========================================
@@ -792,7 +757,7 @@
             catch (e) { return false; }
         };
 
-        const launcherBtns = document.querySelectorAll('.launcher-btn');
+        const launcherGrid = document.getElementById('launcher-grid-container');
         const iframeHost = document.getElementById('iframe-host');
         const topbarTitle = document.getElementById('game-topbar-title');
         const btnSave = document.getElementById('btn-save');
@@ -892,6 +857,18 @@
             return entry;
         }
 
+        // Deep links (#36): keep the URL fragment mirroring the active game so
+        // a copied/bookmarked URL reopens straight into it. replaceState, not
+        // location.hash — no history spam, no hashchange feedback loop. The
+        // boot-time parse lives in the catalog module block (it needs the
+        // id → url map, and only ids from the catalog are ever honored).
+        function setAppFragment(gameId) {
+            try {
+                const base = location.pathname + location.search;
+                history.replaceState(null, '', gameId ? base + '#app=' + encodeURIComponent(gameId) : base);
+            } catch (e) {}
+        }
+
         function showGame(gameId, src, name) {
             const entry = ensureIframe(gameId, src, name);
             // Promote to MRU by re-inserting at the end of the Map's order.
@@ -921,6 +898,7 @@
 
             // Defer focus so the iframe receives keyboard input.
             setTimeout(() => { try { entry.iframe.focus(); } catch (e) {} }, 0);
+            setAppFragment(gameId);
         }
 
         function hideGameView() {
@@ -934,6 +912,7 @@
             if (previousGameId) {
                 postToIframe(previousGameId, { type: 'arcade:lifecycle.suspend' });
             }
+            setAppFragment(null);
         }
 
         // ---- game loading / error overlay (G-ux-1) ----
@@ -1283,15 +1262,19 @@
             if (e.persisted) tryResumeOnLaunch();
         });
 
-        launcherBtns.forEach((btn) => {
-            btn.addEventListener('click', (e) => {
-                e.preventDefault();
-                const gameId = btn.dataset.gameId;
-                const href = btn.getAttribute('href');
-                const name = btn.querySelector('.launcher-btn__name').textContent.trim();
-                if (!gameId || !href) return;
-                showGame(gameId, href, name);
-            });
+        // Event delegation: the grid is fetch-rendered from catalog.json after
+        // this classic script runs, so per-button listeners can't be attached
+        // at parse time. One listener on the container covers every button,
+        // whenever it appears.
+        launcherGrid.addEventListener('click', (e) => {
+            const btn = e.target.closest('.launcher-btn');
+            if (!btn || !btn.dataset.gameId) return;
+            e.preventDefault();
+            const href = btn.getAttribute('href');
+            const nameEl = btn.querySelector('.launcher-btn__name');
+            const name = nameEl ? nameEl.textContent.trim() : '';
+            if (!href) return;
+            showGame(btn.dataset.gameId, href, name);
         });
 
         // ---- postMessage protocol ----
@@ -1728,6 +1711,53 @@
             hideInstallUI();
         });
     })();
+</script>
+
+<script type="module">
+    // ==========================================
+    // CATALOG — data-driven launcher grid (issue #34). catalog.json is the one
+    // authoritative game list; this renders it into #launcher-grid-container.
+    // Runs after the classic IIFEs built window.__arcade; click handling is
+    // event delegation on the grid container, so render timing is decoupled
+    // from wiring. On failure: an error card with Retry (the launcher is
+    // useless without its grid — fail loudly, not blank).
+    // ==========================================
+    import { loadCatalog, renderLauncherGrid, renderCatalogError, gameHref } from './arcade-catalog.js';
+
+    const gridContainer = document.getElementById('launcher-grid-container');
+
+    // Deep links (#36): `#app=<id>` boots straight into a game. Resolved ONLY
+    // through the catalog — the fragment names an id, never a URL, so nothing
+    // attacker-shaped can pick the iframe src. #p2p-(offer|answer) fragments
+    // own the boot fragment channel (see tryResumeOnLaunch's sibling check)
+    // and the anchored regex can't match them anyway.
+    function openDeepLink(games) {
+        const m = /^#app=([A-Za-z0-9_-]+)$/.exec(location.hash);
+        if (!m) return;
+        const game = games.find((g) => g.id === decodeURIComponent(m[1]));
+        if (game) {
+            window.__arcade.showGame(game.id, gameHref(game), game.name);
+        } else {
+            if (window.__arcade.showToast) window.__arcade.showToast('That game link doesn’t match anything here.');
+            try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
+        }
+    }
+
+    async function bootCatalog() {
+        try {
+            const games = await loadCatalog();
+            renderLauncherGrid(gridContainer, games);
+            if (window.__arcade.setGameCount) window.__arcade.setGameCount(games.length);
+            window.__arcade.catalog = games;
+            openDeepLink(games);
+        } catch (e) {
+            console.error('[arcade] catalog load failed', e);
+            renderCatalogError(gridContainer, bootCatalog);
+        }
+    }
+    // No top-level await: that would hold up the storage-modules block below
+    // (inline modules execute in document order) for zero benefit.
+    bootCatalog();
 </script>
 
 <script type="module">
