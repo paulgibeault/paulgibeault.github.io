@@ -1,0 +1,24 @@
+{
+  "catalogVersion": 1,
+  "games": [
+    {
+      "id": "store-test",
+      "name": "Store Test",
+      "subtitle": "CI fixture",
+      "url": "/tools/fixtures/store-test/",
+      "spotlight": true
+    },
+    {
+      "id": "bridge-test",
+      "name": "Bridge Test",
+      "subtitle": "CI fixture",
+      "url": "/tools/fixtures/bridge-test/"
+    },
+    {
+      "id": "p2p-test-game",
+      "name": "P2P Test",
+      "subtitle": "CI fixture",
+      "url": "/tools/fixtures/p2p-test-game/"
+    }
+  ]
+}
