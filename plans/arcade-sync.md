@@ -3,6 +3,16 @@
 *Plan authored 2026-07-15 at HEAD `2da52ed`; every file:line anchor below verified against that
 commit. Written to be executed step-by-step (WP1→WP6) with per-step verification — commit per WP.*
 
+> **Implementation status (2026-07-15, branch `arcade-sync-28`):** ✅ ALL WPs landed —
+> WP1 core (95-check `sync-unit`), WP2 SDK, WP3 engine, WP4 envelope/flag/toggle,
+> WP5 acceptance (`tools/sync-acceptance.mjs`, incl. scenario 4b), WP6 chrome/docs.
+> One post-plan fix: WP5's suite caught a WP3 cursor bug — `reconcileDigest`
+> committed the hlcRecv-advanced clock as the per-pair cursor before req'd diffs
+> were applied, swallowing `onConflict` on the sever-then-heal digest path. Fixed
+> with a pending-cursor discipline (park the union-max, commit only when the
+> exchange's need-set drains; drop uncommitted on timeout — a lost diff can cause
+> a spurious later conflict, never a swallowed one). Scenario 4b pins it.
+
 ## Context (verified anchors)
 
 P2P today moves ephemeral game frames only. The launcher-level envelope router lives in

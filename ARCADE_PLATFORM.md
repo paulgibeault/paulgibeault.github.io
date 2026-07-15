@@ -52,6 +52,13 @@ const kv = Arcade.store.open('notes') // per-app KV DB 'arcade.v1.<gameId>.store
 kv.get(k) / set(k, v) / del(k) / keys() / each(fn) / clear()
 Arcade.files.put(name, blob) / get(name) / list() / delete(name)   // blobs (OPFS/IDB)
 
+// SYNC — multi-device replication of opted-in state keys over P2P (LWW; #28)
+Arcade.state.set(key, v, { sync: true })  // sticky per-key opt-in (like exportable)
+Arcade.sync.enable(keys?)             // '*' (no args) or specific keys
+Arcade.sync.disable(keys?)            // stop outbound sync for keys / all
+Arcade.sync.list()                    // current opt-in list
+Arcade.sync.onConflict(fn)            // fn({ key, mine, theirs }) — lost a LWW race
+
 // HTML — escape peer/user text before it reaches innerHTML (stored-XSS guard)
 Arcade.html.escape(str)               // → HTML-escaped string
 Arcade.html`<b>${userText}</b>`       // tagged template auto-escapes interpolations
@@ -292,6 +299,50 @@ The launcher menu's Network section is a single "Multiplayer" item (`#connection
 - **↺ Start over**: calls `ArcadeP2P.startOverKnownPeer(deviceId)` — drops any live link, forgets the stashed session (`PeerManager.forgetSession`, so the next connection can't try to resume old sequence counters), and forgets the rendezvous pairing secret entirely (`RendezvousManager.disablePair`), flipping auto-reconnect off. The saved name and connection history stay; only **✕ Delete** forgets the device outright. Use this when a connection is stuck in a bad state and Call doesn't help.
 - **🔧 Connection log** (dialog footer): opens a dedicated overlay with a read-only, live-tailing view of the session-long connection log (`arcade-diag.js` ring buffer). Every connection-related layer writes into it from the moment the page loads — the launch resume decision (`boot`), bridge status transitions and user actions (`bridge`), transport diagnostics (`p2p`), rendezvous episode lifecycle including publish/receive/decrypt outcomes (`rdv`), and MQTT carrier socket state (`mqtt`). This exists because the only other diagnostics view lives inside the New-connection ceremony, and opening that to *read* the log would itself start a hosting attempt and pollute the record; this view starts nothing. "📋 Copy to clipboard" puts a timestamped transcript (with UA header) on the clipboard (clipboard API → hidden-textarea `execCommand` → prompt fallback chain, for iOS/WebView quirks), and a "📤 Share…" button rides the native share sheet where `navigator.share` exists. Also reachable from any console as `window.__arcadeDiag`.
 
+### Multi-device state sync — Arcade.sync (IMPLEMENTED, #28)
+
+Opted-in `Arcade.state` keys replicate between paired devices over the existing
+data channel — per-key **last-writer-wins** ordered by hybrid logical clocks
+(monotonic per device across wall-clock regressions; deviceId breaks ties). The
+engine lives launcher-side (`arcade-sync.js`, `initSyncEngine(host)`), fed by
+the storage-bridge write hook; games only see ordinary `arcade:state.changed`
+events (plus an informational `arcade:sync.conflict` when a concurrent local
+edit lost the race). Pure clock/plan/validate logic is in `arcade-sync-core.js`
+(Node-tested by `tools/sync-unit.mjs`); key eligibility (`syncEligibleKey`)
+lives with the other storage allowlists in `arcade-storage-core.js`.
+
+- **Wire shape:** a launcher-level envelope `{ arcade:1, kind:'sync', v:1, op }`
+  beside `kind:'identity'` — invisible to the transport and to games; older
+  launchers drop it harmlessly (no `gameId`). Three ops: `digest` (per-key
+  `[key, hlc, hash]` inventory, chunked ≤150 entries / ≤96 KB, `part/parts`
+  bounded ≤64 with a 30 s reassembly timeout), `req` (keys wanted), `diff`
+  (values / `del:1` tombstones). A digest exchange runs on every identity
+  announce for an enabled pair; live single-entry diffs ship as writes happen.
+- **Trust posture:** accepted only from a DIRECT link (relayed frames refused —
+  the transport's forgery-proof `relayed` stamp) with a completed identity
+  binding, from a pair the user enabled on BOTH devices (🔄 toggle per saved
+  connection in the Multiplayer dialog), and never while the peer's fingerprint
+  is suspect. Even then every inbound field is validated before touching
+  storage: a hostile-but-paired device can only write *eligible own-app keys*
+  (`syncEligibleKey`: never `_meta.*`, `global.*`, sidecars, `.ls.`, dunder
+  segments) with values ≤64 KB — the same boundary discipline as the storage
+  bridge. Enabling sync for a pair intentionally grants that device bounded
+  write authority over app state; that is the feature.
+- **Durability:** HLC clock, per-key records, tombstones (30-day TTL, capped
+  per app), and per-pair replication cursors persist in the device-local
+  `arcade-sync` IndexedDB — sync converges across restarts, and deletes don't
+  resurrect. A save-file import re-stamps imported synced keys as fresh local
+  edits, so imports win over older remote state on the next exchange.
+- **Not in v1:** `Arcade.store`/`files` blobs, `global.*` settings, values
+  >64 KB, and any merge semantics beyond LWW (concurrent edits surface via
+  `Arcade.sync.onConflict` on the losing side). Cross-device wall-clock skew
+  biases ties toward the faster clock — acceptable for save-style data.
+
+Verified by `tools/sync-acceptance.mjs` (two launchers, real WebRTC: live
+replication, converge-after-reconnect, restart survival, conflict surfacing,
+exclusion + hostile-frame refusal, tombstones) plus the Node unit matrix in
+`tools/sync-unit.mjs`; both in CI.
+
 **Bfcache resume gap:** a page the browser restores from its back-forward cache (e.g. Back after navigating to a different page) doesn't always re-run index.html's startup script — it resumes the frozen JS heap instead. Without a second trigger, a connection killed by that navigation would sit dead until the user reconnects by hand, since the startup-only `resumeRendezvous()` check never got a chance to run again. index.html listens for `pageshow` and re-runs the same freshness check whenever `event.persisted` is true.
 
 ---
@@ -305,6 +356,7 @@ The launcher menu's Network section is a single "Multiplayer" item (`#connection
 | Launcher meta  | `arcade.v1._meta.<key>`                 | Launcher only                               |
 | Per-game KV    | IndexedDB `arcade.v1.<gameId>.store.<name>` | `Arcade.store` — large/structured data  |
 | Per-game blobs | OPFS dir `arcade.v1.<gameId>` / IDB `arcade.v1.<gameId>.files` | `Arcade.files` — binary  |
+| Sync metadata  | IndexedDB `arcade-sync` (HLC clock, per-key records, per-pair cursors) | Launcher only (`arcade-sync.js`); device-local, never exported — the name doesn't match the `arcade.v1.*` prefix, same mechanism that keeps `qrp2p-*` out |
 
 The `arcade.v1.` prefix is the **only** thing the export/import logic trusts. Keys/databases without it are ignored on export and rejected on import (prevents poisoning unrelated storage on the origin). The async stores/blobs ride the save bundle too (schema v2); the P2P key stores (`qrp2p-*`) never match the prefix and are never exported.
 
