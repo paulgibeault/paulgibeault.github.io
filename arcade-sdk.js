@@ -35,10 +35,17 @@
  *   // Storage — sync, JSON-encoded under arcade.v1.<gameId>.<key>
  *   Arcade.state.get / set / remove
  *   Arcade.state.set(key, v, { exportable: false })  keep out of save files
+ *   Arcade.state.set(key, v, { sync: true })      opt this key into Arcade.sync
  *   Arcade.state.getOrInit(key, defaults)         deep-merge load
  *   Arcade.state.migrate(version, fn)             run-once bootstrap
  *   Arcade.state.adopt(legacyKey, newKey?, opts?) one-line legacy-key move
  *   Arcade.state.onChange(key, fn)                storage events + replace
+ *
+ *   // Multi-device state replication over P2P, LWW (#28) — opt-in per key
+ *   Arcade.sync.enable(keys?)                     '*' (all) or ['k1','k2']
+ *   Arcade.sync.disable(keys?)                    stop syncing (outbound)
+ *   Arcade.sync.list()                            current opt-in list
+ *   Arcade.sync.onConflict(fn)                    fn({ key, mine, theirs })
  *
  *   // Cross-game keys under arcade.v1.global.<key>
  *   Arcade.global.get / set / remove / onChange
@@ -193,7 +200,8 @@
         settingsChange: [],
         suspend: [],
         resume: [],
-        framedChange: []
+        framedChange: [],
+        syncConflict: []
     };
 
     // Remote peer roster — seeded from the launcher's welcome, kept fresh by
@@ -1216,6 +1224,13 @@
                     fireKeyChange(data.key, parsed);
                 }
                 break;
+            case 'arcade:sync.conflict':
+                // A concurrent local edit lost LWW to a remote replica write.
+                // Informational; state was already updated by the sync engine.
+                if (typeof data.key === 'string') {
+                    fire(listeners.syncConflict, { key: data.key, mine: data.mine, theirs: data.theirs });
+                }
+                break;
             case 'arcade:state.writeError':
                 // A bridged write failed to persist launcher-side (quota).
                 // Mirrors the synchronous false/onStorageError of direct mode.
@@ -1423,6 +1438,20 @@
             writeJSON(noExportListKey(), list.length ? list : undefined);
         }
     }
+    // Sync opt-in (#28 Arcade.sync): keys written with { sync: true } are
+    // listed (by full localStorage key) in arcade.v1.<gameId>._sync; the
+    // launcher's sync engine only replicates keys on this list (or a list
+    // containing '*' for "sync everything eligible"). Mirrors setKeyExportable
+    // above rather than reusing _noExport — sync is opt-in, exportable is
+    // opt-out, so they're independent sidecars.
+    function syncListKey() { return gameKey('_sync'); }
+    function setKeySyncable(fullKey, on) {
+        var list = readJSON(syncListKey());
+        if (!Array.isArray(list)) list = [];
+        var i = list.indexOf(fullKey);
+        if (on && i === -1 && list.indexOf('*') === -1) { list.push(fullKey); writeJSON(syncListKey(), list); }
+        else if (!on && i !== -1) { list.splice(i, 1); writeJSON(syncListKey(), list.length ? list : undefined); }
+    }
     function runMigration(version, fn) {
         var sentinel = migratedSentinelKey(version);
         if (readJSON(sentinel) === true) return false;
@@ -1455,6 +1484,7 @@
                 if (opts && typeof opts.exportable === 'boolean') {
                     setKeyExportable(k, opts.exportable);
                 }
+                if (opts && typeof opts.sync === 'boolean') setKeySyncable(k, opts.sync);
                 fireKeyChange(k, value);
             }
             return ok; // false on quota failure (Arcade.onStorageError also fires)
@@ -1599,6 +1629,29 @@
             }
             return out;
         }
+    };
+
+    // ─── Sync (Arcade.sync, #28) ────────────────────────────────────
+    // Multi-device state replication over P2P (LWW). The SDK only writes the
+    // per-app _sync opt-in list and exposes the conflict listener here — the
+    // launcher-side sync engine (not yet present) does the actual replication,
+    // so until that lands this is inert: writing the sidecar list has no
+    // other effect.
+    var syncApi = {
+        // enable() → sync every current & future own key ('*'); enable(['k1','k2']) → those keys.
+        enable: function (keys) {
+            ensureGameId();
+            if (keys === undefined) { writeJSON(syncListKey(), ['*']); return; }
+            (Array.isArray(keys) ? keys : [keys]).forEach(function (k) { setKeySyncable(gameKey(String(k)), true); });
+        },
+        disable: function (keys) {
+            ensureGameId();
+            if (keys === undefined) { writeJSON(syncListKey(), undefined); return; }
+            (Array.isArray(keys) ? keys : [keys]).forEach(function (k) { setKeySyncable(gameKey(String(k)), false); });
+        },
+        list: function () { ensureGameId(); var l = readJSON(syncListKey()); return Array.isArray(l) ? l.slice() : []; },
+        // fn({ key, mine, theirs }) — a concurrent local edit lost LWW. Informational; state already updated.
+        onConflict: makeSubscriber(listeners.syncConflict)
     };
 
     // ─── Global (cross-game) ──────────────────────────────────────
@@ -2598,6 +2651,7 @@
         store: storeApi,
         files: filesApi,
         storage: storageApi,
+        sync: syncApi,
         // Deterministic seeded RNG for lockstep/turn-based multiplayer. Both
         // devices seed from the same value to produce identical sequences:
         //   const rng = Arcade.random.seeded(gameCode);
