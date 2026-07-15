@@ -29,6 +29,12 @@ render from it — the old hand-mirrored copies are gone.
 2. Commit the card image at `images/<gameId>.png`.
 3. Bump `CACHE_NAME` in `sw.js` so installed launchers refresh their precache.
 
+**Deep links.** `https://paulgibeault.github.io/#app=<gameId>` boots the
+launcher straight into that game — ids resolve only through `catalog.json`
+(a fragment can never name a URL). The launcher keeps the fragment updated as
+games launch and quit, so the address bar is always shareable. `#p2p-*`
+fragments (invite/reply links) take precedence over `#app=`.
+
 ---
 
 ## 2. Load the SDK

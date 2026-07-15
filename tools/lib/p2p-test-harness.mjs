@@ -225,10 +225,12 @@ export async function startP2PHarness({ port, dropPort }) {
 
     // Poll for a mounted fixture's frame: attachment and URL assignment lag
     // the showGame() call, and a frames() snapshot taken too early returns
-    // undefined on slow CI runners.
+    // undefined on slow CI runners. Skip the main frame — showGame reflects
+    // the gameId into the launcher URL as #app=<id> (deep links), so a bare
+    // includes() would match the launcher page itself.
     async function fixtureFrame(page, needle) {
         for (let i = 0; i < 100; i++) {
-            const f = page.frames().find(fr => fr.url().includes(needle));
+            const f = page.frames().find(fr => fr !== page.mainFrame() && fr.url().includes(needle));
             if (f) return f;
             await new Promise(r => setTimeout(r, 100));
         }

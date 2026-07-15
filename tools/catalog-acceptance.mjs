@@ -93,7 +93,45 @@ try {
         return !!(view && !view.classList.contains('hidden') && frame && frame.src.includes(gid))
     }, expectedGames[0].id, { timeout: 10000 }).then(() => true).catch(() => false);
     check('launcher: delegated click mounts the game view + iframe', launched);
+
+    // ── Deep links (#36) ──
+    const hashAfterLaunch = await page.evaluate(() => location.hash);
+    check('deep links: launch reflects #app=<id> into the URL',
+        hashAfterLaunch === `#app=${expectedGames[0].id}`, hashAfterLaunch);
+    await page.click('#quit-game-btn');
+    const afterQuit = await page.waitForFunction(() =>
+        document.getElementById('view-game').classList.contains('hidden') && location.hash === '',
+        null, { timeout: 5000 }).then(() => true).catch(() => false);
+    check('deep links: quit clears the fragment and returns to the launcher', afterQuit);
     await page.close();
+
+    // Fresh navigation with a fragment boots straight into the game.
+    const deep = await browser.newPage();
+    deep.on('pageerror', e => check('deep links: no page errors', false, e.message));
+    const target = expectedGames[Math.min(1, N - 1)];
+    await deep.goto(`${BASE}/#app=${target.id}`, { waitUntil: 'load' });
+    const deepOpened = await deep.waitForFunction((gid) => {
+        const view = document.getElementById('view-game');
+        const frame = document.querySelector('#iframe-host iframe[title]');
+        return !!(view && !view.classList.contains('hidden') && frame && frame.src.includes(gid));
+    }, target.id, { timeout: 10000 }).then(() => true).catch(() => false);
+    check(`deep links: /#app=${target.id} opens the game directly`, deepOpened);
+    await deep.close();
+
+    // Unknown id: launcher stays up, toast shows, fragment cleared, no errors.
+    const bogus = await browser.newPage();
+    bogus.on('pageerror', e => check('deep links: unknown id — no page errors', false, e.message));
+    await bogus.goto(`${BASE}/#app=not-a-game`, { waitUntil: 'load' });
+    const graceful = await bogus.waitForFunction(() =>
+        location.hash === ''
+        && !document.getElementById('view-game') || document.getElementById('view-game').classList.contains('hidden'),
+        null, { timeout: 10000 }).then(() => true).catch(() => false);
+    const toastShown = await bogus.waitForFunction(() =>
+        (document.getElementById('launcher-toast') || {}).textContent.includes('doesn’t match'),
+        null, { timeout: 5000 }).then(() => true).catch(() => false);
+    check('deep links: unknown id stays on the launcher with the fragment cleared', graceful);
+    check('deep links: unknown id shows a toast', toastShown);
+    await bogus.close();
 
     // ── Profile page (skip under an override catalog whose games carry no profile blocks) ──
     const profileGames = expectedGames.filter(g => g.profile);

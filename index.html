@@ -857,6 +857,18 @@
             return entry;
         }
 
+        // Deep links (#36): keep the URL fragment mirroring the active game so
+        // a copied/bookmarked URL reopens straight into it. replaceState, not
+        // location.hash — no history spam, no hashchange feedback loop. The
+        // boot-time parse lives in the catalog module block (it needs the
+        // id → url map, and only ids from the catalog are ever honored).
+        function setAppFragment(gameId) {
+            try {
+                const base = location.pathname + location.search;
+                history.replaceState(null, '', gameId ? base + '#app=' + encodeURIComponent(gameId) : base);
+            } catch (e) {}
+        }
+
         function showGame(gameId, src, name) {
             const entry = ensureIframe(gameId, src, name);
             // Promote to MRU by re-inserting at the end of the Map's order.
@@ -886,6 +898,7 @@
 
             // Defer focus so the iframe receives keyboard input.
             setTimeout(() => { try { entry.iframe.focus(); } catch (e) {} }, 0);
+            setAppFragment(gameId);
         }
 
         function hideGameView() {
@@ -899,6 +912,7 @@
             if (previousGameId) {
                 postToIframe(previousGameId, { type: 'arcade:lifecycle.suspend' });
             }
+            setAppFragment(null);
         }
 
         // ---- game loading / error overlay (G-ux-1) ----
@@ -1708,15 +1722,34 @@
     // from wiring. On failure: an error card with Retry (the launcher is
     // useless without its grid — fail loudly, not blank).
     // ==========================================
-    import { loadCatalog, renderLauncherGrid, renderCatalogError } from './arcade-catalog.js';
+    import { loadCatalog, renderLauncherGrid, renderCatalogError, gameHref } from './arcade-catalog.js';
 
     const gridContainer = document.getElementById('launcher-grid-container');
+
+    // Deep links (#36): `#app=<id>` boots straight into a game. Resolved ONLY
+    // through the catalog — the fragment names an id, never a URL, so nothing
+    // attacker-shaped can pick the iframe src. #p2p-(offer|answer) fragments
+    // own the boot fragment channel (see tryResumeOnLaunch's sibling check)
+    // and the anchored regex can't match them anyway.
+    function openDeepLink(games) {
+        const m = /^#app=([A-Za-z0-9_-]+)$/.exec(location.hash);
+        if (!m) return;
+        const game = games.find((g) => g.id === decodeURIComponent(m[1]));
+        if (game) {
+            window.__arcade.showGame(game.id, gameHref(game), game.name);
+        } else {
+            if (window.__arcade.showToast) window.__arcade.showToast('That game link doesn’t match anything here.');
+            try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
+        }
+    }
+
     async function bootCatalog() {
         try {
             const games = await loadCatalog();
             renderLauncherGrid(gridContainer, games);
             if (window.__arcade.setGameCount) window.__arcade.setGameCount(games.length);
             window.__arcade.catalog = games;
+            openDeepLink(games);
         } catch (e) {
             console.error('[arcade] catalog load failed', e);
             renderCatalogError(gridContainer, bootCatalog);
