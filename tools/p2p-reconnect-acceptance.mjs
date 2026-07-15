@@ -72,6 +72,39 @@ async function freshPair(tag) {
     return { ctxH, ctxJ, H, J };
 }
 
+// Enables auto-reconnect for EVERY peer a page currently knows (the host knows
+// two; each spoke knows only the host). Waits until at least `expected` peers
+// are bound so the host doesn't pair only its first spoke.
+async function pairAllKnown(page, expected) {
+    await page.waitForFunction((n) => {
+        const raw = localStorage.getItem('arcade.v1._meta.knownPeers');
+        return !!raw && Object.keys(JSON.parse(raw)).length >= n;
+    }, expected, { timeout: 15000 });
+    await page.evaluate(() => {
+        const known = JSON.parse(localStorage.getItem('arcade.v1._meta.knownPeers'));
+        return Promise.all(Object.keys(known).map((d) => window.__arcade.p2p.enableAutoReconnect(d)));
+    });
+}
+
+// Hub + two spokes: one host holding two live links, each spoke paired to it.
+async function freshTriple(tag) {
+    const ctxH = await harness.newDeviceContext();
+    const ctxA = await harness.newDeviceContext();
+    const ctxB = await harness.newDeviceContext();
+    const H = await launcherPage(tag + ':host', ctxH);
+    const A = await launcherPage(tag + ':A', ctxA);
+    const B = await launcherPage(tag + ':B', ctxB);
+    await loadBridge(H); await loadBridge(A); await loadBridge(B);
+    await ceremony(H, A, { waitHost: false });
+    await ceremony(H, B, { waitHost: false });
+    await pairAllKnown(H, 2); await pairAllKnown(A, 1); await pairAllKnown(B, 1);
+    // Both pairs established (the host fires pair-established once per pair).
+    await H.waitForFunction(`window.__rdvEv.filter(e => e === 'pair-established').length >= 2`, null, { timeout: 15000 });
+    await A.waitForFunction(`window.__rdvEv.includes('pair-established')`, null, { timeout: 15000 });
+    await B.waitForFunction(`window.__rdvEv.includes('pair-established')`, null, { timeout: 15000 });
+    return { ctxH, ctxA, ctxB, H, A, B };
+}
+
 const connectedAgain = (page) =>
     page.waitForFunction(`window.__arcade.p2p.status() === 'connected'`, null, { timeout: 60000 })
         .then(() => true).catch(() => false);
@@ -545,6 +578,36 @@ try {
         check('a fresh episode seeded from the record rejects the replayed nonce', rec.seedRejects);
         await s.J.evaluate(() => window.__arcadeRdvSever(false));
         await s.ctxH.close(); await s.ctxJ.close();
+    }
+
+    // 13. MULTI-PAIR CONCURRENT RENDEZVOUS (T-4 / T6): a hub with two spokes,
+    //     both links cut at once, both repairing through the SAME rendezvous
+    //     instance on the host. Proves per-pair episode isolation — two heals
+    //     racing on one node don't clobber each other's records/topics — and
+    //     that the host re-holds BOTH links, not just whichever won.
+    {
+        console.log('\n  [multi-pair concurrent rendezvous heal (hub + two spokes)]');
+        const s = await freshTriple('N2');
+        // Sever every carrier, then cut both host links so both pairs must
+        // repair with no signaling until we restore it.
+        for (const p of [s.H, s.A, s.B]) await p.evaluate(() => window.__arcadeRdvSever(true));
+        await s.H.evaluate(() => {
+            const pm = window.__arcade.p2p._addon().peerNode;
+            Array.from(pm.peers.values()).forEach((p) => { try { p.dataChannel.close(); } catch (e) {} });
+        });
+        const aDown = await s.A.waitForFunction(`window.__arcade.p2p.status() !== 'connected'`, null, { timeout: 30000 }).then(() => true).catch(() => false);
+        const bDown = await s.B.waitForFunction(`window.__arcade.p2p.status() !== 'connected'`, null, { timeout: 30000 }).then(() => true).catch(() => false);
+        check('both spokes dropped after the host cut both links', aDown && bDown);
+        // Restore all carriers → both pairs must heal concurrently.
+        for (const p of [s.H, s.A, s.B]) await p.evaluate(() => window.__arcadeRdvSever(false));
+        check('spoke A healed', await connectedAgain(s.A));
+        check('spoke B healed', await connectedAgain(s.B));
+        const hostHealed = await s.H.waitForFunction(() => {
+            const pm = window.__arcade.p2p._addon().peerNode;
+            return Array.from(pm.peers.values()).filter((p) => p.status === 'connected').length === 2;
+        }, null, { timeout: 60000 }).then(() => true).catch(() => false);
+        check('host re-holds BOTH healed links concurrently (per-pair isolation)', hostHealed);
+        await s.ctxH.close(); await s.ctxA.close(); await s.ctxB.close();
     }
 } catch (e) {
     console.error('\nFATAL:', e.message);

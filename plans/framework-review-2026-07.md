@@ -102,10 +102,18 @@ save-validation unit test):**
   cached `devModeOn`); shipped items ticked in framework-evolution.md /
   implementation-roadmap.md.
 
-**Still open (genuinely deferred):** S-sec-4b→ nothing further; TURN config for
-G-res-1 (#33); the per-game `acceptance.mjs` + `--pool` CI wiring (needs a
-catalog-registered fixture, issue #40); the multi-pair concurrent-rendezvous
-harness scenario (T-4's stretch item).
+**Landed in a fourth pass (2026-07-14, branch `security/issue-21-residuals`):**
+the remaining issue #21 transport residuals — session-resume DTLS-fingerprint
+binding + stash TTL + CSPRNG `generateId`, ack/resync `_clampSeq` bounds (also
+fixing a latent NaN outbox-wipe), a 256 KB relay app-frame cap, the
+`noteRemotePeer` dunder guard, and the wake-probe identity guard. New
+`tools/p2p-core-unit.mjs` (27 no-browser checks, in CI). **T-4's stretch item
+also landed**: the multi-pair concurrent-rendezvous scenario (hub + two spokes
+healing at once) is now scenario 13 in `p2p-reconnect-acceptance.mjs`.
+
+**Still open (genuinely deferred):** TURN config for G-res-1 (#33); the per-game
+`acceptance.mjs` + `--pool` CI wiring (needs a catalog-registered fixture,
+issue #40).
 
 ---
 
