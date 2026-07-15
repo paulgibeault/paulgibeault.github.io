@@ -1,0 +1,120 @@
+{
+  "catalogVersion": 1,
+  "games": [
+    {
+      "id": "moon-lit",
+      "name": "Moon Lit",
+      "subtitle": "Lantern matching",
+      "icon": "images/moon-lit.png",
+      "url": "/moon-lit/",
+      "spotlight": true,
+      "profile": {
+        "subtitle": "Lantern-Festival Bubble Shooter",
+        "alt": "Moon Lit — paper lanterns drifting up through bamboo toward a full moon over a still river",
+        "descLead": "Send paper lanterns up to the trellis.",
+        "descBody": "A boatman launches glowing lanterns into a hex grid; match three or more of a color to clear them and drop the chains hanging beneath. The trellis presses down every six shots — clear it before the lanterns cross the dead-line.",
+        "kicker": "Lantern festival under a moonlit sky.",
+        "tags": ["HTML5 Canvas", "JS", "ES Modules", "PWA"],
+        "codeUrl": "https://github.com/paulgibeault/moon-lit"
+      }
+    },
+    {
+      "id": "pi-game",
+      "name": "Pi Game",
+      "subtitle": "Memorization",
+      "icon": "images/pi-game.png",
+      "url": "/pi-game/",
+      "profile": {
+        "subtitle": "Memorization Gauntlet",
+        "alt": "Pi Game — cascading digits of pi in a retro arcade style",
+        "descLead": "One wrong digit and it's over.",
+        "descBody": "Tap digits of Pi on a number pad — every correct digit extends your streak. A single mistake ends it. Synthesized audio rises in pitch as you climb, particles explode across the screen, and the pressure never stops. 4 visual themes. Works offline.",
+        "kicker": "Simple to learn. Impossible to master.",
+        "tags": ["HTML", "CSS", "JS", "PWA", "Service Worker"],
+        "codeUrl": "https://github.com/paulgibeault/pi-game"
+      }
+    },
+    {
+      "id": "si-syn",
+      "name": "Si Syndicate",
+      "subtitle": "Assembly Logic",
+      "icon": "images/si-syn.png",
+      "url": "/si-syn/",
+      "profile": {
+        "name": "Silicon Syndicate",
+        "subtitle": "Assembly Logic Puzzle",
+        "alt": "Silicon Syndicate — glowing circuit board traces with microcontroller chips",
+        "descLead": "Program microcontrollers. Route signals. Hack the system.",
+        "descBody": "Write tiny assembly programs using mov, add, tgt, slp, and jmp. Wire sensors, MCUs, and outputs on an interactive circuit board. Match the target waveform to advance.",
+        "kicker": "No install. No backend. Runs entirely in your browser.",
+        "tags": ["JS", "Vite", "Vitest", "ES Modules"],
+        "codeUrl": "https://github.com/paulgibeault/si-syn"
+      }
+    },
+    {
+      "id": "hecknsic",
+      "name": "HecknSic",
+      "subtitle": "Hex Puzzle",
+      "icon": "images/hecknsic.png",
+      "url": "/hecknsic/",
+      "profile": {
+        "subtitle": "Hexagonal Puzzle",
+        "alt": "HecknSic — colorful hexagonal puzzle grid with neon glow",
+        "descLead": "A heckin sick hexagonal puzzle.",
+        "descBody": "Rotate clusters of colorful hexagons to form matches of three or more. Chain combos for exponential score multipliers. Trigger Stars, Flowers, and Bombs for explosive results.",
+        "kicker": "Much wow. Such hexagons.",
+        "tags": ["JS", "CSS", "HTML", "PWA"],
+        "codeUrl": "https://github.com/paulgibeault/hecknsic"
+      }
+    },
+    {
+      "id": "cozy-solitaire",
+      "name": "Solitaire",
+      "subtitle": "Card Games",
+      "icon": "images/cozy-solitaire.png",
+      "url": "/cozy-solitaire/",
+      "profile": {
+        "name": "Cozy Solitaire",
+        "subtitle": "Grandma-Approved Card Games",
+        "alt": "Cozy Solitaire — warm cabin scene with playing cards by the fireplace",
+        "descLead": "A warm, cozy Solitaire experience.",
+        "descBody": "Three classic variants — Klondike, FreeCell, and Spider — rendered on HTML5 Canvas with warm browns, soft greens, and cabin vibes. Unlimited undo, auto-complete, drag-and-drop, and statistics tracking.",
+        "kicker": "Made with ☕ and cozy vibes.",
+        "tags": ["HTML5 Canvas", "JS", "ES Modules", "PWA"],
+        "codeUrl": "https://github.com/paulgibeault/cozy-solitaire"
+      }
+    },
+    {
+      "id": "sowduku",
+      "name": "Sowdoku",
+      "subtitle": "Cozy Logic Puzzle",
+      "icon": "images/sowduku.png",
+      "url": "/sowduku/",
+      "profile": {
+        "subtitle": "A Cozy Logic Puzzle",
+        "alt": "Sowdoku — a grid of soft watercolor pens with little napping piggies",
+        "descLead": "Give every little piggy its own patch of mud.",
+        "descBody": "A Queens-style logic puzzle: one piggy per row, column, and color pen — and never two touching. Uniquely-solvable boards from 6×6 to 9×9, soothing watercolor pens, gentle hearts, and a wooden-thud tactile feel. No timers, no grind.",
+        "kicker": "Made with ☕ and absolute personal space.",
+        "tags": ["Vanilla JS", "Puzzle Generator", "Logic Solver", "Arcade SDK"],
+        "codeUrl": "https://github.com/paulgibeault/sowduku"
+      }
+    },
+    {
+      "id": "p2p-chat",
+      "name": "P2P Chat",
+      "subtitle": "Multiplayer Messaging",
+      "icon": "images/p2p-chat.png",
+      "url": "/p2p-chat/",
+      "profile": {
+        "subtitle": "Multiplayer Messaging",
+        "alt": "P2P Chat — a chat bubble icon on a dark gradient background",
+        "descLead": "No server, no accounts — just a direct link between devices.",
+        "descBody": "Pair over the arcade's Multiplayer menu and chat, share files, and form group threads directly over WebRTC. Tabs are yours to rename, and group chats have real synced membership you control.",
+        "kicker": "Proves out the arcade's own multiplayer framework.",
+        "tags": ["WebRTC", "P2P", "Arcade SDK"],
+        "codeUrl": "https://github.com/paulgibeault/p2p-chat"
+      }
+    }
+  ]
+}

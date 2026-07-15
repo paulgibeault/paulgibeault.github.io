@@ -12,16 +12,22 @@ implementer's checklist.
 ## 1. Identity & hosting
 
 - [ ] Game is hosted at `https://paulgibeault.github.io/<gameId>/` (same-origin with the launcher).
-- [ ] `<gameId>` is kebab-case, matches the GitHub repo slug, and matches the `data-game-id` attribute the launcher uses for this game.
+- [ ] `<gameId>` is kebab-case, matches the GitHub repo slug, and matches the game's `id` in the catalog.
 - [ ] Entry point is `index.html` at the repo root so the GitHub Pages URL above resolves.
 
-| Game           | gameId           | Repo                                           |
-| -------------- | ---------------- | ---------------------------------------------- |
-| Moon Lit       | `moon-lit`       | `paulgibeault/moon-lit`                        |
-| Pi Game        | `pi-game`        | `paulgibeault/pi-game`                         |
-| Si Syndicate   | `si-syn`         | `paulgibeault/si-syn`                          |
-| HecknSic       | `hecknsic`       | `paulgibeault/hecknsic`                        |
-| Cozy Solitaire | `cozy-solitaire` | `paulgibeault/cozy-solitaire`                  |
+**The authoritative game list is [`catalog.json`](catalog.json).** The launcher
+grid, the profile page's game cards, and the service worker's icon precache all
+render from it — the old hand-mirrored copies are gone.
+
+**Registering a new game** takes exactly three steps, none of them HTML edits:
+
+1. Add one entry to `catalog.json`: `id`, `name`, `subtitle`, `icon`
+   (`images/<gameId>.png`), `url` (root-relative, `/<gameId>/`), plus an
+   optional `profile` block (`subtitle`, `alt`, `descLead`, `descBody`,
+   `kicker`, `tags[]`, `codeUrl`) if it should appear on the portfolio page.
+   Entries without a `profile` block render on the launcher only.
+2. Commit the card image at `images/<gameId>.png`.
+3. Bump `CACHE_NAME` in `sw.js` so installed launchers refresh their precache.
 
 ---
 

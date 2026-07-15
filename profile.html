@@ -791,188 +791,14 @@
     <main>
 
         <!-- ========== MY GAMES ========== -->
-        <!-- Game list is mirrored in index.html (#view-launcher). Update both when adding games. -->
+        <!-- Game cards render from /catalog.json (see the module block at the bottom
+             and arcade-catalog.js renderProfileCards). Add games there, not here. -->
         <section class="section container" id="games">
             <h2 class="section__header">
                 My Games <span class="section__separator">//</span> Arcade
             </h2>
 
             <div class="card-grid">
-
-                <!-- Moon Lit -->
-                <article class="project-card spotlight-card" id="card-moon-lit">
-                    <div class="project-card__image-wrap">
-                        <img class="project-card__image" src="images/moon-lit.png" alt="Moon Lit — paper lanterns drifting up through bamboo toward a full moon over a still river" loading="lazy">
-                    </div>
-                    <div class="project-card__body">
-                        <h3 class="project-card__name">Moon Lit</h3>
-                        <p class="project-card__subtitle">Lantern-Festival Bubble Shooter</p>
-                        <p class="project-card__desc">
-                            <strong>Send paper lanterns up to the trellis.</strong> A boatman launches glowing lanterns into a hex grid; match three or more of a color to clear them and drop the chains hanging beneath. The trellis presses down every six shots — clear it before the lanterns cross the dead-line.
-                        </p>
-                        <p class="project-card__kicker">Lantern festival under a moonlit sky.</p>
-                        <div class="tech-tags">
-                            <span class="tech-tag">HTML5 Canvas</span>
-                            <span class="tech-tag">JS</span>
-                            <span class="tech-tag">ES Modules</span>
-                            <span class="tech-tag">PWA</span>
-                        </div>
-                        <div class="card-actions">
-                            <a href="https://paulgibeault.github.io/moon-lit/" class="btn btn--play" target="_blank" rel="noopener" id="btn-play-moon-lit">▶ Play</a>
-                            <a href="https://github.com/paulgibeault/moon-lit" class="btn btn--code" target="_blank" rel="noopener" id="btn-code-moon-lit">&lt;/&gt; Code</a>
-                        </div>
-                    </div>
-                </article>
-
-                <!-- Pi Game -->
-                <article class="project-card" id="card-pi-game">
-                    <div class="project-card__image-wrap">
-                        <img class="project-card__image" src="images/pi-game.png" alt="Pi Game — cascading digits of pi in a retro arcade style" loading="lazy">
-                    </div>
-                    <div class="project-card__body">
-                        <h3 class="project-card__name">Pi Game</h3>
-                        <p class="project-card__subtitle">Memorization Gauntlet</p>
-                        <p class="project-card__desc">
-                            <strong>One wrong digit and it's over.</strong> Tap digits of Pi on a number pad — every correct digit extends your streak. A single mistake ends it. Synthesized audio rises in pitch as you climb, particles explode across the screen, and the pressure never stops. 4 visual themes. Works offline.
-                        </p>
-                        <p class="project-card__kicker">Simple to learn. Impossible to master.</p>
-                        <div class="tech-tags">
-                            <span class="tech-tag">HTML</span>
-                            <span class="tech-tag">CSS</span>
-                            <span class="tech-tag">JS</span>
-                            <span class="tech-tag">PWA</span>
-                            <span class="tech-tag">Service Worker</span>
-                        </div>
-                        <div class="card-actions">
-                            <a href="https://paulgibeault.github.io/pi-game/" class="btn btn--play" target="_blank" rel="noopener" id="btn-play-pi">▶ Play</a>
-                            <a href="https://github.com/paulgibeault/pi-game" class="btn btn--code" target="_blank" rel="noopener" id="btn-code-pi">&lt;/&gt; Code</a>
-                        </div>
-                    </div>
-                </article>
-
-                <!-- Silicon Syndicate -->
-                <article class="project-card" id="card-si-syn">
-                    <div class="project-card__image-wrap">
-                        <img class="project-card__image" src="images/si-syn.png" alt="Silicon Syndicate — glowing circuit board traces with microcontroller chips" loading="lazy">
-                    </div>
-                    <div class="project-card__body">
-                        <h3 class="project-card__name">Silicon Syndicate</h3>
-                        <p class="project-card__subtitle">Assembly Logic Puzzle</p>
-                        <p class="project-card__desc">
-                            <strong>Program microcontrollers. Route signals. Hack the system.</strong> Write tiny assembly programs using <code>mov</code>, <code>add</code>, <code>tgt</code>, <code>slp</code>, and <code>jmp</code>. Wire sensors, MCUs, and outputs on an interactive circuit board. Match the target waveform to advance.
-                        </p>
-                        <p class="project-card__kicker">No install. No backend. Runs entirely in your browser.</p>
-                        <div class="tech-tags">
-                            <span class="tech-tag">JS</span>
-                            <span class="tech-tag">Vite</span>
-                            <span class="tech-tag">Vitest</span>
-                            <span class="tech-tag">ES Modules</span>
-                        </div>
-                        <div class="card-actions">
-                            <a href="https://paulgibeault.github.io/si-syn/" class="btn btn--play" target="_blank" rel="noopener" id="btn-play-sisyn">▶ Play</a>
-                            <a href="https://github.com/paulgibeault/si-syn" class="btn btn--code" target="_blank" rel="noopener" id="btn-code-sisyn">&lt;/&gt; Code</a>
-                        </div>
-                    </div>
-                </article>
-
-                <!-- HecknSic -->
-                <article class="project-card" id="card-hecknsic">
-                    <div class="project-card__image-wrap">
-                        <img class="project-card__image" src="images/hecknsic.png" alt="HecknSic — colorful hexagonal puzzle grid with neon glow" loading="lazy">
-                    </div>
-                    <div class="project-card__body">
-                        <h3 class="project-card__name">HecknSic</h3>
-                        <p class="project-card__subtitle">Hexagonal Puzzle</p>
-                        <p class="project-card__desc">
-                            <strong>A heckin sick hexagonal puzzle.</strong> Rotate clusters of colorful hexagons to form matches of three or more. Chain combos for exponential score multipliers. Trigger Stars, Flowers, and Bombs for explosive results.
-                        </p>
-                        <p class="project-card__kicker">Much wow. Such hexagons.</p>
-                        <div class="tech-tags">
-                            <span class="tech-tag">JS</span>
-                            <span class="tech-tag">CSS</span>
-                            <span class="tech-tag">HTML</span>
-                            <span class="tech-tag">PWA</span>
-                        </div>
-                        <div class="card-actions">
-                            <a href="https://paulgibeault.github.io/hecknsic/" class="btn btn--play" target="_blank" rel="noopener" id="btn-play-hecknsic">▶ Play</a>
-                            <a href="https://github.com/paulgibeault/hecknsic" class="btn btn--code" target="_blank" rel="noopener" id="btn-code-hecknsic">&lt;/&gt; Code</a>
-                        </div>
-                    </div>
-                </article>
-
-                <!-- Cozy Solitaire -->
-                <article class="project-card" id="card-cozy-solitaire">
-                    <div class="project-card__image-wrap">
-                        <img class="project-card__image" src="images/cozy-solitaire.png" alt="Cozy Solitaire — warm cabin scene with playing cards by the fireplace" loading="lazy">
-                    </div>
-                    <div class="project-card__body">
-                        <h3 class="project-card__name">Cozy Solitaire</h3>
-                        <p class="project-card__subtitle">Grandma-Approved Card Games</p>
-                        <p class="project-card__desc">
-                            <strong>A warm, cozy Solitaire experience.</strong> Three classic variants — Klondike, FreeCell, and Spider — rendered on HTML5 Canvas with warm browns, soft greens, and cabin vibes. Unlimited undo, auto-complete, drag-and-drop, and statistics tracking.
-                        </p>
-                        <p class="project-card__kicker">Made with ☕ and cozy vibes.</p>
-                        <div class="tech-tags">
-                            <span class="tech-tag">HTML5 Canvas</span>
-                            <span class="tech-tag">JS</span>
-                            <span class="tech-tag">ES Modules</span>
-                            <span class="tech-tag">PWA</span>
-                        </div>
-                        <div class="card-actions">
-                            <a href="https://paulgibeault.github.io/cozy-solitaire/" class="btn btn--play" target="_blank" rel="noopener" id="btn-play-cozy">▶ Play</a>
-                            <a href="https://github.com/paulgibeault/cozy-solitaire" class="btn btn--code" target="_blank" rel="noopener" id="btn-code-cozy">&lt;/&gt; Code</a>
-                        </div>
-                    </div>
-                </article>
-
-                <!-- Sowdoku -->
-                <article class="project-card" id="card-sowduku">
-                    <div class="project-card__image-wrap">
-                        <img class="project-card__image" src="images/sowduku.png" alt="Sowdoku — a grid of soft watercolor pens with little napping piggies" loading="lazy">
-                    </div>
-                    <div class="project-card__body">
-                        <h3 class="project-card__name">Sowdoku</h3>
-                        <p class="project-card__subtitle">A Cozy Logic Puzzle</p>
-                        <p class="project-card__desc">
-                            <strong>Give every little piggy its own patch of mud.</strong> A Queens-style logic puzzle: one piggy per row, column, and color pen — and never two touching. Uniquely-solvable boards from 6×6 to 9×9, soothing watercolor pens, gentle hearts, and a wooden-thud tactile feel. No timers, no grind.
-                        </p>
-                        <p class="project-card__kicker">Made with ☕ and absolute personal space.</p>
-                        <div class="tech-tags">
-                            <span class="tech-tag">Vanilla JS</span>
-                            <span class="tech-tag">Puzzle Generator</span>
-                            <span class="tech-tag">Logic Solver</span>
-                            <span class="tech-tag">Arcade SDK</span>
-                        </div>
-                        <div class="card-actions">
-                            <a href="https://paulgibeault.github.io/sowduku/" class="btn btn--play" target="_blank" rel="noopener" id="btn-play-sowduku">▶ Play</a>
-                            <a href="https://github.com/paulgibeault/sowduku" class="btn btn--code" target="_blank" rel="noopener" id="btn-code-sowduku">&lt;/&gt; Code</a>
-                        </div>
-                    </div>
-                </article>
-
-                <!-- P2P Chat -->
-                <article class="project-card" id="card-p2p-chat">
-                    <div class="project-card__image-wrap">
-                        <img class="project-card__image" src="images/p2p-chat.png" alt="P2P Chat — a chat bubble icon on a dark gradient background" loading="lazy">
-                    </div>
-                    <div class="project-card__body">
-                        <h3 class="project-card__name">P2P Chat</h3>
-                        <p class="project-card__subtitle">Multiplayer Messaging</p>
-                        <p class="project-card__desc">
-                            <strong>No server, no accounts — just a direct link between devices.</strong> Pair over the arcade's Multiplayer menu and chat, share files, and form group threads directly over WebRTC. Tabs are yours to rename, and group chats have real synced membership you control.
-                        </p>
-                        <p class="project-card__kicker">Proves out the arcade's own multiplayer framework.</p>
-                        <div class="tech-tags">
-                            <span class="tech-tag">WebRTC</span>
-                            <span class="tech-tag">P2P</span>
-                            <span class="tech-tag">Arcade SDK</span>
-                        </div>
-                        <div class="card-actions">
-                            <a href="https://paulgibeault.github.io/p2p-chat/" class="btn btn--play" target="_blank" rel="noopener" id="btn-play-p2p-chat">▶ Play</a>
-                            <a href="https://github.com/paulgibeault/p2p-chat" class="btn btn--code" target="_blank" rel="noopener" id="btn-code-p2p-chat">&lt;/&gt; Code</a>
-                        </div>
-                    </div>
-                </article>
 
             </div>
         </section>
@@ -1148,8 +974,6 @@
     // SCROLL REVEAL — Cards animate in on scroll
     // ==========================================
     (function scrollReveal() {
-        const cards = document.querySelectorAll('.project-card');
-
         const observer = new IntersectionObserver((entries) => {
             entries.forEach((entry, index) => {
                 if (entry.isIntersecting) {
@@ -1164,7 +988,13 @@
             rootMargin: '0px 0px -60px 0px'
         });
 
-        cards.forEach(card => observer.observe(card));
+        // Game cards render from catalog.json after this script runs — without
+        // the re-observe on that event they'd sit at opacity:0 forever.
+        function observeAll() {
+            document.querySelectorAll('.project-card:not(.visible)').forEach(card => observer.observe(card));
+        }
+        observeAll();
+        document.addEventListener('arcade:catalog-rendered', observeAll);
     })();
 
     // ==========================================
@@ -1175,7 +1005,6 @@
         const zoomImg = document.getElementById('zoom-img');
         const zoomBody = document.getElementById('zoom-body');
         const zoomClose = document.getElementById('zoom-close');
-        const cards = document.querySelectorAll('.project-card');
 
         function openZoom(card) {
             const img = card.querySelector('.project-card__image');
@@ -1205,12 +1034,14 @@
             document.body.style.overflow = '';
         }
 
-        cards.forEach(card => {
-            card.addEventListener('click', (e) => {
-                // Don't zoom if they clicked a button/link directly
-                if (e.target.closest('.btn')) return;
-                openZoom(card);
-            });
+        // Delegation: game cards are catalog-rendered after this script runs,
+        // so per-card listeners attached at parse time would miss them.
+        document.addEventListener('click', (e) => {
+            const card = e.target.closest('.project-card');
+            if (!card) return;
+            // Don't zoom if they clicked a button/link directly
+            if (e.target.closest('.btn')) return;
+            openZoom(card);
         });
 
         overlay.addEventListener('click', (e) => {
@@ -1368,6 +1199,26 @@
             hideInstallUI();
         });
     })();
+</script>
+
+<script type="module">
+    // GAME CARDS — rendered from /catalog.json (issue #34), the same source the
+    // launcher grid uses, so the two surfaces can never drift again. The three
+    // non-arcade project cards (QRCodeP2P, Zibaldone, usai) stay hardcoded in
+    // their own sections. The scrollReveal/zoom scripts above use delegation +
+    // the arcade:catalog-rendered event to cover these late-rendered cards.
+    import { loadCatalog, renderProfileCards } from './arcade-catalog.js';
+
+    const grid = document.querySelector('#games .card-grid');
+    try {
+        renderProfileCards(grid, await loadCatalog());
+    } catch (e) {
+        console.error('[profile] catalog load failed', e);
+        const p = document.createElement('p');
+        p.textContent = 'Game list unavailable right now — the arcade itself still works: paulgibeault.github.io';
+        grid.replaceChildren(p);
+    }
+    document.dispatchEvent(new CustomEvent('arcade:catalog-rendered'));
 </script>
 
 </body>

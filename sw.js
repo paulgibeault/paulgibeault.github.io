@@ -1,4 +1,4 @@
-const CACHE_NAME = 'paul-arcade-v28';
+const CACHE_NAME = 'paul-arcade-v29';
 // Network-first timeout: on lie-fi, stop waiting on the network and serve the
 // cached shell/asset so first paint stays bounded.
 const NET_TIMEOUT_MS = 5000;
@@ -15,6 +15,8 @@ const ASSETS_TO_CACHE = [
   './arcade-storage-core.js',
   './arcade-storage-bridge.js',
   './arcade-save.js',
+  './arcade-catalog.js',
+  './catalog.json',
   './p2p/p2p-addon.js',
   './p2p/p2p-ui.js',
   './p2p/p2p-core.js',
@@ -27,13 +29,10 @@ const ASSETS_TO_CACHE = [
   './p2p/vendor/html5-qrcode.min.js',
   './images/icon-192.png',
   './images/icon-512.png',
-  './images/pi-game.png',
-  './images/si-syn.png',
-  './images/hecknsic.png',
-  './images/cozy-solitaire.png',
-  './images/moon-lit.png',
-  './images/sowduku.png',
-  './images/p2p-chat.png',
+  // Game icons are NOT listed here — they're derived from catalog.json at
+  // install time (below), so adding a game never means editing this file.
+  // These three belong to profile.html's non-arcade project cards, which
+  // stay hand-maintained.
   './images/qrcodep2p.png',
   './images/zibaldone.png',
   './images/usai.png'
@@ -41,17 +40,27 @@ const ASSETS_TO_CACHE = [
 
 self.addEventListener('install', (event) => {
   self.skipWaiting();
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) =>
-      // Cache each asset independently. cache.addAll() rejects the WHOLE install
-      // if any single request 404s (a renamed/removed file), which would strand
-      // offline users on the previous version with no diagnostic. Per-asset
-      // add() tolerates gaps and logs them.
-      Promise.all(ASSETS_TO_CACHE.map((asset) =>
-        cache.add(asset).catch((e) => { console.warn('[sw] precache skipped', asset, e && e.message); })
-      ))
-    )
-  );
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE_NAME);
+    // Game icons come from the catalog — the single authoritative game list.
+    // A failed catalog fetch degrades to a shell-only precache; the runtime
+    // network-first cache below backfills icons on first view.
+    let icons = [];
+    try {
+      const doc = await (await fetch('./catalog.json')).json();
+      icons = (doc.games || [])
+        .map((g) => g && g.icon)
+        .filter((i) => typeof i === 'string' && i)
+        .map((i) => './' + i.replace(/^\.?\//, ''));
+    } catch (e) { console.warn('[sw] catalog icon precache skipped', e && e.message); }
+    // Cache each asset independently. cache.addAll() rejects the WHOLE install
+    // if any single request 404s (a renamed/removed file), which would strand
+    // offline users on the previous version with no diagnostic. Per-asset
+    // add() tolerates gaps and logs them.
+    await Promise.all([...ASSETS_TO_CACHE, ...icons].map((asset) =>
+      cache.add(asset).catch((e) => { console.warn('[sw] precache skipped', asset, e && e.message); })
+    ));
+  })());
 });
 
 self.addEventListener('activate', (event) => {
