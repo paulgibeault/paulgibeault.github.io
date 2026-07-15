@@ -46,6 +46,7 @@ export const ArcadeDiag = {
         return [
             '# Arcade connection log ' + new Date().toISOString(),
             '# UA: ' + navigator.userAgent,
+            '# Note: the UA line above identifies your browser/OS version; delete it before sharing if you prefer.',
             ...entries.map((e) => ArcadeDiag.format(e))
         ].join('\n');
     }

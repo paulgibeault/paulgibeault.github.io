@@ -676,6 +676,7 @@ export class P2PUIManager {
             const transcript = [
                 `# P2P transcript ${new Date().toISOString()}`,
                 `# UA: ${navigator.userAgent}`,
+                '# Note: the UA line above identifies your browser/OS version; delete it before sharing if you prefer.',
                 `# Mode: ${this.peerNode.options.iceMode}, role: ${this.peerNode.isHost ? 'host' : 'joiner'}`,
                 ...lines
             ].join('\n');
