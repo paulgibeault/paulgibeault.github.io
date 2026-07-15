@@ -131,6 +131,9 @@ export function initSyncEngine(host) {
     let p2p = null;                 // ArcadeP2P, once attachP2P() wires it
     const conflictListeners = [];
     const digestBuffers = new Map();   // deviceId -> { parts, chunks: Map<part, entries[]>, timer }
+    const pendingCursors = new Map();  // deviceId -> { hlc, need: Set<fullKey>, timer } — cursor
+                                       // value earned by a digest exchange but NOT committed
+                                       // until every req'd diff has arrived (see reconcileDigest)
     const inFlightExchange = new Map(); // deviceId -> ms timestamp of last exchange start
     const oversizeLogged = new Set();   // keys already logged as "too big to sync" (log once)
     let tombstoneHashPromise = null;    // cached sha256Hex of the tombstone sentinel
@@ -351,12 +354,55 @@ export function initSyncEngine(host) {
         sendReqTo(fromDeviceId, plan.need);
         sendDiffTo(fromDeviceId, plan.send);
 
-        // clock is monotonic-advanced past every local record's HLC (every
-        // record was stamped from it) and every remote HLC just observed
-        // above, so it's a safe "max HLC in the union" cursor value.
-        const cursor = { hlc: clock, at: Date.now() };
-        cursors.set(fromDeviceId, cursor);
-        try { await idbPut(db, 'p|' + fromDeviceId, cursor); } catch (e) {}
+        // Cursor discipline (the bug WP5's suite caught): receiving a digest
+        // proves what the PEER has — it proves nothing about whether the peer
+        // observed OUR records. clock is now advanced past every HLC in the
+        // union (each local record was stamped from it; hlcRecv above covered
+        // each remote entry), which makes it the right cursor VALUE for "last
+        // completed exchange" — but committing it here, before the req'd
+        // diffs for contested keys have even arrived, would make
+        // isConcurrentLoss() see every such local record as already-observed
+        // and silently swallow onConflict on exactly the reconnect-after-
+        // split path the feature exists for. So the value is parked as a
+        // PENDING cursor and committed only when the exchange completes:
+        // every key we req'd has had its diff processed (immediately, when we
+        // needed nothing). Until then conflict checks keep reading the
+        // previous committed cursor. A pending cursor that never drains
+        // (diffs lost in transit) is dropped on timeout, NOT committed — the
+        // next exchange re-earns it; erring this way risks a spurious
+        // conflict notification, never a swallowed one.
+        const prevPending = pendingCursors.get(fromDeviceId);
+        if (prevPending && prevPending.timer) clearTimeout(prevPending.timer);
+        const pending = { hlc: clock, need: new Set(plan.need), timer: null };
+        if (pending.need.size === 0) {
+            pendingCursors.delete(fromDeviceId);
+            await commitCursor(fromDeviceId, pending.hlc);
+        } else {
+            pending.timer = setTimeout(() => {
+                if (pendingCursors.get(fromDeviceId) === pending) pendingCursors.delete(fromDeviceId);
+            }, DIGEST_REASSEMBLY_TIMEOUT_MS);
+            pendingCursors.set(fromDeviceId, pending);
+        }
+    }
+
+    async function commitCursor(deviceId, hlc) {
+        const cursor = { hlc, at: Date.now() };
+        cursors.set(deviceId, cursor);
+        try { await idbPut(db, 'p|' + deviceId, cursor); } catch (e) {}
+    }
+
+    // Called after EVERY processed diff entry (applied or skipped — either
+    // way the peer's answer for that key arrived): drains the pending
+    // exchange's need-set and commits the parked cursor once it empties.
+    // Runs AFTER applyInboundDiffEntry so the entry that completes the
+    // exchange still had its conflict evaluated against the old cursor.
+    async function drainPendingNeed(deviceId, key) {
+        const pending = pendingCursors.get(deviceId);
+        if (!pending || !pending.need.delete(key)) return;
+        if (pending.need.size !== 0) return;
+        if (pending.timer) clearTimeout(pending.timer);
+        pendingCursors.delete(deviceId);
+        await commitCursor(deviceId, pending.hlc);
     }
 
     async function handleInboundDigest(fromDeviceId, env) {
@@ -466,7 +512,10 @@ export function initSyncEngine(host) {
 
     async function handleInboundDiff(fromDeviceId, env) {
         const entries = Array.isArray(env.entries) ? env.entries : [];
-        for (const e of entries) await applyInboundDiffEntry(fromDeviceId, e);
+        for (const e of entries) {
+            await applyInboundDiffEntry(fromDeviceId, e);
+            await drainPendingNeed(fromDeviceId, e.k);
+        }
     }
 
     async function handleInbound(fromDeviceId, env) {

@@ -228,34 +228,18 @@ try {
         await s.ctxH.close(); await s.ctxJ.close();
     }
 
-    // 4. onConflict FIRES EXACTLY ON THE LOSING SIDE.
+    // 4. onConflict FIRES EXACTLY ON THE LOSING SIDE — live-diff path.
     //
-    // DEVIATION FROM plans/arcade-sync.md's WP5 sketch (report this as a WP3
-    // finding, not papered over): the plan's scenario drives the conflict
-    // through a sever-while-apart-then-heal flow, reconciled by a DIGEST
-    // exchange. That path is currently BROKEN: arcade-sync.js's
-    // reconcileDigest() unconditionally sets cursors.set(fromDeviceId, {hlc:
-    // clock, ...}) using the LOCAL clock, which hlcRecv() has just advanced
-    // to be >= every HLC named in the received digest — including the very
-    // entry that will go on to beat this device's local record. By the time
-    // the matching diff is applied (a beat later, via the req/diff
-    // round-trip or a peer's proactive push), isConcurrentLoss() sees a
-    // cursor that already looks >= the local record's HLC and returns false
-    // — silently swallowing a genuine concurrent-edit conflict. Verified by
-    // direct repro: identical writes-while-apart reconciled by a live
-    // one-entry diff (no digest involved) fire onConflict correctly every
-    // time; the same edits reconciled via kick()-forced digest exchange
-    // (either one-sided or both-sided) fire it zero times. This affects
-    // exactly the case the design doc calls "the pragmatic 'concurrent' test
-    // for onConflict" (the per-pair cursor), i.e. the reconnect-after-split
-    // scenario is the primary motivating use case for onConflict and it's
-    // the one that's broken. Filed as a WP3 bug (arcade-sync.js's
-    // reconcileDigest/isConcurrentLoss interaction) — NOT fixed here (WP5
-    // touches only the three files listed in scope). This scenario instead
-    // drives the conflict through the one path confirmed to work: two live
-    // one-entry diffs crossing in flight while both sides stay connected
-    // (no reload), which exercises the identical apply/isConcurrentLoss
-    // machinery without the digest-triggered cursor pre-emption.
+    // Two live one-entry diffs crossing in flight while both sides stay
+    // connected: the simplest concurrent-edit shape, no digest exchange
+    // involved. The digest-path variant (sever-then-heal, the plan's original
+    // scenario 4 sketch) is scenario 4b below — this suite originally caught
+    // a real engine bug there (reconcileDigest committed the hlcRecv-advanced
+    // clock as the per-pair cursor BEFORE the req'd diffs were applied, so
+    // isConcurrentLoss saw every contested record as already-observed and
+    // swallowed the conflict); fixed via the pending-cursor discipline in
+    // reconcileDigest/drainPendingNeed, which 4b now pins as a regression
+    // test.
     {
         console.log('\n  [onConflict fires on the losing side only, both converge]');
         const s = await freshPair('C');
@@ -297,6 +281,69 @@ try {
             check("conflict payload carries both edits as mine/theirs",
                 mineTheirs.has('H-edit') && mineTheirs.has('J-edit'), JSON.stringify(losing));
         }
+        await s.ctxH.close(); await s.ctxJ.close();
+    }
+
+    // 4b. onConflict THROUGH A DIGEST EXCHANGE (sever-then-heal) — the plan's
+    // original scenario and the regression test for the pending-cursor fix
+    // (see the scenario 4 note). Deterministic loser: H (never reloaded, its
+    // listener survives) writes FIRST while apart; J writes later with a
+    // guaranteed-larger HLC and wins — so the conflict must fire on H, via
+    // the digest/req/diff reconciliation that runs on heal, evaluated
+    // against H's PRE-exchange cursor.
+    {
+        console.log('\n  [onConflict fires through the sever-then-heal digest exchange]');
+        const s = await freshPair('C2');
+        const { devOnH, devOnJ } = await enableSyncBoth(s.H, s.J);
+        await enableApp(s.H, 'syncfix'); await enableApp(s.J, 'syncfix');
+
+        // Baseline: both sides hold a replicated record for the key (so the
+        // later concurrent edits are edits of shared state, not first-writes).
+        await stateWrite(s.H, 'syncfix', 'arcade.v1.syncfix.c', '"base"');
+        check('baseline replicated before the split',
+            await waitFor(async () => (await lsGet(s.J, 'arcade.v1.syncfix.c')) === '"base"'));
+
+        const registerConflictListener = (page) => page.evaluate(() => {
+            window.__syncConflicts = [];
+            window.__arcade.sync.onConflict((c) => window.__syncConflicts.push(c));
+        });
+        await registerConflictListener(s.H);
+
+        // Sever: reload J (same idiom as scenario 2).
+        await s.J.reload();
+        check('reloaded joiner booted the transport on its own (4b)', await rebootedAfterReload(s.J));
+        await s.J.evaluate(FAST_RDV);
+        await registerConflictListener(s.J);
+
+        // Concurrent edits while apart: H first (older HLC, will LOSE),
+        // J later (newer HLC, will win).
+        await stateWrite(s.H, 'syncfix', 'arcade.v1.syncfix.c', '"H-old"');
+        await new Promise((r) => setTimeout(r, 60)); // HLC millis must differ
+        await stateWrite(s.J, 'syncfix', 'arcade.v1.syncfix.c', '"J-new"');
+
+        check('joiner healed after reload (4b)', await connectedAgain(s.J));
+        check('host still healed (4b)', await connectedAgain(s.H));
+        await s.H.evaluate((d) => window.__arcade.sync.kick(d), devOnH);
+        await s.J.evaluate((d) => window.__arcade.sync.kick(d), devOnJ);
+
+        check('both sides converge on the newer write after the digest exchange',
+            await waitFor(async () => (await lsGet(s.H, 'arcade.v1.syncfix.c')) === '"J-new"'
+                && (await lsGet(s.J, 'arcade.v1.syncfix.c')) === '"J-new"', 20000));
+
+        // The conflict must land on H (the loser) exactly once, and not on J.
+        const conflictSeen = await waitFor(async () =>
+            (await s.H.evaluate(() => window.__syncConflicts)).length === 1, 10000);
+        const [hC, jC] = await Promise.all([
+            s.H.evaluate(() => window.__syncConflicts),
+            s.J.evaluate(() => window.__syncConflicts)
+        ]);
+        check('digest-path conflict fired exactly once on the losing side',
+            conflictSeen && hC.length === 1 && jC.length === 0, `H=${hC.length} J=${jC.length}`);
+        check('digest-path conflict payload carries {key, mine, theirs}',
+            hC.length === 1 && hC[0].key === 'arcade.v1.syncfix.c'
+                && hC[0].mine === 'H-old' && hC[0].theirs === 'J-new',
+            JSON.stringify(hC[0] || null));
+
         await s.ctxH.close(); await s.ctxJ.close();
     }
 
