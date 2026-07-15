@@ -508,7 +508,10 @@
         // (see arcade-storage-bridge.js / arcade-save.js, wired in the module
         // block after this IIFE runs — null until then, router queues meanwhile).
         storageHost: null,
-        storage: null
+        storage: null,
+        // sync: the Arcade.sync replication engine (arcade-sync.js) — null
+        // until module block D runs; attachP2P() wires it once loadP2P runs.
+        sync: null
     };
 
     // ==========================================
@@ -1181,6 +1184,7 @@
                 });
                 p2pBridge = ArcadeP2P;
                 window.__arcade.p2p = ArcadeP2P; // debug + acceptance tests
+                if (window.__arcade.sync) window.__arcade.sync.attachP2P(ArcadeP2P);
                 return ArcadeP2P;
             }).catch((e) => {
                 p2pLoadPromise = null;
@@ -1655,7 +1659,11 @@
             stateSnapshotFor: stateSnapshotFor,
             showToast: showToast,
             broadcastSettings: () => window.__arcade.broadcastSettings(),
-            replayPendingStorageMessages: replayPendingStorageMessages
+            replayPendingStorageMessages: replayPendingStorageMessages,
+            // Sync engine hooks (arcade-sync.js) — no-ops until module block D
+            // wires window.__arcade.sync.
+            onStateWritten: (gameId, key, value) => { if (window.__arcade.sync) window.__arcade.sync.noteLocalWrite(key, value); },
+            onImportCommitted: (keys) => { if (window.__arcade.sync) window.__arcade.sync.noteImportCommitted(keys); }
         };
     })();
 
@@ -1780,10 +1788,12 @@
     // ==========================================
     import { initStorageBridge } from './arcade-storage-bridge.js';
     import { initSaveLoad } from './arcade-save.js';
+    import { initSyncEngine } from './arcade-sync.js';
 
     const storageHost = window.__arcade.storageHost;
     window.__arcade.storage = initStorageBridge(storageHost);
     initSaveLoad(storageHost);
+    window.__arcade.sync = initSyncEngine(storageHost);
     storageHost.replayPendingStorageMessages();
 </script>
 

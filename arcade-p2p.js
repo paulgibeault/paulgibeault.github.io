@@ -931,6 +931,18 @@ export const ArcadeP2P = {
     },
 
     /**
+     * Sync-gate support (arcade-sync.js): read-only passthrough to the
+     * module-internal fingerprint-suspect check pairing itself already uses.
+     * The sync engine must gate both inbound handling and outbound exchange
+     * starts on this — a device whose fingerprint changed this session (or
+     * has a still-unconfirmed pending pin) must not gain sync write
+     * authority over this device's storage until the user re-trusts it.
+     */
+    isFingerprintSuspect(deviceId) {
+        return isFingerprintSuspect(deviceId);
+    },
+
+    /**
      * Presence: fires when the remote launcher announces that a game with a
      * given gameId is mounted and listening — fn({gameId, deviceId, name,
      * kind}). kind 'presence' expects an ack (announceGame(gameId, true))

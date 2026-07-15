@@ -30,7 +30,7 @@ jobs:
           set -e
           for f in arcade-sdk.js arcade-p2p.js arcade-known-peers.js arcade-diag.js \
                    arcade-storage-core.js arcade-storage-bridge.js arcade-save.js \
-                   arcade-sync-core.js arcade-catalog.js p2p/*.js tools/*.mjs; do
+                   arcade-sync-core.js arcade-sync.js arcade-catalog.js p2p/*.js tools/*.mjs; do
             echo "checking $f"
             node --check "$f"
           done
