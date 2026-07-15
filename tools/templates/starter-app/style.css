@@ -1,0 +1,71 @@
+/* style.css — {{APP_TITLE}}.
+ *
+ * The launcher pushes accessibility settings onto the <html> element; the SDK
+ * applies them automatically. Read them as CSS variables so your app respects
+ * them with zero JS:
+ *   --font-scale   set from the font-size setting (default 1)
+ *   color-scheme / [data-theme]  light/dark from the theme setting
+ * Use rem units × var(--font-scale) and the app scales with the launcher.
+ */
+
+:root {
+  --font-scale: 1;
+  --bg: #f4f1ea;
+  --fg: #2b2b2b;
+  --accent: #2d5a3d;
+  --card: #ffffff;
+}
+:root[data-theme="dark"] {
+  --bg: #1a1c1a;
+  --fg: #e9e6df;
+  --accent: #7fc99a;
+  --card: #24272400;
+}
+
+* { box-sizing: border-box; }
+
+html { font-size: calc(100% * var(--font-scale)); }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.app {
+  text-align: center;
+  padding: 2rem;
+  max-width: 22rem;
+}
+
+h1 { margin: 0 0 0.25rem; font-size: 1.6rem; }
+.hello { margin: 0 0 1.5rem; opacity: 0.75; }
+
+.tap {
+  font: inherit;
+  font-size: 1.15rem;
+  padding: 0.9rem 2rem;
+  border: none;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  transition: transform 0.08s ease;
+}
+.tap:active { transform: scale(0.94); }
+@media (prefers-reduced-motion: reduce) { .tap { transition: none; } }
+
+.stats {
+  display: flex;
+  justify-content: center;
+  gap: 2.5rem;
+  margin: 1.75rem 0 0.5rem;
+}
+.stats dt { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.6; }
+.stats dd { margin: 0.2rem 0 0; font-size: 1.8rem; font-variant-numeric: tabular-nums; }
+
+.hint { margin-top: 1.5rem; font-size: 0.8rem; opacity: 0.5; }

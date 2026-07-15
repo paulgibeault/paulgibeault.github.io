@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Starter App</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+
+  <!-- The Arcade SDK. Load it ROOT-RELATIVE (/arcade-sdk.js), never with an
+       absolute host URL — that way it resolves on the live fleet, under
+       ./dev.sh staging, and in CI with no per-environment rewriting. -->
+  <script src="/arcade-sdk.js"></script>
+  <script>
+    // init() is synchronous: it claims this app's identity and starts the
+    // launcher handshake. gameId MUST match the catalog entry, the manifest
+    // scope, and sw.js's GAME_ID.
+    Arcade.init({ gameId: 'starter-app' });
+  </script>
+</head>
+<body>
+  <main class="app">
+    <h1>Starter App</h1>
+    <p class="hello">Hi, <span id="player">player</span>.</p>
+
+    <button id="tap" class="tap" type="button">Tap me</button>
+
+    <dl class="stats">
+      <div><dt>This session</dt><dd id="count">0</dd></div>
+      <div><dt>Best ever</dt><dd id="best">0</dd></div>
+    </dl>
+
+    <p class="hint" id="context">standalone</p>
+  </main>
+
+  <!-- App logic as an ES module (deferred, runs after parse). -->
+  <script type="module" src="main.js"></script>
+
+  <!-- Register the game's own service worker for offline play. Loopback-guarded
+       so local edits are never masked by a stale cache (matches the launcher).
+       Fire-and-forget with a .catch so a failure never breaks boot. -->
+  <script>
+    if ('serviceWorker' in navigator &&
+        !/^(127\.|localhost$|0\.0\.0\.0$|::1$)/.test(location.hostname)) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('sw.js', { scope: '/starter-app/' })
+          .catch((err) => console.warn('SW registration failed:', err));
+      });
+    }
+  </script>
+</body>
+</html>

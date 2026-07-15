@@ -37,12 +37,14 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const argv = process.argv.slice(2);
 let poolMode = false, serve = false, port = 4799, catalogOverride = null;
+const mounts = {}; // gameId -> repo-relative dir, so --serve can host a fixture game at /<gameId>/
 const positional = [];
 for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--pool') poolMode = true;
     else if (argv[i] === '--serve') serve = true;
     else if (argv[i] === '--port') port = parseInt(argv[++i], 10);
     else if (argv[i] === '--catalog') catalogOverride = argv[++i];
+    else if (argv[i] === '--mount') { const [id, rel] = String(argv[++i]).split('='); mounts[id] = rel; }
     else positional.push(argv[i]);
 }
 const url = positional[0] || (serve ? `http://127.0.0.1:${port}/` : null);
@@ -60,11 +62,23 @@ if (serve) {
         try {
             let p = decodeURIComponent(req.url.split('?')[0]);
             if (p.endsWith('/')) p += 'index.html';
-            let file = path.join(ROOT, p);
+            // A --mount maps /<gameId>/* onto a repo-relative fixture dir, so a
+            // template game can be tested per-game under --serve without living
+            // at the repo root (segments[0] must be the gameId for the runner).
+            const seg = p.split('/').filter(Boolean);
+            let file = (seg.length && mounts[seg[0]])
+                ? path.resolve(ROOT, mounts[seg[0]], ...seg.slice(1))
+                : path.join(ROOT, p);
             if (p === '/catalog.json' && catalogOverride) file = path.resolve(ROOT, catalogOverride);
             if (!file.startsWith(ROOT)) { res.writeHead(403).end(); return; }
             const body = await readFile(file);
-            res.writeHead(200, { 'content-type': MIME[path.extname(file)] || 'application/octet-stream' });
+            res.writeHead(200, {
+                'content-type': MIME[path.extname(file)] || 'application/octet-stream',
+                // Opaque-origin game frames load their ES modules as CORS
+                // requests (Origin: null) — mirror dev.sh and GitHub Pages so
+                // module scripts aren't blocked inside a framed game.
+                'access-control-allow-origin': '*',
+            });
             res.end(body);
         } catch { res.writeHead(404).end('not found'); }
     });
@@ -252,15 +266,18 @@ async function runPerGame() {
                 ok ? '' : 'no matching keys in exported file');
         }
 
-        // 6 — font-scale propagates without reload. Writing the key in the
-        // launcher document fires a storage event in the iframe (different
-        // document), which the SDK's storage subscriber picks up.
+        // 6 — font-scale propagates without reload. Game frames are opaque-origin
+        // (since #50), so a launcher-doc storage event never reaches them — the
+        // launcher pushes settings over the bridge instead. Drive that exactly
+        // as the launcher's own font control does: write the key, then
+        // broadcastSettings(). The SDK applies the change to --font-scale.
         const beforeScale = (await gameFrame.evaluate(() =>
             getComputedStyle(document.documentElement).getPropertyValue('--font-scale').trim()
         )) || '1';
         const targetScale = '1.4';
         await page.evaluate((v) => {
-            localStorage.setItem('arcade.v1.global.fontScale', v);
+            localStorage.setItem('arcade.v1.global.fontScale', JSON.stringify(parseFloat(v)));
+            window.__arcade?.broadcastSettings?.();
         }, targetScale);
         await page.waitForTimeout(400);
         const afterScale = (await gameFrame.evaluate(() =>
