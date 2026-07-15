@@ -143,12 +143,12 @@ Phase 1 storage landing first.
 - ✅ [#33](https://github.com/paulgibeault/paulgibeault.github.io/issues/33) Self-hostable broker + TURN config (`_meta.rdvBrokers`) — **DONE** (G-res-1: `_meta.rdvBrokers` override landed in #54; the cheapest resilience win, promoted out of the deferred pile). TURN config still open.
 
 **Platform surface:**
-- [#34](https://github.com/paulgibeault/paulgibeault.github.io/issues/34) Data-driven catalog (`catalog.json`) — kills index/profile/sw triplication *(keystone)*
+- ✅ [#34](https://github.com/paulgibeault/paulgibeault.github.io/issues/34) Data-driven catalog (`catalog.json`) — **DONE**: grid + profile cards + SW icon precache all render from it; fixture catalog unblocked the --pool CI gate
 - [#35](https://github.com/paulgibeault/paulgibeault.github.io/issues/35) `Arcade.ui` dialog bridge (confirm/prompt/setTitle/onBeforeQuit/open-file/share)
-- [#36](https://github.com/paulgibeault/paulgibeault.github.io/issues/36) Deep links (`#app=<id>`) + neutral `appId`/`Platform.*` vocabulary aliases
+- ✅(½) [#36](https://github.com/paulgibeault/paulgibeault.github.io/issues/36) Deep links (`#app=<id>`) — **DONE**; the neutral `appId`/`Platform.*` vocabulary half remains open
 
 **Pattern lifts (games → SDK):**
-- [#37](https://github.com/paulgibeault/paulgibeault.github.io/issues/37) `Arcade.rng` + `Arcade.daily` + `Arcade.share` *(fixes the UTC-vs-local daily bug)*
+- ✅ [#37](https://github.com/paulgibeault/paulgibeault.github.io/issues/37) `Arcade.rng` + `Arcade.daily` + `Arcade.share` — **DONE** SDK-side (local-midnight daily rule is the platform contract); game adoption is per-repo follow-up
 - [#38](https://github.com/paulgibeault/paulgibeault.github.io/issues/38) `Arcade.audio`
 - [#39](https://github.com/paulgibeault/paulgibeault.github.io/issues/39) SDK pattern-lift batch: `tween`/`fx.burst`, `canvas.autosize`, SW template, `ui.guide`, `firstRun`, `fmt.*`, `undo`, `telemetry`, `ui.safeArea`
 
