@@ -15,6 +15,12 @@
  *   { arcade: 1, gameId, payload }        — a game's message, routed by gameId
  *   { arcade: 1, kind: 'identity', deviceId, name } — this device announcing
  *     itself once its data channel opens (see "known peers" below)
+ *   { arcade: 1, kind: 'sync', ... }      — Arcade.sync launcher-level state
+ *     replication (digest/req/diff; see arcade-sync.js). Accepted only from a
+ *     DIRECT link with a completed identity binding — never relayed or
+ *     host-forwarded — and dispatched to onSyncEnvelope(fn) listeners as
+ *     fn(fromDeviceId, env). Sent with sendSyncEnvelope(deviceId, env), which
+ *     targets exactly that device's direct link.
  *
  * Status vocabulary mapping (transport → SDK), aggregated across ALL peer
  * links so one wobbling link never flaps the global status:
@@ -449,6 +455,7 @@ let sdkStatus = 'idle';
 
 const statusListeners = [];
 const messageListeners = []; // fn(gameId, payload, fromDeviceId, meta)
+const syncListeners = []; // fn(fromDeviceId, env)
 
 function setStatus(next) {
     if (next === sdkStatus) return;
@@ -608,6 +615,16 @@ async function ensureAddon() {
                     try { fn({ gameId: env.gameId, deviceId: presDeviceId, name: presName, kind: env.kind }); }
                     catch (err) {}
                 }
+                return;
+            }
+            if (env.kind === 'sync') {
+                // Launcher-level replication frames: direct links only (a relayed or
+                // host-forwarded frame must never carry another device's sync data),
+                // and only once the sender's identity binding completed.
+                if (d.relayed) return;
+                const syncDev = deviceIdForPeerId(d.peerId);
+                if (!syncDev) return;
+                for (const fn of syncListeners) { try { fn(syncDev, env); } catch (err) {} }
                 return;
             }
             if (env.kind !== 'identity') {
@@ -889,6 +906,28 @@ export const ArcadeP2P = {
             const i = messageListeners.indexOf(fn);
             if (i >= 0) messageListeners.splice(i, 1);
         };
+    },
+
+    /** Subscribe to launcher-level sync envelopes: fn(fromDeviceId, env). Direct links only. */
+    onSyncEnvelope(fn) {
+        syncListeners.push(fn);
+        return () => {
+            const i = syncListeners.indexOf(fn);
+            if (i >= 0) syncListeners.splice(i, 1);
+        };
+    },
+
+    /**
+     * Send a launcher-level sync envelope to one paired device over its
+     * DIRECT link only (never relayed/host-forwarded — see the transport
+     * listener's `kind:'sync'` branch). Returns false when there is no live
+     * session, or when `deviceId` is unknown / its seat isn't reachable.
+     */
+    sendSyncEnvelope(deviceId, env) {
+        if (!addon || (sdkStatus !== 'connected' && sdkStatus !== 'interrupted')) return false;
+        const pid = deviceIndex.get(deviceId);
+        if (pid === undefined || !seatReachable(pid)) return false;
+        return addon.sendTo(pid, { ...env, arcade: 1, kind: 'sync' });
     },
 
     /**

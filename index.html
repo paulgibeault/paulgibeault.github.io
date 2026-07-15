@@ -1804,7 +1804,7 @@
     // force-load the bridge on open — opening this dialog is a deliberate
     // touch, not something that happens on menu open.
     // ==========================================
-    import { readKnownPeers, renameKnownPeer, deleteKnownPeer } from './arcade-known-peers.js';
+    import { readKnownPeers, renameKnownPeer, deleteKnownPeer, setKnownPeerSyncEnabled } from './arcade-known-peers.js';
     import { ArcadeDiag } from './arcade-diag.js';
 
     (function connectionsDialogController() {
@@ -1976,6 +1976,22 @@
                     .then(() => render()).catch(() => {});
             });
             icons.appendChild(autoBtn);
+
+            const syncBtn = document.createElement('button');
+            syncBtn.type = 'button';
+            syncBtn.className = 'connections-row__icon-btn';
+            const syncOn = peer.syncEnabled === true;
+            syncBtn.textContent = syncOn ? '🔄' : '⛔';
+            syncBtn.title = syncOn
+                ? 'App-data sync is ON — tap to turn off (both devices must turn it on)'
+                : 'App-data sync is OFF — tap to turn on (both devices must turn it on)';
+            syncBtn.setAttribute('aria-label', (syncOn ? 'Disable' : 'Enable') + ' app-data sync for ' + displayName);
+            syncBtn.addEventListener('click', () => {
+                setKnownPeerSyncEnabled(id, !syncOn);
+                if (!syncOn && window.__arcade.sync) window.__arcade.sync.kick(id);
+                render();
+            });
+            icons.appendChild(syncBtn);
 
             const renameBtn = document.createElement('button');
             renameBtn.type = 'button';
