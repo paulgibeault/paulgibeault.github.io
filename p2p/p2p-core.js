@@ -260,6 +260,16 @@ export class PeerManager extends EventTarget {
             interruptedGraceMs: options.interruptedGraceMs || 300000,
             wakeProbeTimeoutMs: options.wakeProbeTimeoutMs || 3000,
             outboxLimit: options.outboxLimit || 1000,
+            // Largest single app frame accepted off a link (measured as wire
+            // string length). Bounds the host relay's per-frame fan-out to the
+            // other N-1 clients — an amplification vector otherwise. Generous:
+            // real game-state frames sit far below this; big transfers go
+            // through the SDK's chunked sendBlob path, not send().
+            maxAppFrameBytes: options.maxAppFrameBytes || 256 * 1024,
+            // A stashed dead session is only resumable for this long. Beyond it
+            // the buffered outbox is stale and the entry is discarded rather
+            // than replayed. Generous enough for a same-day rendezvous resume.
+            maxStashAgeMs: options.maxStashAgeMs || 12 * 3600 * 1000,
             // Stable DTLS identity across sessions (v1.8) — see the identity
             // section above. Opt out with persistentIdentity: false.
             persistentIdentity: options.persistentIdentity !== false
@@ -281,7 +291,21 @@ export class PeerManager extends EventTarget {
     }
 
     generateId() {
-        return Math.random().toString(36).substring(2, 9);
+        // Unguessable link identity. The session stash (outbox + seq counters)
+        // is keyed by peerId, so a guessable id would let a peer that learns/
+        // brute-forces one resume — and inherit the buffered outbox of — a
+        // session that isn't theirs. 96 bits from a CSPRNG closes that.
+        const g = (typeof crypto !== 'undefined' && crypto.getRandomValues) ? crypto : null;
+        if (g) {
+            const bytes = new Uint8Array(12);
+            g.getRandomValues(bytes);
+            let s = '';
+            for (let i = 0; i < bytes.length; i++) s += bytes[i].toString(36).padStart(2, '0');
+            return s;
+        }
+        // Non-crypto environment (should not occur in a browser): fall back to
+        // a doubled Math.random id — weaker, but never worse than the prior one.
+        return Math.random().toString(36).substring(2, 9) + Math.random().toString(36).substring(2, 9);
     }
 
     /**
@@ -344,14 +368,49 @@ export class PeerManager extends EventTarget {
     }
 
     _sessionSnapshot(peerData) {
+        const desc = peerData.connection && peerData.connection.remoteDescription;
         return {
             type: peerData.type,
             outSeq: peerData.outSeq,
             lastInSeq: peerData.lastInSeq,
             outbox: peerData.outbox,
             outboxOverflowed: peerData.outboxOverflowed,
-            stashedAt: Date.now()
+            stashedAt: Date.now(),
+            // The remote device's DTLS fingerprint at the time we stashed. On
+            // resume we require the reconnected link to present the same one —
+            // the outbox is only replayed to the identity it was queued for.
+            peerFingerprint: desc ? PeerManager.extractFingerprint(desc.sdp) : null
         };
+    }
+
+    /**
+     * Decides whether a stashed/live session may be inherited by a reconnecting
+     * link. Refuses (returns false → fresh session) when the stash has aged out,
+     * or when both sides present a DTLS fingerprint and they disagree — the
+     * latter means the reconnected link belongs to a different device than the
+     * one whose outbox was buffered, so replaying it would leak queued frames.
+     * Absent fingerprints (e.g. before a remote description is set) can't prove
+     * a mismatch, so they're allowed: this gate only rejects on positive
+     * evidence, never on ignorance.
+     */
+    _sessionResumable(inherited, adoptConnection) {
+        if (!inherited) return false;
+        if (typeof inherited.stashedAt === 'number' &&
+            Date.now() - inherited.stashedAt > this.options.maxStashAgeMs) {
+            this.dispatchEvent(new CustomEvent('diagnostic', { detail: {
+                type: 'warn', msg: 'A stashed session aged out before reconnect — starting a fresh session instead of replaying stale buffered messages.'
+            }}));
+            return false;
+        }
+        const desc = adoptConnection && adoptConnection.remoteDescription;
+        const newFp = desc ? PeerManager.extractFingerprint(desc.sdp) : null;
+        if (inherited.peerFingerprint && newFp && inherited.peerFingerprint !== newFp) {
+            this.dispatchEvent(new CustomEvent('diagnostic', { detail: {
+                type: 'warn', msg: 'Reconnected link presents a different device fingerprint than the stashed session — refusing to replay its buffered outbox (fresh session instead).'
+            }}));
+            return false;
+        }
+        return true;
     }
 
     initPeer(peerId, type, opts = {}) {
@@ -370,6 +429,13 @@ export class PeerManager extends EventTarget {
         } else if (opts.preserveSession && this.sessionStash.has(peerId)) {
             inherited = this.sessionStash.get(peerId);
             this.sessionStash.delete(peerId);
+        }
+        // Only resume a session onto a link that proves it's the same remote
+        // device (fingerprint) and hasn't gone stale — otherwise drop it and
+        // start fresh, so a mis-keyed or hijacked reconnect can't inherit
+        // another session's buffered outbox.
+        if (inherited && !this._sessionResumable(inherited, opts.adoptConnection)) {
+            inherited = null;
         }
 
         // opts.adoptConnection: install an externally-prepared connection
@@ -546,6 +612,19 @@ export class PeerManager extends EventTarget {
             return;
         }
 
+        // Cap app-frame size before it can be relayed to the other N-1 clients
+        // or dispatched locally. One client sending a multi-megabyte frame would
+        // otherwise be fanned out by the host as an amplification vector; real
+        // frames are small (large transfers use the SDK's chunked sendBlob).
+        // Dropped without an ack so we never pretend to have delivered it — the
+        // sender's own outbox cap bounds any retry.
+        if (raw.length > this.options.maxAppFrameBytes) {
+            this.dispatchEvent(new CustomEvent('diagnostic', { detail: {
+                type: 'warn', msg: `Dropped an oversized app frame from ${peerId} (${raw.length} > ${this.options.maxAppFrameBytes} bytes).`
+            }}));
+            return;
+        }
+
         const msg = (parsed && typeof parsed === 'object') ? parsed : { text: raw, from: peerId }; // legacy string fallback
 
         // The hub is the ONLY node that stamps `relayed` — every frame the
@@ -607,6 +686,14 @@ export class PeerManager extends EventTarget {
         }));
     }
 
+    // Validates a peer-supplied ack/resync sequence number: it must be a
+    // non-negative integer, clamped to the highest seq we've actually assigned
+    // on this link. Returns the clamped value, or null when unusable.
+    _clampSeq(n, outSeq) {
+        if (!Number.isInteger(n) || n < 0) return null;
+        return Math.min(n, outSeq);
+    }
+
     _handleControl(peerId, msg) {
         const peerData = this.peers.get(peerId);
         if (!peerData) return;
@@ -616,14 +703,22 @@ export class PeerManager extends EventTarget {
                 break;
             case 'pong':
                 break; // lastAliveAt already refreshed in _onChannelMessage
-            case 'ack':
-                if (typeof msg.upTo === 'number') {
-                    peerData.outbox = peerData.outbox.filter(e => e.seq > msg.upTo);
+            case 'ack': {
+                // Validate + clamp to what we've actually assigned. The bare
+                // `typeof === 'number'` guard let NaN through (NaN is a number),
+                // and `filter(e => e.seq > NaN)` is always false — silently
+                // wiping the outbox and defeating replay. Clamping also caps a
+                // huge value at outSeq: a peer can only ack seqs we sent.
+                const upTo = this._clampSeq(msg.upTo, peerData.outSeq);
+                if (upTo !== null) {
+                    peerData.outbox = peerData.outbox.filter(e => e.seq > upTo);
                 }
                 break;
+            }
             case 'resync': {
-                if (typeof msg.have !== 'number') break;
-                peerData.outbox = peerData.outbox.filter(e => e.seq > msg.have);
+                const have = this._clampSeq(msg.have, peerData.outSeq);
+                if (have === null) break;
+                peerData.outbox = peerData.outbox.filter(e => e.seq > have);
                 this._flushOutbox(peerId);
                 break;
             }
@@ -947,7 +1042,11 @@ export class PeerManager extends EventTarget {
             if (peerData.wakeProbeTimer) clearTimeout(peerData.wakeProbeTimer);
             peerData.wakeProbeTimer = setTimeout(() => {
                 peerData.wakeProbeTimer = null;
-                if (!this.peers.has(peerId)) return;
+                // Identity guard, not mere membership: if this peerId was
+                // replaced by a fresh link since the probe was armed, the new
+                // link's own aliveness governs — don't mark it interrupted on
+                // the stale entry's timestamp.
+                if (this.peers.get(peerId) !== peerData) return;
                 if (peerData.lastAliveAt >= wokeAt) return; // heard from them since waking
                 this._markInterrupted(peerId, 'no response after waking');
             }, this.options.wakeProbeTimeoutMs);

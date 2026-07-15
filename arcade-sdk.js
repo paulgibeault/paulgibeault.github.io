@@ -201,6 +201,7 @@
     var remotePeers = {}; // deviceId -> { deviceId, name, at }
     function noteRemotePeer(deviceId, name) {
         if (typeof deviceId !== 'string' || !deviceId || deviceId.length > 64) return null;
+        if (isDunderKey(deviceId)) return null; // never key the roster object by __proto__/constructor/prototype
         var prev = remotePeers[deviceId];
         var rec = {
             deviceId: deviceId,

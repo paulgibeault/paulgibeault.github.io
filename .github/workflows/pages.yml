@@ -41,6 +41,9 @@ jobs:
       - name: Save-validation unit tests (import gates + key allowlists — no browser)
         run: node tools/save-validation-unit.mjs
 
+      - name: P2P-core unit tests (id entropy, ack/resync bounds, resume binding, frame cap — no browser)
+        run: node tools/p2p-core-unit.mjs
+
       - name: Install deps + browsers
         run: |
           npm install
