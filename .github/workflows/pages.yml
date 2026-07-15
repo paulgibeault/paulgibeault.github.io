@@ -118,6 +118,20 @@ jobs:
           echo "p2p-reconnect failed after 3 attempts"
           exit 1
 
+      - name: "Arcade.sync acceptance (two-launcher state replication, LWW, exclusions)"
+        # Drives real WebRTC + rendezvous heal like the other p2p suites.
+        # Same retry wrapper (#28 WP5).
+        run: |
+          for i in 1 2 3; do
+            echo "::group::sync-acceptance attempt $i"
+            if node tools/sync-acceptance.mjs; then echo "::endgroup::"; exit 0; fi
+            echo "::endgroup::"
+            echo "attempt $i failed; retrying in 3s"
+            sleep 3
+          done
+          echo "sync-acceptance failed after 3 attempts"
+          exit 1
+
       # The full per-game §13 acceptance now runs above against the committed
       # starter-app template fixture (issue #40). To exercise a REAL fleet game
       # locally against the same suite:
