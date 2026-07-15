@@ -67,6 +67,13 @@ jobs:
       - name: Launcher pool acceptance (bounded LRU iframe pool, CI fixture catalog)
         run: node tools/acceptance.mjs --pool --serve --catalog tools/fixtures/ci-catalog.json
 
+      - name: Per-game acceptance (starter-app template — standalone + framed + offline)
+        run: >-
+          node tools/acceptance.mjs --serve
+          --catalog tools/fixtures/pergame-catalog.json
+          --mount starter-app=tools/fixtures/starter-app
+          http://127.0.0.1:4799/starter-app/
+
       - name: P2P acceptance (real WebRTC, self-contained)
         # Real-WebRTC negotiation is timing-sensitive under headless CI; retry a
         # few times so a transient hiccup doesn't block the deploy. A genuine
@@ -108,12 +115,11 @@ jobs:
           echo "p2p-reconnect failed after 3 attempts"
           exit 1
 
-      # NOTE: the full per-game §13 acceptance (tools/acceptance.mjs) still
-      # needs a real staged game (own SW, state writes, etc.) — wire it in once
-      # the starter-template fixture exists (issue #40). Run locally meanwhile:
+      # The full per-game §13 acceptance now runs above against the committed
+      # starter-app template fixture (issue #40). To exercise a REAL fleet game
+      # locally against the same suite:
       #   ./dev.sh ../si-syn ../hecknsic ../pi-game
       #   npm run acceptance -- http://127.0.0.1:4791/si-syn/
-      # (--pool runs above against the committed CI fixture catalog.)
 
   deploy:
     needs: test

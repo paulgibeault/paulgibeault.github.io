@@ -1,0 +1,11 @@
+{
+  "catalogVersion": 1,
+  "games": [
+    {
+      "id": "starter-app",
+      "name": "Starter App",
+      "subtitle": "Template",
+      "url": "/starter-app/"
+    }
+  ]
+}

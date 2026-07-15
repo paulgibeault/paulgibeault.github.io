@@ -87,10 +87,44 @@ if [ "${1:-}" = "stop" ]; then
   exit 0
 fi
 
+# ─── new subcommand — scaffold a starter app ───────────────────────────
+if [ "${1:-}" = "new" ]; then
+  APP_ID="${2:-}"
+  if ! printf '%s' "$APP_ID" | grep -qE '^[a-z][a-z0-9-]*$'; then
+    echo "dev: usage: ./dev.sh new <app-id>   (kebab-case: lowercase, digits, dashes)" >&2
+    exit 1
+  fi
+  TEMPLATE_DIR="$LAUNCHER_DIR/tools/templates/starter-app"
+  TARGET_DIR="$(cd "$LAUNCHER_DIR/.." && pwd)/$APP_ID"
+  [ -d "$TEMPLATE_DIR" ] || { echo "dev: template missing: $TEMPLATE_DIR" >&2; exit 1; }
+  [ -e "$TARGET_DIR" ] && { echo "dev: refusing to overwrite existing $TARGET_DIR" >&2; exit 1; }
+  # Title-case the id for display: my-app -> My App.
+  APP_TITLE=$(printf '%s' "$APP_ID" | tr '-' ' ' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) substr($i,2)}1')
+
+  cp -R "$TEMPLATE_DIR" "$TARGET_DIR"
+  rm -f "$TARGET_DIR/README.md"   # template usage doc, not part of the new app
+  # Substitute placeholders in every staged file.
+  find "$TARGET_DIR" -type f | while IFS= read -r f; do
+    sed_inplace "s|{{APP_ID}}|$APP_ID|g" "$f"
+    sed_inplace "s|{{APP_TITLE}}|$APP_TITLE|g" "$f"
+  done
+
+  echo "dev: created $TARGET_DIR (gameId '$APP_ID')."
+  echo ""
+  echo "Next:"
+  echo "  1. Add it to the launcher catalog ($LAUNCHER_DIR/catalog.json):"
+  echo "       { \"id\": \"$APP_ID\", \"name\": \"$APP_TITLE\", \"subtitle\": \"...\", \"url\": \"/$APP_ID/\" }"
+  echo "  2. Stage + serve:"
+  echo "       ./dev.sh ../$APP_ID"
+  echo "  3. Verify it passes acceptance:"
+  echo "       npm run acceptance -- http://127.0.0.1:$PORT/$APP_ID/"
+  exit 0
+fi
+
 # ─── usage ─────────────────────────────────────────────────────────────
 if [ "$#" -eq 0 ]; then
   cat <<EOF >&2
-Usage: ./dev.sh <game-dir>[:<gameId>]... | stop
+Usage: ./dev.sh <game-dir>[:<gameId>]... | new <app-id> | stop
 
 Stages the launcher and one or more sibling game repos under a single
 same-origin HTTP server so the SDK handshake works end-to-end locally.
@@ -103,6 +137,7 @@ Examples:
   ./dev.sh ../si-syn
   ./dev.sh ../si-syn ../pi-game
   ./dev.sh ../sow-duku-checkout:sowduku
+  ./dev.sh new my-app          scaffold ../my-app from the starter template
   ./dev.sh stop
 
 Env:

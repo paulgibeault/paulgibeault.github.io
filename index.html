@@ -1497,8 +1497,16 @@
             } catch (e) { return false; }
         }
         function currentSettings() {
-            const fs = (window.__arcade && window.__arcade.getFontScale)
-                ? window.__arcade.getFontScale() : 1;
+            // Read fontScale from storage (authoritative), like every other
+            // setting below — so a change made in another launcher tab, or any
+            // direct write to the global key, is reflected the next time we
+            // broadcast to mounted frames. Fall back to the in-memory scale,
+            // then 1.
+            const fsStored = readGlobal('fontScale', null);
+            const fs = (typeof fsStored === 'number' && isFinite(fsStored))
+                ? Math.max(0.5, Math.min(3, fsStored))
+                : ((window.__arcade && window.__arcade.getFontScale)
+                    ? window.__arcade.getFontScale() : 1);
             const th = readGlobal('theme', null);
             const rm = readGlobal('reducedMotion', null);
             const av = readGlobal('audioVolume', null);

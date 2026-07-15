@@ -1,0 +1,13 @@
+{
+  "name": "{{APP_TITLE}}",
+  "short_name": "{{APP_TITLE}}",
+  "description": "A starter app for Paul's Arcade.",
+  "scope": "/{{APP_ID}}/",
+  "start_url": "/{{APP_ID}}/",
+  "display": "standalone",
+  "background_color": "#f4f1ea",
+  "theme_color": "#2d5a3d",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
