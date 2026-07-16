@@ -95,6 +95,10 @@ and plaintext*. Section the bundle `apps:{<appId>:{…}}`; add "export this app 
 `crypto.subtle` AES-GCM passphrase wrapping. Reconsider the checksum *hard-reject* of hand-edited
 saves (`index.html:1474`) — "you may not edit your own data" conflicts with the sovereignty value;
 warn-and-override instead.
+✅ **DONE** (#29) — "Export App / Encrypted…" in the Game Data menu (`buildBundle(data, {appId})`
+scoping + `encryptBundleJson`/`decryptBundleJson` PBKDF2/AES-GCM, both in `arcade-save.js`); the
+checksum override is human-only (`validateSaveBundle`'s `opts.allowChecksumMismatch`, gated on an
+explicit warning confirm) — the peer/local backup engines keep the unconditional hard-reject.
 
 **B2. Automatic local backup.** Today a backup fires only as a side effect of *importing*. Add a
 rolling snapshot of the export bundle into IndexedDB on boot when >24 h stale, plus an optional
@@ -250,8 +254,8 @@ model and shouldn't be back-doored in. Make it a deliberate v2, not an accident.
    ~~D2 `html.escape`~~ ✅ (fixed the live sowduku XSS) · ~~the fingerprint-pin + inbound-size security
    items~~ ✅ (all landed).
 2. **Foundation:** C2 `catalog.json` · A1 `Arcade.store`/`files` · A3 UI bridge · D1 rng/daily/share.
-3. **Sovereignty payload:** B1 per-app+encrypted export · ~~B2 auto-backup~~ ✅ ·
-   ~~B3 state sync~~ ✅ · ~~B4 backup-to-peer~~ ✅ (all landed except B1).
+3. **Sovereignty payload:** ~~B1 per-app+encrypted export~~ ✅ · ~~B2 auto-backup~~ ✅ ·
+   ~~B3 state sync~~ ✅ · ~~B4 backup-to-peer~~ ✅ (all landed).
 4. **Adoption:** C4 de-brand · C5 starter template · C6 SDK versioning · B5 user identity ·
    B6 self-host broker/TURN.
 5. **Long poles / v2:** C7 framework/content split (after B13) · A2 full capability model ·

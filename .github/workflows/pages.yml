@@ -79,6 +79,9 @@ jobs:
       - name: Export/import roundtrip (store/files in save bundle; P2P excluded)
         run: node tools/export-roundtrip-acceptance.mjs
 
+      - name: Export advanced acceptance (per-app scoping, encrypted export, checksum override)
+        run: node tools/export-advanced-acceptance.mjs
+
       - name: Catalog acceptance (grid + profile render from catalog.json)
         run: node tools/catalog-acceptance.mjs
 

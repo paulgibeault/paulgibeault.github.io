@@ -319,6 +319,10 @@
                 <span class="launcher-menu__item-label">Import from File</span>
             </button>
             <input type="file" id="file-load" accept="application/json,.json" style="display:none">
+            <button type="button" class="launcher-menu__item" id="btn-save-advanced" title="Export just one app, or encrypt the export with a passphrase">
+                <span class="launcher-menu__item-icon" aria-hidden="true">🔐</span>
+                <span class="launcher-menu__item-label">Export App / Encrypted…</span>
+            </button>
             <button type="button" class="launcher-menu__item" id="btn-restore-local-backup" title="Restore the most recent automatic local backup stored on this device">
                 <span class="launcher-menu__item-icon" aria-hidden="true">🕑</span>
                 <span class="launcher-menu__item-label">Restore Last Backup</span>
@@ -1605,6 +1609,7 @@
                 const hasInput = !!opts.input;
                 arcadeDialogInput.classList.toggle('hidden', !hasInput);
                 if (hasInput) arcadeDialogInput.value = opts.inputValue || '';
+                arcadeDialogInput.type = opts.inputType || 'text';
                 arcadeDialogOk.textContent = opts.okLabel || 'OK';
                 arcadeDialogCancel.textContent = opts.cancelLabel || 'Cancel';
                 arcadeDialogCancel.classList.toggle('hidden', opts.cancelLabel === null);
@@ -1670,6 +1675,7 @@
             listMountedGameIds: () => [...pool.keys()],
             stateSnapshotFor: stateSnapshotFor,
             showToast: showToast,
+            dialog: (opts) => window.__arcade.dialog(opts),
             broadcastSettings: () => window.__arcade.broadcastSettings(),
             replayPendingStorageMessages: replayPendingStorageMessages,
             // Sync engine hooks (arcade-sync.js) — no-ops until module block D

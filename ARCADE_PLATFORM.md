@@ -530,7 +530,7 @@ The launcher treats imported files as **untrusted input**. Every step has a vali
    - Every key in `data` matches `/^arcade\.v1\.[a-z0-9_-]+(\.[a-zA-Z0-9_.-]+)+$/`. Anything else is dropped with a warning, never written. `stores` DB names and `files` names are validated the same way against their own regexes; dunder segments are rejected.
    - Every `data` value is a string (localStorage's only supported value type).
    - Total localStorage payload fits available quota (best-effort probe write).
-5. **Checksum verification** — recompute sha256 over the canonical form: `data` for v1, or `data` + `stores` + `files` for v2; reject if mismatched.
+5. **Checksum verification** — recompute sha256 over the canonical form: `data` for v1, or `data` + `stores` + `files` for v2; reject if mismatched — **unless** the user explicitly confirms a separate override warning (#29; see below). The override is human-only: it exists solely on the interactive file-import path, so a hand-edited (or corrupted) save is no longer an unconditional dead end.
 6. **Auto-backup before applying** — the launcher exports the *current* state to a downloaded file *automatically* (`pauls-arcade-autobackup-<timestamp>.json`) before touching anything. This is the single most important fault-tolerance feature: even if the import file is corrupt and the user clicks through every warning, the prior state is on their disk.
 7. **Stage, then commit** — build the full set of localStorage write operations in memory; only after every key validates do we begin writing. If any write throws (quota exceeded mid-way), abort and restore from the in-memory snapshot of the prior values. The async `stores`/`files` are written *after* the localStorage commit (IndexedDB/OPFS can't share the synchronous rollback) — best-effort, with the Gate-6 auto-backup as the safety net if one fails.
 8. **Confirmation UI** — before applying, show a summary: "This will replace 23 keys (4 games + global). Current state will be auto-saved to your Downloads folder first. Continue?"
@@ -552,6 +552,22 @@ If a user reports lost data:
 1. The most recent auto-backup is in their Downloads folder, named with timestamp.
 2. The auto-backup uses the exact same format as a normal export — they can re-import it through the same UI.
 3. The launcher could optionally keep the last N auto-backups in IndexedDB as a belt-and-suspenders measure, but that's a follow-on; downloaded files are the canonical recovery medium.
+
+### Per-app export & optional encryption (IMPLEMENTED, #29)
+
+The plain "Export to File" button is unchanged — instant, whole-arcade, plaintext. A second menu item, **"Export App / Encrypted…"**, opens two optional prompts before downloading:
+
+- **Scope** — pick one app (from the list of every app with data on this device) or leave blank for everything. A per-app export filters `data`/`stores`/`files` to that app's `arcade.v1.<appId>.` prefix and — deliberately — excludes `_meta`/`global` entirely, since per-app data shouldn't carry device identity or shared settings.
+- **Passphrase (optional)** — leave blank for a plain-text file identical in spirit to the regular export; enter a passphrase and the whole bundle is wrapped in a new envelope:
+  ```json
+  { "format": "pauls-arcade-save-enc", "v": 1, "kdf": "PBKDF2-SHA256", "iterations": 250000,
+    "salt": "<base64>", "iv": "<base64>", "ciphertext": "<base64>" }
+  ```
+  AES-256-GCM with a PBKDF2-SHA256-stretched key (fresh random salt + IV per export, AAD bound to the format/version so a ciphertext can't be replayed under a different envelope). Decryption fails closed (returns `null`, never partial bytes) on a wrong passphrase or any tampering — the auth tag gates before anything reaches `JSON.parse`.
+
+On import, `#file-load` detects the `pauls-arcade-save-enc` envelope before any of the normal shape gates run, prompts for the passphrase (masked input), decrypts, and then re-enters the exact same gates 4–10 pipeline as a plain file — a decrypted import is never a second, weaker path. A wrong passphrase is a single-attempt failure (toast; no retry loop) — the user re-opens Import from File to try again.
+
+Verified by `tools/export-advanced-acceptance.mjs` (scoped + encrypted export/import round trip proving app-exclusion, wrong-passphrase failure, and the checksum-override accept/decline paths) plus the `encryptBundleJson`/`decryptBundleJson`/override cases in `tools/save-validation-unit.mjs`; both in CI.
 
 ---
 

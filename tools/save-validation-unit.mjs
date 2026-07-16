@@ -22,7 +22,7 @@ import {
     checksumBundle,
     SAVE_FORMAT
 } from '../arcade-storage-core.js';
-import { validateSaveBundle } from '../arcade-save.js';
+import { validateSaveBundle, encryptBundleJson, decryptBundleJson, ENC_FORMAT } from '../arcade-save.js';
 
 let pass = 0, fail = 0;
 function ok(cond, label) {
@@ -148,6 +148,56 @@ async function validateTests() {
     const rp = await validateSaveBundle(signedOverOriginal);
     ok(rp.ok && rp.protectedSkipped === 1 && rp.cleanKeys.length === 1,
         'checksum verifies original data even though a protected key is filtered from cleanData');
+
+    // Human-only checksum override (#29): default behavior (no opts) is
+    // UNCHANGED — this is the exact posture arcade-backup.js's two call
+    // sites rely on, since neither ever passes opts.
+    const mismatched = { format: SAVE_FORMAT, schemaVersion: 1, data: v1data, checksum: 'sha256:deadbeef' };
+    ok((await validateSaveBundle(mismatched)).reason === 'checksum-mismatch',
+        'checksum-mismatch with no opts is still a hard reject (regression pin)');
+    const overridden = await validateSaveBundle(mismatched, { allowChecksumMismatch: true });
+    ok(overridden.ok && overridden.checksumOk === false && overridden.cleanKeys.length === 2,
+        'checksum-mismatch WITH allowChecksumMismatch:true is accepted, flagged checksumOk:false');
+    const notMismatched = await validateSaveBundle(v1, { allowChecksumMismatch: true });
+    ok(notMismatched.ok && notMismatched.checksumOk === true,
+        'a bundle whose checksum is actually fine reports checksumOk:true regardless of the override flag');
+}
+
+async function encryptionTests() {
+    console.log('\nencryptBundleJson / decryptBundleJson');
+    const json = JSON.stringify({ hello: 'world', n: 42 });
+
+    const envelope = await encryptBundleJson(json, 'correct horse battery staple');
+    ok(envelope.format === ENC_FORMAT && envelope.v === 1, 'envelope carries the encrypted format + version');
+    ok(typeof envelope.salt === 'string' && typeof envelope.iv === 'string' && typeof envelope.ciphertext === 'string',
+        'envelope carries base64 salt/iv/ciphertext');
+
+    const roundTripped = await decryptBundleJson(envelope, 'correct horse battery staple');
+    ok(roundTripped === json, 'round-trip: decrypt(encrypt(json, pw), pw) === json');
+
+    ok((await decryptBundleJson(envelope, 'wrong passphrase')) === null, 'wrong passphrase → null');
+
+    const tamperedCiphertext = { ...envelope, ciphertext: envelope.ciphertext.slice(0, -4) + 'abcd' };
+    ok((await decryptBundleJson(tamperedCiphertext, 'correct horse battery staple')) === null,
+        'tampered ciphertext fails the AES-GCM auth tag → null');
+
+    const tamperedSalt = { ...envelope, salt: envelope.salt.slice(0, -4) + 'abcd' };
+    ok((await decryptBundleJson(tamperedSalt, 'correct horse battery staple')) === null,
+        'tampered salt derives the wrong key → null');
+
+    const tamperedIv = { ...envelope, iv: envelope.iv.slice(0, -4) + 'abcd' };
+    ok((await decryptBundleJson(tamperedIv, 'correct horse battery staple')) === null,
+        'tampered iv fails decryption → null');
+
+    ok((await decryptBundleJson(null, 'pw')) === null, 'null envelope → null, no crash');
+    ok((await decryptBundleJson({ format: 'not-it' }, 'pw')) === null, 'wrong format → null without touching crypto');
+    ok((await decryptBundleJson({ format: ENC_FORMAT }, 'pw')) === null, 'missing salt/iv/ciphertext fields → null');
+
+    // Two encryptions of the same plaintext must use fresh salt/iv (never
+    // reuse a nonce under the same derived key).
+    const envelope2 = await encryptBundleJson(json, 'correct horse battery staple');
+    ok(envelope.salt !== envelope2.salt && envelope.iv !== envelope2.iv,
+        'two encryptions of the same plaintext use fresh random salt + iv');
 }
 
 (async () => {
@@ -155,6 +205,7 @@ async function validateTests() {
     keyPredicateTests();
     checksumTests();
     await validateTests();
+    await encryptionTests();
     console.log('');
     if (fail) { console.log(fail + ' check(s) FAILED.'); process.exit(1); }
     console.log('All ' + pass + ' save-validation checks passed.');
