@@ -319,6 +319,14 @@
                 <span class="launcher-menu__item-label">Import from File</span>
             </button>
             <input type="file" id="file-load" accept="application/json,.json" style="display:none">
+            <button type="button" class="launcher-menu__item" id="btn-restore-local-backup" title="Restore the most recent automatic local backup stored on this device">
+                <span class="launcher-menu__item-icon" aria-hidden="true">🕑</span>
+                <span class="launcher-menu__item-label">Restore Last Backup</span>
+            </button>
+            <button type="button" class="launcher-menu__item" id="btn-choose-backup-folder" title="Choose a folder on this device for periodic dated backup exports (Chromium only)">
+                <span class="launcher-menu__item-icon" aria-hidden="true">📁</span>
+                <span class="launcher-menu__item-label" id="btn-choose-backup-folder-label">Backup Folder: Off</span>
+            </button>
         </div>
         <div class="launcher-menu__section">
             <div class="launcher-menu__heading">Network</div>
@@ -1794,6 +1802,7 @@
     import { initSaveLoad } from './arcade-save.js';
     import { initSyncEngine } from './arcade-sync.js';
     import { initBackupEngine } from './arcade-backup.js';
+    import { initLocalBackupEngine } from './arcade-local-backup.js';
     import { validateToast } from './arcade-envelope.js';
 
     const storageHost = window.__arcade.storageHost;
@@ -1827,6 +1836,16 @@
             return !!yes;
         })
     });
+    // Automatic local backup (#30): zero opt-in for the rolling IDB snapshot
+    // — same-origin only, no cross-device trust boundary, unlike #31's peer
+    // backup — so no consent hook. Fire-and-forget: never blocks first
+    // paint; a boot with an already-fresh (<24h) snapshot is a cheap no-op.
+    window.__arcade.localBackup = initLocalBackupEngine({
+        getBundleJson: () => window.__arcade.save.exportBundleString(),
+        importBundleJson: (json, intro) => window.__arcade.save.importBundleJson(json, intro),
+        showToast: storageHost.showToast
+    });
+    window.__arcade.localBackup.maybeSnapshot().catch(() => {});
     storageHost.replayPendingStorageMessages();
 </script>
 

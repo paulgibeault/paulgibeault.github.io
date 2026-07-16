@@ -380,6 +380,44 @@ multi-chunk replication, restore-through-import-gates, checksum dedupe,
 retention cap, consent prompt + symmetric return offer, remembered decline,
 hostile-frame refusal) plus `tools/backup-unit.mjs`; both in CI.
 
+### Automatic local backup (IMPLEMENTED, #30)
+
+A user who never imports a save file previously had zero backups — clearing
+site data or a browser storage eviction destroyed everything. Every launcher
+boot now checks a rolling on-device snapshot and refreshes it when stale, no
+pairing, no consent prompt, no data ever leaving the origin: the same trust
+boundary as the Save/Load buttons themselves.
+
+- **Rolling IDB snapshot:** on boot (fire-and-forget, never blocks first
+  paint), if the newest stored snapshot is absent or more than 24 h old, the
+  engine builds the SAME full-fidelity bundle a Save-to-file / peer backup
+  would (`arcade-save.js`'s `exportBundleString()`) and stores it in the
+  device-local `arcade-local-backup` IndexedDB. The newest 3 generations are
+  kept (`planGenerationStore`, reused as-is from `arcade-backup-core.js` — no
+  per-sender dimension needed, so both backup features share one tested
+  primitive). Engine: `arcade-local-backup.js` (`initLocalBackupEngine(host)`);
+  pure staleness/key-format helpers in `arcade-local-backup-core.js`
+  (Node-tested by `tools/local-backup-unit.mjs`).
+- **Restore:** "Restore Last Backup" in the Game Data menu rides the exact
+  same import gate chain as a file load or peer restore (validate → confirm →
+  auto-backup → snapshot/rollback commit) — never a second, weaker path.
+- **Optional on-disk folder (Chromium):** "Backup Folder: Off/<name>" grants a
+  real on-disk folder via the File System Access API (feature-detected and
+  hidden entirely where absent). Every successful snapshot cycle also tries a
+  dated export into the granted folder, pruned to the same 3-generation cap,
+  gated on `handle.queryPermission({mode:'readwrite'})` — an unattended boot
+  cycle never calls `requestPermission` (gesture-gated); only the folder
+  button's own click may re-request.
+- **Trust posture:** same-origin only, no cross-device transfer — unlike
+  backup-to-trusted-peer (#31), which required mutual pairing consent, the IDB
+  half is always-on with zero opt-in; only the disk-folder grant is opt-in,
+  because the browser API itself requires a user gesture.
+
+Verified by `tools/local-backup-acceptance.mjs` (fresh-install boot snapshot,
+forced-stale re-snapshot, corrupt-and-restore, stubbed `showDirectoryPicker`
+dated-file export + pruning, feature-detect fallback) plus
+`tools/local-backup-unit.mjs`; both in CI.
+
 **Bfcache resume gap:** a page the browser restores from its back-forward cache (e.g. Back after navigating to a different page) doesn't always re-run index.html's startup script — it resumes the frozen JS heap instead. Without a second trigger, a connection killed by that navigation would sit dead until the user reconnects by hand, since the startup-only `resumeRendezvous()` check never got a chance to run again. index.html listens for `pageshow` and re-runs the same freshness check whenever `event.persisted` is true.
 
 ---

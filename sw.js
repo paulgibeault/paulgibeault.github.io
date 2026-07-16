@@ -1,4 +1,4 @@
-const CACHE_NAME = 'paul-arcade-v32';
+const CACHE_NAME = 'paul-arcade-v33';
 // Network-first timeout: on lie-fi, stop waiting on the network and serve the
 // cached shell/asset so first paint stays bounded.
 const NET_TIMEOUT_MS = 5000;
@@ -20,6 +20,8 @@ const ASSETS_TO_CACHE = [
   './arcade-envelope.js',
   './arcade-backup-core.js',
   './arcade-backup.js',
+  './arcade-local-backup-core.js',
+  './arcade-local-backup.js',
   './arcade-catalog.js',
   './catalog.json',
   './p2p/p2p-addon.js',

@@ -31,7 +31,9 @@ jobs:
           for f in arcade-sdk.js arcade-p2p.js arcade-known-peers.js arcade-diag.js \
                    arcade-storage-core.js arcade-storage-bridge.js arcade-save.js \
                    arcade-sync-core.js arcade-sync.js arcade-catalog.js \
-                   arcade-envelope.js p2p/*.js tools/*.mjs; do
+                   arcade-envelope.js arcade-backup-core.js arcade-backup.js \
+                   arcade-local-backup-core.js arcade-local-backup.js \
+                   p2p/*.js tools/*.mjs; do
             echo "checking $f"
             node --check "$f"
           done
@@ -53,6 +55,9 @@ jobs:
 
       - name: Backup unit tests (backup envelope validator, chunking, retention — no browser)
         run: node tools/backup-unit.mjs
+
+      - name: Local backup unit tests (staleness/retention/key-format — no browser)
+        run: node tools/local-backup-unit.mjs
 
       - name: P2P-core unit tests (id entropy, ack/resync bounds, resume binding, frame cap — no browser)
         run: node tools/p2p-core-unit.mjs
@@ -154,6 +159,9 @@ jobs:
           done
           echo "backup-acceptance failed after 3 attempts"
           exit 1
+
+      - name: Local backup acceptance (rolling IDB snapshot, restore, backup-folder export)
+        run: node tools/local-backup-acceptance.mjs
 
       # The full per-game §13 acceptance now runs above against the committed
       # starter-app template fixture (issue #40). To exercise a REAL fleet game
