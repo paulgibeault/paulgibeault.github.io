@@ -15,6 +15,7 @@
     "p2p-core-unit": "node tools/p2p-core-unit.mjs",
     "save-unit": "node tools/save-validation-unit.mjs",
     "sync-unit": "node tools/sync-unit.mjs",
+    "envelope-unit": "node tools/envelope-unit.mjs",
     "sdk-helpers": "node tools/sdk-helpers-acceptance.mjs",
     "store-acceptance": "node tools/store-acceptance.mjs",
     "bridge-acceptance": "node tools/bridge-acceptance.mjs",

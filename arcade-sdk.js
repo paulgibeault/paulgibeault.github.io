@@ -206,10 +206,15 @@
 
     // Remote peer roster — seeded from the launcher's welcome, kept fresh by
     // arcade:peer.identity / arcade:peer.ready broadcasts.
+    // Keep in sync with arcade-envelope.js's DEVICE_ID_RE (this file is a
+    // classic script served standalone to game iframes — it cannot import
+    // ESM): deviceIds are machine-minted UUIDs or the 'dev-' fallback shape.
+    var DEVICE_ID_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|dev-[a-z0-9]{6,50})$/i;
     var remotePeers = {}; // deviceId -> { deviceId, name, at }
     function noteRemotePeer(deviceId, name) {
-        if (typeof deviceId !== 'string' || !deviceId || deviceId.length > 64) return null;
-        if (isDunderKey(deviceId)) return null; // never key the roster object by __proto__/constructor/prototype
+        if (typeof deviceId !== 'string' || !deviceId || deviceId.length > 64
+                || !DEVICE_ID_RE.test(deviceId)) return null;
+        if (isDunderKey(deviceId)) return null; // redundant post-regex; documents the roster-keying invariant
         var prev = remotePeers[deviceId];
         var rec = {
             deviceId: deviceId,

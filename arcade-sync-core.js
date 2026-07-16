@@ -13,6 +13,7 @@
  */
 
 import { syncEligibleKey } from './arcade-storage-core.js';
+import { DEVICE_ID_PATTERN } from './arcade-envelope.js';
 
 // ---- protocol + storage constants ----
 export const SYNC_PROTOCOL_V = 1;
@@ -23,11 +24,11 @@ export const SYNC_TOMBSTONE_CAP_PER_APP = 512;
 // ---- HLC (hybrid logical clock) ----
 // Packed sortable string: <millis:13 digits>:<counter:4 digits>:<deviceId>.
 // Fixed-width zero-padded fields make plain lexicographic string compare an
-// exact causal LWW order; deviceId (same shape as arcade-p2p.js's
-// DEVICE_ID_RE) is the built-in tiebreaker between same-millis/same-counter
-// stamps from different devices (never happens in practice, but keeps
-// hlcCompare total).
-export const HLC_RE = /^\d{13}:\d{4}:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|dev-[a-z0-9]{6,50})$/i;
+// exact causal LWW order; deviceId (the shared shape, composed from
+// arcade-envelope.js's DEVICE_ID_PATTERN) is the built-in tiebreaker between
+// same-millis/same-counter stamps from different devices (never happens in
+// practice, but keeps hlcCompare total).
+export const HLC_RE = new RegExp('^\\d{13}:\\d{4}:' + DEVICE_ID_PATTERN + '$', 'i');
 
 export function hlcPack(millis, counter, deviceId) {
     const m = String(Math.trunc(millis)).padStart(13, '0');

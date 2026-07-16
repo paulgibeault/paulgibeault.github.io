@@ -30,7 +30,8 @@ jobs:
           set -e
           for f in arcade-sdk.js arcade-p2p.js arcade-known-peers.js arcade-diag.js \
                    arcade-storage-core.js arcade-storage-bridge.js arcade-save.js \
-                   arcade-sync-core.js arcade-sync.js arcade-catalog.js p2p/*.js tools/*.mjs; do
+                   arcade-sync-core.js arcade-sync.js arcade-catalog.js \
+                   arcade-envelope.js p2p/*.js tools/*.mjs; do
             echo "checking $f"
             node --check "$f"
           done
@@ -43,6 +44,9 @@ jobs:
 
       - name: Sync unit tests (HLC clock, digest planning, apply/validate — no browser)
         run: node tools/sync-unit.mjs
+
+      - name: Envelope unit tests (wire-envelope validators + deviceId pattern — no browser)
+        run: node tools/envelope-unit.mjs
 
       - name: P2P-core unit tests (id entropy, ack/resync bounds, resume binding, frame cap — no browser)
         run: node tools/p2p-core-unit.mjs

@@ -74,11 +74,11 @@ import {
 } from './arcade-storage-core.js';
 import { readKnownPeers } from './arcade-known-peers.js';
 import { ArcadeDiag } from './arcade-diag.js';
+import { DEVICE_ID_RE } from './arcade-envelope.js';
 
 // Mirrors arcade-p2p.js's device-id minting exactly (same key, same shape):
 // whichever module runs first mints it, the other just reads it back.
 const DEVICE_ID_KEY = KEY_PREFIX + '_meta.deviceId';
-const DEVICE_ID_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|dev-[a-z0-9]{6,50})$/i;
 function randomDeviceId() {
     if (window.crypto && typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID();
     return 'dev-' + Math.random().toString(36).slice(2) + Date.now().toString(36);

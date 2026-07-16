@@ -1364,7 +1364,9 @@
         }
 
         window.addEventListener('message', (e) => {
-            // Two guards. Source: only iframes we mounted via ensureIframe
+            // Two guards (launcher-specific postMessage boundary — the WIRE
+            // envelope shapes live in arcade-envelope.js, see #59).
+            // Source: only iframes we mounted via ensureIframe
             // can match. Origin: sandboxed-without-allow-same-origin frames
             // always report the literal string 'null' — anything else means
             // a non-sandboxed document somehow speaks from a pooled frame
@@ -1460,19 +1462,20 @@
                 case 'arcade:storage.op':
                     dispatchStorageMessage(gameId, data, e.source, e.origin);
                     break;
-                case 'arcade:ui.toast':
-                    // Game asked the launcher to display a toast.
-                    if (typeof data.message === 'string' && data.message) {
-                        const KIND_OK = { info: 1, success: 1, warning: 1, error: 1 };
-                        const kind = KIND_OK[data.kind] ? data.kind : 'info';
-                        const dur = (typeof data.duration === 'number' && data.duration > 0)
-                            ? data.duration : 2500;
-                        showToast(data.message, {
-                            error: kind === 'error',
-                            duration: dur
+                case 'arcade:ui.toast': {
+                    // Game asked the launcher to display a toast. Shape rules
+                    // live in arcade-envelope.js (validateToast), published on
+                    // window.__arcade.envelope by the STORAGE MODULES block.
+                    const envelope = window.__arcade.envelope;
+                    const toast = envelope && envelope.validateToast(data);
+                    if (toast) {
+                        showToast(toast.message, {
+                            error: toast.kind === 'error',
+                            duration: toast.duration
                         });
                     }
                     break;
+                }
             }
         });
 
@@ -1789,8 +1792,14 @@
     import { initStorageBridge } from './arcade-storage-bridge.js';
     import { initSaveLoad } from './arcade-save.js';
     import { initSyncEngine } from './arcade-sync.js';
+    import { validateToast } from './arcade-envelope.js';
 
     const storageHost = window.__arcade.storageHost;
+    // Shared wire-envelope validators (#59) for the classic-script router
+    // above. Set before any game can mount/handshake/post (same document-
+    // order argument as storageHost below); the router degrades a missing
+    // handle to "drop the toast", never a crash.
+    window.__arcade.envelope = { validateToast };
     window.__arcade.storage = initStorageBridge(storageHost);
     initSaveLoad(storageHost);
     window.__arcade.sync = initSyncEngine(storageHost);
