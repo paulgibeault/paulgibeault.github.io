@@ -160,7 +160,10 @@ export async function startP2PHarness({ port, dropPort }) {
         stdio: 'ignore'
     });
     for (let i = 0; i < 50; i++) {
-        try { if ((await fetch(`${BASE}/index.html`)).ok) break; } catch (_) {}
+        // Drain the body: an unconsumed response from python http.server (which
+        // closes the socket per request) leaves undici's parser paused at socket
+        // end — Node 24's bundled undici crashes there (assert(!this.paused)).
+        try { const r = await fetch(`${BASE}/index.html`); await r.arrayBuffer(); if (r.ok) break; } catch (_) {}
         await new Promise(r => setTimeout(r, 100));
     }
 
