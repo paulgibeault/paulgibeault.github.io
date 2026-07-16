@@ -63,10 +63,10 @@ export function isCappedString(v, max) {
  * 'sync' BODY is owned by validateSyncEnvelope (arcade-sync-core.js).
  *
  * Mirrors the router's historical accepts exactly, including the deliberate
- * fall-through: any kind other than presence/presence-ack/sync/identity is a
- * game frame and needs a string gameId.
+ * fall-through: any kind other than presence/presence-ack/sync/backup/
+ * identity is a game frame and needs a string gameId.
  *
- * @returns {{ok:true, kind:'presence'|'sync'|'identity'|'game'} |
+ * @returns {{ok:true, kind:'presence'|'sync'|'backup'|'identity'|'game'} |
  *           {ok:false, reason:'not-arcade'|'bad-gameId'|'bad-deviceId'}}
  */
 export function validatePeerEnvelope(env) {
@@ -76,6 +76,7 @@ export function validatePeerEnvelope(env) {
         return { ok: true, kind: 'presence' };
     }
     if (env.kind === 'sync') return { ok: true, kind: 'sync' };
+    if (env.kind === 'backup') return { ok: true, kind: 'backup' }; // body owned by validateBackupEnvelope
     if (env.kind === 'identity') {
         if (!isDeviceId(env.deviceId)) return { ok: false, reason: 'bad-deviceId' };
         return { ok: true, kind: 'identity' };

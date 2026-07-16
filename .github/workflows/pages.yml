@@ -51,6 +51,9 @@ jobs:
       - name: Envelope unit tests (wire-envelope validators + deviceId pattern — no browser)
         run: node tools/envelope-unit.mjs
 
+      - name: Backup unit tests (backup envelope validator, chunking, retention — no browser)
+        run: node tools/backup-unit.mjs
+
       - name: P2P-core unit tests (id entropy, ack/resync bounds, resume binding, frame cap — no browser)
         run: node tools/p2p-core-unit.mjs
 
@@ -137,6 +140,19 @@ jobs:
             sleep 3
           done
           echo "sync-acceptance failed after 3 attempts"
+          exit 1
+
+      - name: "Backup acceptance (two-launcher bundle replication, consent, restore, retention)"
+        # Drives real WebRTC like the other p2p suites. Same retry wrapper.
+        run: |
+          for i in 1 2 3; do
+            echo "::group::backup-acceptance attempt $i"
+            if node tools/backup-acceptance.mjs; then echo "::endgroup::"; exit 0; fi
+            echo "::endgroup::"
+            echo "attempt $i failed; retrying in 3s"
+            sleep 3
+          done
+          echo "backup-acceptance failed after 3 attempts"
           exit 1
 
       # The full per-game §13 acceptance now runs above against the committed

@@ -115,6 +115,23 @@ async function validateTests() {
     r = await validateSaveBundle({ format: SAVE_FORMAT, schemaVersion: 1, data: allBad, checksum: await checksumData(allBad) });
     ok(r.reason === 'no-valid-keys', 'a bundle with no valid keys → no-valid-keys');
 
+    // …but a v2 bundle whose DATA is empty while stores/files carry content
+    // is a legitimate save (a device persisting only via Arcade.store/files).
+    // This rule must stay in step with exportBundleString's "nothing to back
+    // up" check — see #31: a stores-only bundle that export offers but import
+    // rejects would loop the backup transfer forever, never storable.
+    const storesOnly = { 'arcade.v1.game.store.default': { hi: { n: 1 } } };
+    r = await validateSaveBundle({
+        format: SAVE_FORMAT, schemaVersion: 2, data: {}, stores: storesOnly, files: {},
+        checksum: await checksumBundle({}, storesOnly, {})
+    });
+    ok(r.ok && r.cleanKeys.length === 0, 'a v2 stores-only bundle (empty data) is accepted');
+    r = await validateSaveBundle({
+        format: SAVE_FORMAT, schemaVersion: 2, data: {}, stores: {}, files: {},
+        checksum: await checksumBundle({}, {}, {})
+    });
+    ok(r.reason === 'no-valid-keys', 'a v2 bundle empty in ALL sections → no-valid-keys');
+
     // Flipped checksum → 'checksum-mismatch'.
     ok((await validateSaveBundle({ format: SAVE_FORMAT, schemaVersion: 1, data: v1data, checksum: 'sha256:deadbeef' })).reason === 'checksum-mismatch',
         'a wrong checksum → checksum-mismatch');

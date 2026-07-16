@@ -117,6 +117,18 @@ function httpCarrierScript(dropPort) {
 `;
 }
 
+// Node-side bounded-deadline poll for cross-page convergence checks a single
+// page's waitForFunction can't express (no long sleeps). Shared home for the
+// copies the p2p suites carried individually.
+export async function waitFor(fn, timeoutMs = 15000, intervalMs = 150) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        if (await fn()) return true;
+        await new Promise((r) => setTimeout(r, intervalMs));
+    }
+    return false;
+}
+
 export async function startP2PHarness({ port, dropPort }) {
     const BASE = `http://127.0.0.1:${port}`;
 

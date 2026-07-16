@@ -9,7 +9,8 @@
  *
  * Entry shape (per deviceId):
  *   { name, remoteName, firstConnectedAt, lastConnectedAt, timesConnected,
- *     fingerprint, fingerprintChangedAt?, autoReconnect?, paused?, syncEnabled? }
+ *     fingerprint, fingerprintChangedAt?, autoReconnect?, paused?,
+ *     syncEnabled?, backupTarget? }
  *
  * `paused` is a display/intent flag only — it says the user hung up and
  * doesn't want this link auto-healed. The actual teardown and the
@@ -69,6 +70,20 @@ export function setKnownPeerSyncEnabled(id, on) {
     return mutateKnownPeers((map) => {
         if (!map[id]) return null;
         map[id].syncEnabled = !!on;
+        return map;
+    });
+}
+
+/**
+ * Per-pair opt-in for backup-to-trusted-peer (#31). Symmetric: `true` means
+ * this device both OFFERS its save bundle to the peer on connect and ACCEPTS
+ * (stores) the peer's bundles. `false` records an explicit decline so an
+ * inbound offer never re-prompts; absent means "never asked yet".
+ */
+export function setKnownPeerBackupTarget(id, on) {
+    return mutateKnownPeers((map) => {
+        if (!map[id]) return null;
+        map[id].backupTarget = !!on;
         return map;
     });
 }

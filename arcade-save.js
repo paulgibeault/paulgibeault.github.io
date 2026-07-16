@@ -15,7 +15,10 @@
  * then visible and pinned in one place.
  *
  * initSaveLoad(host) wires the Save/Load buttons; `host` supplies the
- * launcher-owned glue (see index.html's window.__arcade.storageHost).
+ * launcher-owned glue (see index.html's window.__arcade.storageHost). It
+ * returns the bundle API the backup engine builds on (exportBundleString /
+ * importBundleJson) — the same buildBundle + gates 4–10 pipeline, minus the
+ * file layer.
  */
 
 import {
@@ -80,7 +83,15 @@ export async function validateSaveBundle(parsed) {
         cleanData[k] = parsed.data[k];
     }
     const cleanKeys = Object.keys(cleanData);
-    if (cleanKeys.length === 0) {
+    // A v2 bundle whose localStorage section holds nothing importable can
+    // still be a legitimate save: a device whose games persist only via
+    // Arcade.store/files carries data solely in those sections (and this
+    // rule must stay in step with exportBundleString's "nothing to back up"
+    // check, or backup offers loop forever unstorable). Only a bundle with
+    // nothing in ANY section is 'no-valid-keys'.
+    if (cleanKeys.length === 0
+        && Object.keys(parsedStores).length === 0
+        && Object.keys(parsedFiles).length === 0) {
         return { ok: false, reason: 'no-valid-keys' };
     }
     // Gate 6: checksum (over the file's original sections — we verify
@@ -380,6 +391,15 @@ export function initSaveLoad(host) {
         let parsed;
         try { parsed = JSON.parse(text); }
         catch (e) { showToast('Not valid JSON.', { error: true }); return; }
+        await importParsedBundle(parsed, {});
+    }
+
+    // Gates 4–10 over an already-parsed bundle — shared by the file-import
+    // path above (gates 1–3 are file-specific) and the backup-restore path
+    // (arcade-backup.js hands over a stored generation via importBundleJson
+    // below). opts.intro, when present, leads the confirm text so a restore
+    // says whose backup it is. Returns true only when the commit happened.
+    async function importParsedBundle(parsed, opts) {
         // Gates 4–6: shape, per-key allowlist, checksum (pure, unit-tested).
         const v = await validateSaveBundle(parsed);
         if (!v.ok) {
@@ -390,7 +410,7 @@ export function initSaveLoad(host) {
                 'checksum-mismatch': 'Checksum mismatch — file may be corrupt.'
             };
             showToast(MSG[v.reason] || 'File is not a valid arcade save.', { error: true });
-            return;
+            return false;
         }
         const { isV2, cleanData, cleanKeys, droppedKeys, protectedSkipped, parsedStores, parsedFiles } = v;
         // Gate 7: confirm with user. Import merges: keys in the file
@@ -400,13 +420,14 @@ export function initSaveLoad(host) {
         const importFileCount = countFiles(parsedFiles);
         const asyncSummary = (storeEntryCount || importFileCount)
             ? 'It will also restore ' + storeEntryCount + ' stored records and ' + importFileCount + ' files.\n' : '';
-        const summary = 'This will import ' + cleanKeys.length + ' arcade keys from the file, '
+        const summary = ((opts && opts.intro) ? opts.intro + '\n\n' : '')
+            + 'This will import ' + cleanKeys.length + ' arcade keys from the file, '
             + 'overwriting their current values. Saved data not in the file is kept as-is.\n'
             + asyncSummary
             + (droppedKeys.length ? droppedKeys.length + ' invalid keys will be ignored.\n' : '')
             + (protectedSkipped ? 'This device\'s identity and saved connections are kept as-is (not overwritten).\n' : '')
             + '\nYour current state will be auto-saved to your Downloads folder first.\nContinue?';
-        if (!window.confirm(summary)) return;
+        if (!window.confirm(summary)) return false;
         // Gate 8: auto-backup current state (if non-empty)
         const currentData = collectArcadeKeys();
         if (Object.keys(currentData).length > 0) {
@@ -414,16 +435,16 @@ export function initSaveLoad(host) {
                 const backup = await buildBundle(currentData);
                 const ok = downloadJSON('pauls-arcade-autobackup-' + isoStamp() + '.json', backup);
                 if (!ok && !window.confirm('Auto-backup download was blocked. Continue without backup?')) {
-                    return;
+                    return false;
                 }
             } catch (e) {
-                if (!window.confirm('Auto-backup failed. Continue without backup?')) return;
+                if (!window.confirm('Auto-backup failed. Continue without backup?')) return false;
             }
         }
         // Gate 9: quota probe
         if (!quotaProbe()) {
             showToast('localStorage is full — cannot import.', { error: true });
-            return;
+            return false;
         }
         // Gate 10: stage + commit. Snapshot keys we will overwrite.
         const snap = snapshotKeys(cleanKeys);
@@ -434,7 +455,7 @@ export function initSaveLoad(host) {
         } catch (err) {
             restoreSnapshot(snap);
             showToast('Write failed mid-import — prior state restored.', { error: true });
-            return;
+            return false;
         }
         // Async storage (stores/files) is written AFTER the localStorage
         // commit. It can't share the synchronous snapshot/rollback above, so
@@ -460,6 +481,7 @@ export function initSaveLoad(host) {
             host.postToIframe(gid, { type: 'arcade:state.replaced', state: host.stateSnapshotFor(gid) });
         }
         showToast('Imported ' + cleanKeys.length + ' keys' + asyncNote + ' successfully.');
+        return true;
     }
 
     const btnSave = document.getElementById('btn-save');
@@ -473,4 +495,43 @@ export function initSaveLoad(host) {
         fileLoad.value = '';
         if (f) importSaveFile(f);
     });
+
+    // Bundle API for the backup engine (arcade-backup.js): the exact export
+    // and import machinery the Save/Load buttons use, minus the file layer.
+    return {
+        /**
+         * Serialize the current device state as a save-bundle string, or null
+         * when there is nothing to back up. "Nothing" means no key an import
+         * would actually commit: a fresh device holds only IMPORT_PROTECTED
+         * meta keys (deviceId, knownPeers, …), and a bundle of just those
+         * fails validateSaveBundle ('no-valid-keys') on every receiver — so
+         * it must never be offered in the first place. The checksum is the
+         * bundle's own (checksumBundle over data/stores/files).
+         */
+        async exportBundleString() {
+            const data = collectArcadeKeys();
+            const bundle = await buildBundle(data);
+            const importable = Object.keys(data).some((k) => !IMPORT_PROTECTED_KEYS.has(k));
+            if (!importable
+                && Object.keys(bundle.stores).length === 0
+                && countFiles(bundle.files) === 0) return null;
+            return { json: JSON.stringify(bundle), checksum: bundle.checksum, exportedAt: bundle.exportedAt };
+        },
+
+        /**
+         * Run a serialized bundle through the full import pipeline (gates
+         * 3–10: parse, validate, confirm, auto-backup, commit). Returns true
+         * only when the commit happened.
+         */
+        async importBundleJson(json, intro) {
+            if (typeof json !== 'string' || json.length > MAX_IMPORT_BYTES) {
+                showToast('Backup rejected: size exceeds 64 MB.', { error: true });
+                return false;
+            }
+            let parsed;
+            try { parsed = JSON.parse(json); }
+            catch (e) { showToast('Backup is not valid JSON.', { error: true }); return false; }
+            return importParsedBundle(parsed, { intro });
+        }
+    };
 }
