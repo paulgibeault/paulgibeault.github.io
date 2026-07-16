@@ -24,6 +24,7 @@
     "sdk-helpers": "node tools/sdk-helpers-acceptance.mjs",
     "store-acceptance": "node tools/store-acceptance.mjs",
     "bridge-acceptance": "node tools/bridge-acceptance.mjs",
+    "ui-acceptance": "node tools/ui-acceptance.mjs",
     "export-roundtrip": "node tools/export-roundtrip-acceptance.mjs",
     "export-advanced-acceptance": "node tools/export-advanced-acceptance.mjs",
     "catalog-acceptance": "node tools/catalog-acceptance.mjs",

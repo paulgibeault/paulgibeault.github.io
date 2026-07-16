@@ -11,6 +11,7 @@
  *                           stays there because it depends on storage-core's
  *                           syncEligibleKey — this module stays zero-dep
  *   - index.html          — arcade:ui.toast normalization (validateToast)
+ *   - arcade-ui-bridge.js — arcade:ui.op normalization (validateUiOp)
  *
  * NOT consumers, by design:
  *   - arcade-sdk.js is a classic script served standalone to game iframes; it
@@ -97,4 +98,75 @@ export function validateToast(data) {
     const duration = (typeof data.duration === 'number' && data.duration > 0)
         ? data.duration : 2500;
     return { message: data.message, kind, duration };
+}
+
+/**
+ * Normalizes a game's arcade:ui.op request (launcher postMessage router →
+ * arcade-ui-bridge.js). Two families:
+ *   RPC ops (need a reply, so `id` is required): confirm, prompt, openFile,
+ *     share — the bridge answers with arcade:bridge.result {id, ok, value}.
+ *   Fire-and-forget ops (no id): setTitle, quitHook.
+ * Every free-text field is length-capped by TRUNCATION, not rejection — a
+ * game that overflows a label still gets its dialog, just clipped. The one
+ * hard security rule lives at the CALLER's shape: there is no inputType
+ * field at all, so a game can never request the password-masked input the
+ * launcher's own passphrase prompts use (dialog spoofing, see #29/#35).
+ * @returns {{op:string, id?:string, ...} | null} null = drop the message.
+ */
+const UI_RPC_OPS = { confirm: 1, prompt: 1, openFile: 1, share: 1 };
+const UI_FF_OPS = { setTitle: 1, quitHook: 1 };
+const clip = (v, max) => (typeof v === 'string' ? v.slice(0, max) : null);
+export function validateUiOp(data) {
+    if (!isPlainObject(data) || typeof data.op !== 'string') return null;
+    const op = data.op;
+    if (UI_RPC_OPS[op]) {
+        // ids are SDK-minted ('r' + seq); cap defensively, never trust length.
+        if (typeof data.id !== 'string' || !data.id || data.id.length > 64) return null;
+    } else if (!UI_FF_OPS[op]) {
+        return null;
+    }
+    switch (op) {
+        case 'confirm': {
+            const message = clip(data.message, 500);
+            if (!message) return null;
+            return {
+                op, id: data.id, message,
+                okLabel: clip(data.okLabel, 24) || 'OK',
+                cancelLabel: clip(data.cancelLabel, 24) || 'Cancel'
+            };
+        }
+        case 'prompt': {
+            const message = clip(data.message, 500);
+            if (!message) return null;
+            return { op, id: data.id, message, value: clip(data.value, 500) || '' };
+        }
+        case 'openFile':
+            // accept mirrors <input accept>: extensions and MIME patterns.
+            // Anything outside that alphabet is dropped (not clipped) — it
+            // lands in a DOM attribute.
+            return {
+                op, id: data.id,
+                accept: (typeof data.accept === 'string' && data.accept.length <= 200
+                    && /^[a-z0-9./*+,\- ]+$/i.test(data.accept)) ? data.accept : ''
+            };
+        case 'share': {
+            const text = clip(data.text, 2000) || '';
+            const title = clip(data.title, 120) || '';
+            let url = '';
+            if (typeof data.url === 'string' && data.url.length <= 500) {
+                try {
+                    const u = new URL(data.url);
+                    if (u.protocol === 'http:' || u.protocol === 'https:') url = u.href;
+                } catch (e) { /* not a URL — drop the field, keep the share */ }
+            }
+            if (!text && !title && !url) return null;
+            return { op, id: data.id, title, text, url };
+        }
+        case 'setTitle':
+            // Empty/absent title is a valid op: "reset to catalog name".
+            return { op, title: clip(data.title, 80) || '' };
+        case 'quitHook':
+            return { op, enabled: data.enabled === true };
+    }
+    return null;
 }

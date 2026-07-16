@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ui-bridge acceptance fixture</title>
+<!-- Minimal page: load the SDK and init. The ui acceptance mounts this
+     inside the launcher's sandboxed (opaque-origin) iframe pool and drives
+     every Arcade.ui call through frame.evaluate — nothing to do here but
+     init and expose a place to park cross-evaluate results. -->
+<script src="/arcade-sdk.js"></script>
+<script>
+  Arcade.init({ gameId: new URLSearchParams(location.search).get('gid') || 'ui-test' });
+  // Landing spot for results the test reads back across evaluate calls.
+  window.uiResults = {};
+</script>
+<body>ui-test</body>

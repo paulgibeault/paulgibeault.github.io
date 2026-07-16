@@ -131,8 +131,20 @@ Arcade.settings.audioVolume()         // 0..1
 Arcade.settings.handedness()          // 'left' | 'right'
 Arcade.onSettingsChange(fn)           // fires when launcher updates a setting
 
-// UI — launcher-rendered toast when framed, in-place fallback standalone
+// UI — launcher-rendered chrome when framed (needs the 'ui.bridge' cap;
+// degrades to the cancel answer against an older launcher), native
+// fallbacks standalone. Dialogs are attributed with the app's catalog name
+// and prompt input is never password-masked (dialog-spoof guard); only the
+// ACTIVE frame can pop dialogs — background frames get the cancel answer.
 Arcade.ui.toast(message, { kind, duration })
+Arcade.ui.confirm(message, { okLabel, cancelLabel })  // → Promise<boolean>
+Arcade.ui.prompt(message, defaultValue)   // → Promise<string|null>
+Arcade.ui.setTitle(title)                 // app-set topbar title; '' resets
+Arcade.ui.onBeforeQuit(fn)                // veto/flush on quit: return false to stay
+                                          // (launcher timeboxes ~1.5s); null unregisters
+Arcade.ui.openFile({ accept })            // → Promise<File|null>; consent-gated picker
+Arcade.ui.share({ title, text, url })     // → Promise<'shared'|'copied'|null>
+Arcade.ui.copy(text)                      // → Promise<boolean>; in-frame clipboard-write
 
 // CONTEXT — so games can light up extras when framed
 Arcade.context                        // { framed: boolean, version: number, gameId }
@@ -164,7 +176,7 @@ All messages namespaced `arcade:` to avoid collision.
 ```
 child → parent:  { type: 'arcade:hello',   gameId, version: 3 }
 parent → child:  { type: 'arcade:welcome', version: 2, peerStatus: 'idle',
-                   caps: ['peer.sendTo', 'peer.roster', 'peer.meta', 'storage.bridge'],  // capability flags (absent ⇒ [])
+                   caps: ['peer.sendTo', 'peer.roster', 'peer.meta', 'storage.bridge', 'ui.bridge'],  // capability flags (absent ⇒ [])
                    peers: [{ deviceId, name, status, direct }, ...],   // live remote devices (roster seed)
                    settings: { fontScale, theme, reducedMotion, audioVolume, handedness },
                    state: { '<fullKey>': '<raw string>', ... } }       // storage-bridge snapshot: the app's own
@@ -208,7 +220,30 @@ parent → child:  { type: 'arcade:lifecycle.resume' }              // iframe sh
 child  → parent: { type: 'arcade:ui.toast',          message, kind, duration }
 ```
 
-Twenty-one message types total (see GAME_INTEGRATION.md §14 for the full summary table). The launcher routes peer messages by `gameId` so multiple games could in principle multiplex one connection, though the current design assumes one foreground game at a time. Between launchers, presence frames (`{arcade:1, kind:'presence'|'presence-ack', gameId}`) announce that a game is mounted and listening; the receiving launcher surfaces them to the matching game as `arcade:peer.ready`.
+### UI chrome bridge (#35)
+
+```
+child  → parent: { type: 'arcade:ui.op', op: 'confirm', id, message, okLabel?, cancelLabel? }
+child  → parent: { type: 'arcade:ui.op', op: 'prompt',  id, message, value? }
+child  → parent: { type: 'arcade:ui.op', op: 'openFile', id, accept? }
+child  → parent: { type: 'arcade:ui.op', op: 'share',   id, title?, text?, url? }
+                                          // the four RPC ops answer via arcade:bridge.result
+                                          // (value: true | string | File | 'shared' | 'copied'; null = cancel)
+child  → parent: { type: 'arcade:ui.op', op: 'setTitle', title }   // fire-and-forget; '' resets
+child  → parent: { type: 'arcade:ui.op', op: 'quitHook', enabled } // registers the quit veto ask
+parent → child:  { type: 'arcade:ui.beforeQuit', id }              // only sent when quitHook enabled
+child  → parent: { type: 'arcade:ui.beforeQuit.result', id, allow }
+```
+
+Shape rules live in `arcade-envelope.js` (`validateUiOp`): free text is
+length-clipped, `accept` is alphabet-gated (it lands in a DOM attribute),
+share URLs must parse as http(s), and there is structurally no way for an
+app to request the password-masked input the launcher's own passphrase
+dialogs use. `arcade-ui-bridge.js` services the ops behind the launcher's
+frame-identity boundary; dialogs render in the launcher's serialized
+focus-trap modal, prefixed with the app's catalog name.
+
+Twenty-five message types total (see GAME_INTEGRATION.md §14 for the full summary table). The launcher routes peer messages by `gameId` so multiple games could in principle multiplex one connection, though the current design assumes one foreground game at a time. Between launchers, presence frames (`{arcade:1, kind:'presence'|'presence-ack', gameId}`) announce that a game is mounted and listening; the receiving launcher surfaces them to the matching game as `arcade:peer.ready`.
 
 **Legacy compatibility shim:** a small number of older games (e.g. hecknsic) shipped their own postMessage-backed `localStorage` override before the SDK existed. The launcher still answers that game's `'ls-proxy-request'`/`'ls-proxy-response'` protocol (namespaced into `arcade.v1.<gameId>.ls.<key>`) purely so those games don't hang — this is launcher-side legacy support, not part of the `arcade:` protocol, and new games should use `Arcade.state.*` directly rather than rolling a shim of their own.
 

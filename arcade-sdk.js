@@ -84,8 +84,19 @@
  *                                 |'malformed'|'oversize'|'too-many', ... }
  *   Arcade.peer.queue() / onQueue(fn)             replay-queue visibility
  *
- *   // Launcher-mediated UI
+ *   // Launcher-mediated UI (#35 — real modals despite the sandbox no-oping
+ *   // window.confirm/prompt; framed ops need the launcher's 'ui.bridge' cap
+ *   // and degrade to the cancel answer without it)
  *   Arcade.ui.toast(message, { kind, duration })
+ *   Arcade.ui.confirm(message, { okLabel, cancelLabel }) → Promise<boolean>
+ *   Arcade.ui.prompt(message, defaultValue)       → Promise<string|null>
+ *   Arcade.ui.setTitle(title)                     app-set topbar title ('' resets)
+ *   Arcade.ui.onBeforeQuit(fn)                    veto/flush on quit: return
+ *                                                 false (or a Promise of it)
+ *                                                 to stay; null unregisters
+ *   Arcade.ui.openFile({ accept })                → Promise<File|null>
+ *   Arcade.ui.share({ title, text, url })         → Promise<'shared'|'copied'|null>
+ *   Arcade.ui.copy(text)                          → Promise<boolean> (in-frame)
  *
  *   // Safe rendering — escape peer/user text before it reaches innerHTML
  *   Arcade.html.escape(str)                       → HTML-escaped string
@@ -1088,17 +1099,20 @@
     var rpcSeq = 0;
     var rpcPending = {};
     var RPC_TIMEOUT_MS = 30000;
-    function bridgeRpc(msgType, fields) {
+    function bridgeRpc(msgType, fields, timeoutMs) {
         return readyPromise.then(function () {
             if (!framed) {
                 throw new Error('Arcade: storage bridge unavailable — no launcher answered this frame');
             }
             return new Promise(function (resolve, reject) {
                 var id = 'r' + (++rpcSeq);
-                var timer = setTimeout(function () {
+                // timeoutMs 0 = no deadline: UI dialog ops (#35) resolve on
+                // USER action, which legitimately outlives any fixed timer.
+                var t = (timeoutMs === undefined) ? RPC_TIMEOUT_MS : timeoutMs;
+                var timer = (t > 0) ? setTimeout(function () {
                     delete rpcPending[id];
                     reject(new Error('Arcade: launcher did not answer ' + msgType));
-                }, RPC_TIMEOUT_MS);
+                }, t) : null;
                 rpcPending[id] = { resolve: resolve, reject: reject, timer: timer };
                 var msg = { type: msgType, id: id };
                 for (var k in fields) {
@@ -1293,6 +1307,22 @@
                 launcherSuspended = false;
                 recomputeSuspended();
                 break;
+            case 'arcade:ui.beforeQuit': {
+                // Launcher asks: may it quit this app? (#35 — only sent when
+                // ui.onBeforeQuit registered a hook.) Anything but an explicit
+                // false — including a throw — allows the quit: the hook is a
+                // flush/veto opportunity, never a trap. The launcher enforces
+                // its own deadline, so a slow reply just forfeits the veto.
+                var bqId = typeof data.id === 'string' ? data.id : '';
+                var bqReply = function (v) {
+                    postToParent({ type: 'arcade:ui.beforeQuit.result', id: bqId, allow: v !== false });
+                };
+                if (!beforeQuitHandler) { bqReply(true); break; }
+                try {
+                    Promise.resolve(beforeQuitHandler()).then(bqReply, function () { bqReply(true); });
+                } catch (e) { bqReply(true); }
+                break;
+            }
         }
     }
     function onStorage(e) {
@@ -1953,6 +1983,59 @@
         } catch (e) {}
     }
     var KIND_SET = { info: 1, success: 1, warning: 1, error: 1 };
+
+    // ─── Launcher-mediated UI chrome (#35) ─────────────────────────
+    // The sandbox no-ops window.confirm/prompt inside game frames, so the
+    // dialog family rides the generic RPC rail (arcade:ui.op →
+    // arcade:bridge.result) and the LAUNCHER renders real modals — attributed
+    // with the app's name, so a game can never pass a dialog off as the
+    // launcher's own. Framed ops need the 'ui.bridge' cap; against an older
+    // launcher they degrade to the cancel answer instead of hanging.
+    // Standalone (opened directly, no launcher) falls back to the native
+    // equivalents.
+    var beforeQuitHandler = null;
+    var standaloneDocTitle = null;
+    function uiBridgeMissing() { return peerCaps.indexOf('ui.bridge') === -1; }
+    function uiRpc(fields, missingValue) {
+        return bridgeRpc('arcade:ui.op', fields, 0).then(
+            function (v) { return v; },
+            function () { return missingValue; });
+    }
+    function execCommandCopy(text) {
+        try {
+            var ta = document.createElement('textarea');
+            ta.value = text;
+            ta.setAttribute('readonly', '');
+            ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;';
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            var ok = document.execCommand('copy');
+            ta.remove();
+            return !!ok;
+        } catch (e) { return false; }
+    }
+    function pickLocalFile(accept) {
+        return new Promise(function (resolve) {
+            var input = document.createElement('input');
+            input.type = 'file';
+            if (typeof accept === 'string' && accept) input.accept = accept;
+            input.style.display = 'none';
+            document.body.appendChild(input);
+            var done = false;
+            var finish = function (file) {
+                if (done) return;
+                done = true;
+                try { input.remove(); } catch (e) {}
+                resolve(file || null);
+            };
+            input.addEventListener('change', function () {
+                finish(input.files && input.files[0]);
+            });
+            input.addEventListener('cancel', function () { finish(null); });
+            input.click();
+        });
+    }
     var uiApi = {
         toast: function (message, opts) {
             if (typeof message !== 'string' || !message) return;
@@ -1968,6 +2051,129 @@
             } else {
                 showFallbackToast(message, kind, duration);
             }
+        },
+        // → Promise<boolean>. false covers every non-OK outcome: cancel,
+        // background frame, launcher without the cap.
+        confirm: function (message, opts) {
+            var msg = String(message == null ? '' : message);
+            opts = opts || {};
+            return readyPromise.then(function () {
+                if (!framed) {
+                    try { return !!window.confirm(msg); } catch (e) { return false; }
+                }
+                if (uiBridgeMissing()) return false;
+                return uiRpc({
+                    op: 'confirm', message: msg,
+                    okLabel: opts.okLabel, cancelLabel: opts.cancelLabel
+                }, null).then(function (v) { return v === true; });
+            });
+        },
+        // → Promise<string|null> (null = cancelled).
+        prompt: function (message, defaultValue) {
+            var msg = String(message == null ? '' : message);
+            var dflt = defaultValue == null ? '' : String(defaultValue);
+            return readyPromise.then(function () {
+                if (!framed) {
+                    try { return window.prompt(msg, dflt); } catch (e) { return null; }
+                }
+                if (uiBridgeMissing()) return null;
+                return uiRpc({ op: 'prompt', message: msg, value: dflt }, null)
+                    .then(function (v) { return typeof v === 'string' ? v : null; });
+            });
+        },
+        // App-set topbar title; '' (or nothing) resets to the catalog name.
+        // Standalone maps to document.title, restoring the original on reset.
+        setTitle: function (title) {
+            var t = title == null ? '' : String(title);
+            readyPromise.then(function () {
+                if (framed) {
+                    postToParent({ type: 'arcade:ui.op', op: 'setTitle', title: t });
+                } else {
+                    try {
+                        if (standaloneDocTitle === null) standaloneDocTitle = document.title;
+                        document.title = t || standaloneDocTitle;
+                    } catch (e) {}
+                }
+            });
+        },
+        // Register fn to be asked before the launcher quits this app —
+        // return false (or a Promise resolving false) to veto; anything
+        // else quits. Pass null to unregister. The launcher timeboxes the
+        // ask, so a slow handler forfeits the veto rather than trapping
+        // the user. Standalone: no launcher, no quit button — no-op.
+        onBeforeQuit: function (fn) {
+            beforeQuitHandler = (typeof fn === 'function') ? fn : null;
+            var enabled = !!beforeQuitHandler;
+            readyPromise.then(function () {
+                if (framed) postToParent({ type: 'arcade:ui.op', op: 'quitHook', enabled: enabled });
+            });
+        },
+        // → Promise<File|null>. Framed, the launcher brokers a consent
+        // dialog + picker (sandboxed frames have no open path of their own)
+        // and the File structured-clones back.
+        openFile: function (opts) {
+            var accept = (opts && typeof opts.accept === 'string') ? opts.accept : '';
+            return readyPromise.then(function () {
+                if (!framed) return pickLocalFile(accept);
+                if (uiBridgeMissing()) return null;
+                return uiRpc({ op: 'openFile', accept: accept }, null).then(function (v) {
+                    return (typeof File !== 'undefined' && v instanceof File) ? v : null;
+                });
+            });
+        },
+        // → Promise<'shared'|'copied'|null>. 'copied' is the no-Web-Share
+        // fallback (payload placed on the clipboard, toast shown).
+        share: function (data) {
+            data = data || {};
+            var payload = {
+                title: typeof data.title === 'string' ? data.title : '',
+                text: typeof data.text === 'string' ? data.text : '',
+                url: typeof data.url === 'string' ? data.url : ''
+            };
+            return readyPromise.then(function () {
+                if (framed) {
+                    if (uiBridgeMissing()) return null;
+                    return uiRpc({ op: 'share', title: payload.title, text: payload.text, url: payload.url }, null)
+                        .then(function (v) { return (v === 'shared' || v === 'copied') ? v : null; });
+                }
+                var joined = [payload.title, payload.text, payload.url]
+                    .filter(function (s) { return !!s; }).join('\n');
+                if (!joined) return null;
+                var shareArgs = {};
+                if (payload.title) shareArgs.title = payload.title;
+                if (payload.text) shareArgs.text = payload.text;
+                if (payload.url) shareArgs.url = payload.url;
+                var fallbackCopy = function () {
+                    return uiApi.copy(joined).then(function (ok) {
+                        if (ok) uiApi.toast('Copied to clipboard');
+                        return ok ? 'copied' : null;
+                    });
+                };
+                if (navigator.share) {
+                    return navigator.share(shareArgs).then(
+                        function () { return 'shared'; },
+                        function (e) {
+                            return (e && e.name === 'AbortError') ? null : fallbackCopy();
+                        });
+                }
+                return fallbackCopy();
+            });
+        },
+        // → Promise<boolean>. Stays IN-frame in both modes: the launcher
+        // grants clipboard-write to game frames, and the game's own click is
+        // the gesture the API wants (a launcher round-trip would fail
+        // Chrome's document-focus rule — the iframe holds focus).
+        copy: function (text) {
+            var t = String(text == null ? '' : text);
+            return new Promise(function (resolve) {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(t).then(
+                        function () { resolve(true); },
+                        function () { resolve(execCommandCopy(t)); });
+                } else {
+                    resolve(execCommandCopy(t));
+                }
+            });
         }
     };
 
