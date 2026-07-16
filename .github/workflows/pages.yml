@@ -29,7 +29,7 @@ jobs:
         run: |
           set -e
           for f in arcade-sdk.js arcade-p2p.js arcade-known-peers.js arcade-diag.js \
-                   arcade-storage-core.js arcade-storage-bridge.js arcade-save.js \
+                   arcade-storage-core.js arcade-storage-bridge.js arcade-ui-bridge.js arcade-save.js \
                    arcade-sync-core.js arcade-sync.js arcade-catalog.js \
                    arcade-envelope.js arcade-backup-core.js arcade-backup.js \
                    arcade-local-backup-core.js arcade-local-backup.js \
@@ -75,6 +75,9 @@ jobs:
 
       - name: Storage-bridge acceptance (opaque-frame boundary + bridge round-trips)
         run: node tools/bridge-acceptance.mjs
+
+      - name: UI-bridge acceptance (attributed dialogs, title, quit veto, openFile, copy)
+        run: node tools/ui-acceptance.mjs
 
       - name: Export/import roundtrip (store/files in save bundle; P2P excluded)
         run: node tools/export-roundtrip-acceptance.mjs

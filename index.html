@@ -521,6 +521,13 @@
         // block after this IIFE runs — null until then, router queues meanwhile).
         storageHost: null,
         storage: null,
+        // uiHost: launcher-owned glue for the UI chrome bridge (#35); ui: its
+        // dispatch handles (arcade-ui-bridge.js, same module-block wiring and
+        // router-queue story as storage). requestQuit: the quit button's
+        // veto round-trip — null-checked by the gameViewController handler.
+        uiHost: null,
+        ui: null,
+        requestQuit: null,
         // sync: the Arcade.sync replication engine (arcade-sync.js) — null
         // until module block D runs; attachP2P() wires it once loadP2P runs.
         sync: null
@@ -736,7 +743,12 @@
         const viewGame = document.getElementById('view-game');
         const quitGameBtn = document.getElementById('quit-game-btn');
 
-        quitGameBtn.addEventListener('click', () => {
+        quitGameBtn.addEventListener('click', async () => {
+            // An app that registered Arcade.ui.onBeforeQuit gets one
+            // timeboxed chance to veto/flush (#35). requestQuit resolves
+            // true immediately when no hook is registered, and false for
+            // clicks that land while a round-trip is already in flight.
+            if (window.__arcade.requestQuit && !(await window.__arcade.requestQuit())) return;
             // Close the menu first so it doesn't linger open in launcher view.
             if (window.__arcade.closeLauncherMenu) window.__arcade.closeLauncherMenu();
             window.__arcade.hideGameView();
@@ -840,6 +852,9 @@
                 }, RETIRE_GRACE_MS);
                 pool.delete(lruId);
                 helloedGames.delete(lruId);
+                // UI bridge state (quit hook) dies with the frame — a fresh
+                // mount re-registers after its handshake.
+                if (window.__arcade.ui) window.__arcade.ui.clearGame(lruId);
             }
         }
         // Evicted-but-flushing frames: still routable for the grace window.
@@ -862,7 +877,10 @@
             iframe.setAttribute('sandbox', 'allow-scripts allow-downloads');
             // Opaque origin no longer matches the default 'self' permissions-
             // policy allowlists — grant the game-relevant features explicitly.
-            iframe.setAttribute('allow', 'autoplay; fullscreen; gamepad; screen-wake-lock');
+            // clipboard-write lets Arcade.ui.copy() work IN-frame (#35): the
+            // launcher-side route fails Chrome's document-focus rule, since
+            // during a game click it's the iframe that holds focus.
+            iframe.setAttribute('allow', 'autoplay; fullscreen; gamepad; screen-wake-lock; clipboard-write');
             iframe.setAttribute('allowfullscreen', '');
             iframe.setAttribute('title', name);
             iframe.hidden = true;
@@ -896,7 +914,9 @@
                 e.iframe.hidden = (gid !== gameId);
             }
             activeGameId = gameId;
-            topbarTitle.textContent = name || "Paul's Arcade";
+            // A pooled frame keeps its Arcade.ui.setTitle title across
+            // launcher round-trips; eviction (fresh entry) naturally resets.
+            topbarTitle.textContent = entry.customTitle || name || "Paul's Arcade";
 
             document.body.classList.add('app-in-game');
             viewGame.classList.remove('hidden');
@@ -969,6 +989,10 @@
             const entry = gid && pool.get(gid);
             if (!entry) return;
             helloedGames.delete(gid);
+            // The reloaded document starts from scratch — stale quit hook and
+            // custom title must not survive it.
+            if (window.__arcade.ui) window.__arcade.ui.clearGame(gid);
+            entry.customTitle = '';
             beginGameLoad(gid, entry.name);
             try { entry.iframe.src = entry.src || entry.iframe.src; } catch (e) {}
         });
@@ -993,7 +1017,9 @@
         // launcher features never bump the protocol version. storage.bridge:
         // this launcher hosts the opaque-frame storage bridge (state.write /
         // store.op / files.op / storage.op + welcome.state snapshot).
-        const ARCADE_PEER_CAPS = ['peer.sendTo', 'peer.roster', 'peer.meta', 'storage.bridge'];
+        // ui.bridge: this launcher services arcade:ui.op (confirm/prompt/
+        // setTitle/quitHook/openFile/share — see arcade-ui-bridge.js).
+        const ARCADE_PEER_CAPS = ['peer.sendTo', 'peer.roster', 'peer.meta', 'storage.bridge', 'ui.bridge'];
         function loadP2P() {
             if (p2pBridge) return Promise.resolve(p2pBridge);
             if (p2pLoadPromise) return p2pLoadPromise;
@@ -1376,6 +1402,51 @@
             while (pendingStorageMsgs.length) dispatchStorageMessage(...pendingStorageMsgs.shift());
         }
 
+        // UI-bridge delegation — same trust-boundary/queue story as storage
+        // above: the router authenticates, arcade-ui-bridge.js services. A
+        // dropped pre-module message would strand a game's dialog promise
+        // (its RPC ids only resolve on reply), hence the replay queue.
+        const pendingUiMsgs = [];
+        function dispatchUiMessage(gameId, data) {
+            const U = window.__arcade.ui;
+            if (!U) { pendingUiMsgs.push([gameId, data]); return; }
+            U.uiOp(gameId, data);
+        }
+        function replayPendingUiMessages() {
+            while (pendingUiMsgs.length) dispatchUiMessage(...pendingUiMsgs.shift());
+        }
+
+        // Quit veto round-trip (#35). Only ever asked of the ACTIVE game, and
+        // only when its SDK registered a hook — everyone else resolves true
+        // synchronously so the quit button stays instant. The timeout is the
+        // no-trap guarantee: a hung/crashed frame forfeits its veto.
+        const BEFORE_QUIT_TIMEOUT_MS = 1500;
+        let beforeQuitSeq = 0;
+        let beforeQuitPending = null; // { id, done }
+        function requestQuit() {
+            const gid = activeGameId;
+            const ui = window.__arcade.ui;
+            if (!gid || !ui || !ui.hasQuitHook(gid) || !helloedGames.has(gid)) {
+                return Promise.resolve(true);
+            }
+            // A second click while a round-trip is in flight is swallowed —
+            // the pending one resolves within the timeout either way.
+            if (beforeQuitPending) return Promise.resolve(false);
+            return new Promise((resolve) => {
+                const id = 'q' + (++beforeQuitSeq);
+                const timer = setTimeout(() => done(true), BEFORE_QUIT_TIMEOUT_MS);
+                function done(allow) {
+                    if (!beforeQuitPending || beforeQuitPending.id !== id) return;
+                    beforeQuitPending = null;
+                    clearTimeout(timer);
+                    resolve(allow);
+                }
+                beforeQuitPending = { id: id, done: done };
+                postToIframe(gid, { type: 'arcade:ui.beforeQuit', id: id });
+            });
+        }
+        window.__arcade.requestQuit = requestQuit;
+
         window.addEventListener('message', (e) => {
             // Two guards (launcher-specific postMessage boundary — the WIRE
             // envelope shapes live in arcade-envelope.js, see #59).
@@ -1474,6 +1545,21 @@
                     break;
                 case 'arcade:storage.op':
                     dispatchStorageMessage(gameId, data, e.source, e.origin);
+                    break;
+                case 'arcade:ui.op':
+                    // Launcher-mediated UI chrome (#35). Shape rules live in
+                    // arcade-envelope.js (validateUiOp); the bridge module
+                    // answers RPC ops via arcade:bridge.result.
+                    dispatchUiMessage(gameId, data);
+                    break;
+                case 'arcade:ui.beforeQuit.result':
+                    // Only the active game's in-flight veto counts — a
+                    // background frame echoing ids must not release (or
+                    // deny) someone else's quit.
+                    if (beforeQuitPending && gameId === activeGameId
+                            && data.id === beforeQuitPending.id) {
+                        beforeQuitPending.done(data.allow !== false);
+                    }
                     break;
                 case 'arcade:ui.toast': {
                     // Game asked the launcher to display a toast. Shape rules
@@ -1683,6 +1769,30 @@
             onStateWritten: (gameId, key, value) => { if (window.__arcade.sync) window.__arcade.sync.noteLocalWrite(key, value); },
             onImportCommitted: (keys) => { if (window.__arcade.sync) window.__arcade.sync.noteImportCommitted(keys); }
         };
+
+        // An app-set topbar title (Arcade.ui.setTitle). Stored on the pool
+        // entry so it survives launcher round-trips while the frame is warm;
+        // empty string means "back to the catalog name".
+        function setGameTitle(gameId, title) {
+            const entry = pool.get(gameId);
+            if (!entry) return;
+            entry.customTitle = title || '';
+            if (gameId === activeGameId) {
+                topbarTitle.textContent = entry.customTitle || entry.name || "Paul's Arcade";
+            }
+        }
+
+        // Launcher-owned glue handed to the UI chrome bridge (#35) — same
+        // capability-injection contract as storageHost above.
+        window.__arcade.uiHost = {
+            postToIframe: postToIframe,
+            dialog: (opts) => window.__arcade.dialog(opts),
+            showToast: showToast,
+            getGameName: (gid) => { const e = pool.get(gid); return e ? (e.name || '') : ''; },
+            getActiveGameId: () => activeGameId,
+            setGameTitle: setGameTitle,
+            replayPendingUiMessages: replayPendingUiMessages
+        };
     })();
 
     // ==========================================
@@ -1809,7 +1919,8 @@
     import { initSyncEngine } from './arcade-sync.js';
     import { initBackupEngine } from './arcade-backup.js';
     import { initLocalBackupEngine } from './arcade-local-backup.js';
-    import { validateToast } from './arcade-envelope.js';
+    import { initUiBridge } from './arcade-ui-bridge.js';
+    import { validateToast, validateUiOp } from './arcade-envelope.js';
 
     const storageHost = window.__arcade.storageHost;
     // Shared wire-envelope validators (#59) for the classic-script router
@@ -1818,6 +1929,12 @@
     // handle to "drop the toast", never a crash.
     window.__arcade.envelope = { validateToast };
     window.__arcade.storage = initStorageBridge(storageHost);
+    // UI chrome bridge (#35) — dialogs/title/quit-hook/openFile/share on a
+    // game's behalf. Shape validation is injected so the bridge module stays
+    // a pure consumer of arcade-envelope.js like the router is.
+    window.__arcade.ui = initUiBridge(
+        Object.assign({ validateUiOp }, window.__arcade.uiHost));
+    window.__arcade.uiHost.replayPendingUiMessages();
     window.__arcade.save = initSaveLoad(storageHost);
     window.__arcade.sync = initSyncEngine(storageHost);
     // Backup-to-trusted-peer (#31): rides the save module's bundle API for

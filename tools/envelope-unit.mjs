@@ -17,7 +17,8 @@ import {
     isPlainObject,
     isCappedString,
     validatePeerEnvelope,
-    validateToast
+    validateToast,
+    validateUiOp
 } from '../arcade-envelope.js';
 import { ConnectionUtils } from '../p2p/p2p-core.js';
 import { HLC_RE, hlcPack } from '../arcade-sync-core.js';
@@ -148,6 +149,63 @@ function toastTests() {
     ok(validateToast({ message: 'hi', duration: 400 }).duration === 400, 'positive duration passes');
 }
 
+function uiOpTests() {
+    console.log('\nui.op normalizer');
+    ok(validateUiOp(null) === null, 'null data → null');
+    ok(validateUiOp({}) === null, 'missing op → null');
+    ok(validateUiOp({ op: 'destroy' }) === null, 'unknown op → null');
+
+    // RPC ops require a plausible id.
+    ok(validateUiOp({ op: 'confirm', message: 'hi' }) === null, 'confirm without id → null');
+    ok(validateUiOp({ op: 'confirm', id: '', message: 'hi' }) === null, 'empty id → null');
+    ok(validateUiOp({ op: 'confirm', id: 'r'.repeat(65), message: 'hi' }) === null, '65-char id → null');
+    ok(validateUiOp({ op: 'confirm', id: 'r1' }) === null, 'confirm without message → null');
+    const c1 = validateUiOp({ op: 'confirm', id: 'r1', message: 'Sure?' });
+    ok(c1 && c1.okLabel === 'OK' && c1.cancelLabel === 'Cancel', 'confirm label defaults');
+    ok(validateUiOp({ op: 'confirm', id: 'r1', message: 'x'.repeat(600) }).message.length === 500,
+        'confirm message clipped to 500');
+    ok(validateUiOp({ op: 'confirm', id: 'r1', message: 'm', okLabel: 'y'.repeat(30) }).okLabel.length === 24,
+        'okLabel clipped to 24');
+    ok(validateUiOp({ op: 'confirm', id: 'r1', message: 'm', okLabel: 7 }).okLabel === 'OK',
+        'non-string okLabel → default');
+
+    const p1 = validateUiOp({ op: 'prompt', id: 'r2', message: 'Name?', value: 'bob' });
+    ok(p1 && p1.value === 'bob', 'prompt carries default value');
+    ok(validateUiOp({ op: 'prompt', id: 'r2', message: 'Name?' }).value === '', 'prompt value defaults empty');
+    // The security property is structural: the normalized shape has no
+    // inputType at all, so a game can never reach the password-masked input.
+    ok(!('inputType' in validateUiOp({ op: 'prompt', id: 'r2', message: 'm', inputType: 'password' })),
+        'inputType is never passed through (dialog-spoof guard)');
+
+    ok(validateUiOp({ op: 'openFile', id: 'r3' }).accept === '', 'openFile accept defaults empty');
+    ok(validateUiOp({ op: 'openFile', id: 'r3', accept: '.png, image/*' }).accept === '.png, image/*',
+        'openFile accept passes the input alphabet');
+    ok(validateUiOp({ op: 'openFile', id: 'r3', accept: '"><script>' }).accept === '',
+        'openFile accept outside alphabet dropped');
+    ok(validateUiOp({ op: 'openFile', id: 'r3', accept: 'a'.repeat(201) }).accept === '',
+        'openFile accept over 200 chars dropped');
+
+    ok(validateUiOp({ op: 'share', id: 'r4' }) === null, 'share with no content → null');
+    const s1 = validateUiOp({ op: 'share', id: 'r4', text: 'come play', url: 'https://x.test/g' });
+    ok(s1 && s1.url === 'https://x.test/g', 'share keeps http(s) url');
+    ok(validateUiOp({ op: 'share', id: 'r4', text: 't', url: 'javascript:alert(1)' }).url === '',
+        'share drops javascript: url, keeps the share');
+    ok(validateUiOp({ op: 'share', id: 'r4', text: 't', url: 'not a url' }).url === '',
+        'share drops unparseable url');
+    ok(validateUiOp({ op: 'share', id: 'r4', text: 'x'.repeat(3000) }).text.length === 2000,
+        'share text clipped to 2000');
+
+    // Fire-and-forget ops need no id.
+    ok(validateUiOp({ op: 'setTitle', title: 'Journal — draft' }).title === 'Journal — draft',
+        'setTitle passes title');
+    ok(validateUiOp({ op: 'setTitle' }).title === '', 'setTitle without title → reset op');
+    ok(validateUiOp({ op: 'setTitle', title: 'x'.repeat(100) }).title.length === 80,
+        'setTitle clipped to 80');
+    ok(validateUiOp({ op: 'quitHook', enabled: true }).enabled === true, 'quitHook enabled');
+    ok(validateUiOp({ op: 'quitHook', enabled: 'yes' }).enabled === false,
+        'quitHook coerces only literal true');
+}
+
 function crossModuleConsistencyTests() {
     console.log('\ncross-module consistency');
     // Guards accidental drift of the shared pattern from its historical form
@@ -170,6 +228,7 @@ helperTests();
 signalPayloadTests();
 peerEnvelopeTests();
 toastTests();
+uiOpTests();
 crossModuleConsistencyTests();
 console.log('');
 if (fail) { console.log(fail + ' check(s) FAILED.'); process.exit(1); }

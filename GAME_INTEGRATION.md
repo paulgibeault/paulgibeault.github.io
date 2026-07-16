@@ -474,7 +474,7 @@ audio, and GPU resources.
 
 ---
 
-## 7. UI — toasts via the launcher
+## 7. UI — launcher-mediated chrome (toasts, dialogs, title, quit, files)
 
 If you'd otherwise pop a transient banner, prefer the launcher-rendered toast
 when framed (so it survives game UI redraws and uses the launcher's a11y
@@ -486,6 +486,50 @@ Arcade.ui.toast('Network down',   { kind: 'error', duration: 4000 });
 ```
 
 `kind` is `'info' | 'success' | 'warning' | 'error'`; `duration` defaults to 2500ms.
+
+The sandbox **no-ops `window.confirm`/`prompt`** inside game frames, so the
+SDK provides real modals rendered by the launcher (#35). All of these need
+the launcher's `ui.bridge` capability (`Arcade.peer.caps()`); against an
+older launcher they resolve as if cancelled instead of hanging. Standalone,
+each falls back to the native equivalent.
+
+```js
+// Modals — launcher-rendered, serialized, focus-trapped. Every dialog is
+// attributed with your app's catalog name (“My App” asks: …), and prompt
+// input is always plain text — apps can never imitate the launcher's own
+// passphrase dialogs.
+const sure = await Arcade.ui.confirm('Erase the journal?', { okLabel: 'Erase', cancelLabel: 'Keep' });
+const name = await Arcade.ui.prompt('Save as?', 'untitled');   // string | null (cancel)
+
+// Topbar title — '' resets to your catalog name. Kept while your frame
+// stays pooled; standalone it drives document.title.
+Arcade.ui.setTitle('Journal — draft 3');
+
+// Quit interception — return false (or a Promise of false) to veto the quit
+// button, e.g. to flush a mid-edit document first. The launcher timeboxes
+// the ask (~1.5s): a slow or hung handler forfeits the veto rather than
+// trapping the user. Pass null to unregister.
+Arcade.ui.onBeforeQuit(async () => {
+  await flushDraft();
+  return true;
+});
+
+// Open a file from the device — sandboxed frames have no picker of their
+// own; the launcher shows a consent dialog, then brokers the File across.
+const file = await Arcade.ui.openFile({ accept: '.txt,text/*' });   // File | null
+
+// Share — Web Share behind a launcher consent dialog; where Web Share is
+// unavailable the payload lands on the clipboard instead.
+const how = await Arcade.ui.share({ text: 'come play', url: 'https://…' });  // 'shared' | 'copied' | null
+
+// Clipboard — stays in-frame (the launcher grants clipboard-write to game
+// frames); call it from a click handler so a user gesture is present.
+const ok = await Arcade.ui.copy(shareCode);   // boolean
+```
+
+Dialog-popping calls (`confirm`/`prompt`/`openFile`/`share`) only work while
+your app is the **active** one — a backgrounded frame gets the cancel answer
+(`false`/`null`) instead of interrupting whatever the user switched to.
 
 ---
 
@@ -900,6 +944,15 @@ parent → child:  arcade:peer.ready         { deviceId, name }       // remote 
 parent → child:  arcade:peer.queue         { depth, limit, overflowed }
 child  → parent: arcade:peer.send          { payload, to? }         // to = target deviceId (targeted)
 child  → parent: arcade:ui.toast           { message, kind, duration }
+
+— ui chrome bridge (§7; the SDK speaks this for you) —
+child  → parent: arcade:ui.op              { op: 'confirm'|'prompt'|'openFile'|'share', id, ... }
+                                           // RPC ops; answered via arcade:bridge.result
+                                           // (value: true/string/File/'shared'/'copied', null = cancel)
+child  → parent: arcade:ui.op              { op: 'setTitle', title } | { op: 'quitHook', enabled }
+parent → child:  arcade:ui.beforeQuit      { id }                   // only sent when quitHook enabled
+child  → parent: arcade:ui.beforeQuit.result { id, allow }          // allow=false vetoes; launcher
+                                                                    // timeboxes the ask (~1.5s)
 
 — storage bridge (framed storage; see §3/§9; the SDK speaks this for you) —
 child  → parent: arcade:state.write        { key, value }           // raw string, null = remove; launcher
