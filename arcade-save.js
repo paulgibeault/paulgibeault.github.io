@@ -450,6 +450,10 @@ export function initSaveLoad(host) {
                 asyncNote = ' — note: some app data could not be restored (your auto-backup has the original)';
             }
         }
+        // Sync engine hook (arcade-sync.js, wired in index.html): an import
+        // is a deliberate "now" edit — re-stamp every imported key that's
+        // synced so it wins over older remote edits on the next sync.
+        if (host.onImportCommitted) { try { host.onImportCommitted(cleanKeys); } catch (e) {} }
         // Notify mounted iframes. Opaque frames can't see storage events
         // — each gets its fresh post-import snapshot to reseed its cache.
         for (const gid of host.listMountedGameIds()) {

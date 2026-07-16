@@ -3,13 +3,15 @@
  * (arcade-save.js).
  *
  * This is the ONE place every storage allowlist lives — key regexes, the
- * dunder guard, the store/file name checks, the import-protected set, and the
- * per-key/per-op size caps. Keeping them side by side is deliberate: the
- * launcher's whole storage trust boundary (games run sandboxed WITHOUT
- * allow-same-origin, so the launcher is their custodian) reduces to these
- * predicates, and drift between "what a bridge write accepts" and "what a save
- * export/import accepts" was a real bug class (a game key that round-trips
- * live but silently drops from every backup). One file = one audit surface.
+ * dunder guard, the store/file name checks, the import-protected set,
+ * per-key/per-op size caps, and (for arcade-sync.js, a later work package)
+ * the Arcade.sync key-eligibility predicate. Keeping them side by side is
+ * deliberate: the launcher's whole storage trust boundary (games run
+ * sandboxed WITHOUT allow-same-origin, so the launcher is their custodian)
+ * reduces to these predicates, and drift between "what a bridge write
+ * accepts" and "what a save export/import accepts" was a real bug class (a
+ * game key that round-trips live but silently drops from every backup). One
+ * file = one audit surface.
  *
  * No top-level side effects: every browser global (localStorage, indexedDB,
  * navigator, crypto, Blob, FileReader, atob) is touched only inside a function
@@ -94,6 +96,21 @@ export function bridgeKeyWritable(gameId, key) {
     if (!isSafeArcadeKey(key)) return false;
     return key.startsWith(KEY_PREFIX + gameId + '.')
         || key.startsWith(KEY_PREFIX + 'global.');
+}
+
+// ---- sync (Arcade.sync) eligibility + caps ----
+export const SYNC_LIST_RE = /^arcade\.v1\.[a-z0-9_-]+\._sync$/;
+export const SYNC_VALUE_MAX = 64 * 1024;        // per-value cap (frame budget)
+export const SYNC_FRAME_BUDGET = 96 * 1024;     // serialized envelope cap (< transport 256 KB)
+export const SYNC_MAX_ENTRIES = 150;            // per-frame entry cap
+export function syncEligibleKey(k) {
+    if (typeof k !== 'string' || k.length > 512) return false;
+    if (!isSafeArcadeKey(k)) return false;              // shape + dunder guard
+    const seg = k.slice(KEY_PREFIX.length).split('.');
+    if (seg[0] === '_meta' || seg[0] === 'global') return false; // device-local / launcher-owned
+    if (!seg[1] || seg[1].charAt(0) === '_') return false;       // SDK sidecars (_sync/_noExport/_migrated)
+    if (seg[1] === 'ls') return false;                           // ls-proxy subtree: not synced in v1
+    return true;
 }
 
 export const STORE_NAME_RE = /^[a-z0-9_-]{1,64}$/i;

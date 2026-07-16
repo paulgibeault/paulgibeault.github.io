@@ -118,6 +118,10 @@ silently dropped on import, so old keys won't survive a cross-device save.
   inflate every save file: write it with
   `Arcade.state.set('telemetry', data, { exportable: false })`. The flag is
   sticky per key until you set `{ exportable: true }`.
+- [ ] Keys the player would expect to follow them across their own paired
+  devices can opt into multi-device sync: `Arcade.state.set('save1', data,
+  { sync: true })` — sticky like `exportable`, see §3b. Sync is opt-in per
+  key AND per device pair; nothing replicates unless the user enables it.
 - [ ] **Storage can fill up.** `Arcade.state.set(...)` returns `false` only when
   the write was *definitely* dropped (direct-mode quota). Inside the launcher
   (framed mode) the write is proxied to the launcher, so `set()` returns `true`
@@ -245,6 +249,51 @@ per-app, both ride the launcher save bundle, and both are Promise-based.
 Both are included in the launcher's export/import (schema v2) automatically — no
 `{ exportable }` bookkeeping needed. Keep small, hot key/value state in
 `Arcade.state` (sync, simplest); reach for these when it won't fit.
+
+---
+
+## 3b. Multi-device sync — Arcade.sync
+
+Opted-in `Arcade.state` keys replicate between the user's **own paired
+devices** over the existing P2P link — no cloud, no server. Replication is
+last-writer-wins per key (hybrid logical clocks; ties broken by deviceId), so
+it fits saves, unlocks, and settings-like state. It is NOT a merge/CRDT: two
+devices editing the same key while apart converge to the newer write.
+
+```js
+Arcade.state.set('save1', data, { sync: true });  // sticky per-key opt-in
+Arcade.sync.enable();            // or: sync every current & future own key
+Arcade.sync.enable(['save1']);   // or: just these keys
+Arcade.sync.disable();           // stop syncing (this device's outbound)
+Arcade.sync.list();              // current opt-in list ('*' = everything)
+Arcade.sync.onConflict(({ key, mine, theirs }) => {
+    // Informational: a concurrent local edit lost LWW and was replaced by
+    // `theirs`. State is already updated — refresh UI, or offer an undo
+    // using `mine`.
+});
+```
+
+Ground rules:
+
+- **Both sides must opt in.** Sync only runs for a device pair the user
+  enabled on BOTH devices (the 🔄 toggle in the launcher's Multiplayer
+  dialog). Your opt-in list only marks which keys are eligible.
+- **Own-namespace keys only.** `global.*`, `_meta.*`, SDK sidecars, and the
+  legacy `.ls.` subtree never sync. `Arcade.store`/`Arcade.files` data does
+  not sync in v1.
+- **Values are capped at 64 KB** (JSON-encoded). Oversized values simply
+  don't replicate (logged in dev mode) — keep synced keys small.
+- **Deletes replicate** (`Arcade.state.remove` on one device removes the key
+  on the other), and survive restarts via tombstones.
+- **Clock skew bias:** "newer wins" is judged by device clocks (monotonic
+  per device, but not corrected across devices). A fast clock wins ties it
+  shouldn't — acceptable for save-style data, another reason not to sync
+  rapidly-contended keys.
+- Inbound sync writes arrive as ordinary `arcade:state.changed` events — if
+  you already handle `Arcade.state.onChange`, synced updates just work.
+- A save-file **import counts as a fresh local edit** of every imported
+  synced key: after an import, the imported values win over older remote
+  edits at the next sync.
 
 ---
 
@@ -857,6 +906,9 @@ child  → parent: arcade:state.write        { key, value }           // raw str
                                                                     // allows own namespace, global.*, _meta.dev
 parent → child:  arcade:state.writeError   { key, error }           // launcher-side quota → Arcade.onStorageError
 parent → child:  arcade:state.changed      { key, value }           // shared key changed by launcher/other frame
+                                                                    // (incl. writes applied by Arcade.sync)
+parent → child:  arcade:sync.conflict      { key, mine, theirs }    // a concurrent local edit lost LWW (§3b);
+                                                                    // key unprefixed, values JSON-parsed
 child  → parent: arcade:store.op           { id, name, op, key?, value? }  // get|set|del|keys|entries|clear
 child  → parent: arcade:files.op           { id, op, name?, blob? }        // put|get|list|delete
 child  → parent: arcade:storage.op         { id, op }                      // estimate|persisted|persist

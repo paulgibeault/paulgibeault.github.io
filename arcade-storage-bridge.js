@@ -108,6 +108,10 @@ export function initStorageBridge(host) {
             postToIframe(gameId, { type: 'arcade:state.writeError', key: key, error: 'storage quota exceeded' });
             return;
         }
+        // Sync engine hook (arcade-sync.js, wired in index.html): every
+        // committed bridged write, synced or not — the engine does its own
+        // cheap eligibility gate, so this call is unconditional.
+        if (host.onStateWritten) { try { host.onStateWritten(gameId, key, value); } catch (e) {} }
         // Shared keys: other frames' storage events never fire for a
         // launcher-document write — push the change to them explicitly.
         const shared = key.startsWith(KEY_PREFIX + 'global.') || key === KEY_PREFIX + '_meta.dev';

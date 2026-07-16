@@ -508,7 +508,10 @@
         // (see arcade-storage-bridge.js / arcade-save.js, wired in the module
         // block after this IIFE runs — null until then, router queues meanwhile).
         storageHost: null,
-        storage: null
+        storage: null,
+        // sync: the Arcade.sync replication engine (arcade-sync.js) — null
+        // until module block D runs; attachP2P() wires it once loadP2P runs.
+        sync: null
     };
 
     // ==========================================
@@ -1181,6 +1184,7 @@
                 });
                 p2pBridge = ArcadeP2P;
                 window.__arcade.p2p = ArcadeP2P; // debug + acceptance tests
+                if (window.__arcade.sync) window.__arcade.sync.attachP2P(ArcadeP2P);
                 return ArcadeP2P;
             }).catch((e) => {
                 p2pLoadPromise = null;
@@ -1655,7 +1659,11 @@
             stateSnapshotFor: stateSnapshotFor,
             showToast: showToast,
             broadcastSettings: () => window.__arcade.broadcastSettings(),
-            replayPendingStorageMessages: replayPendingStorageMessages
+            replayPendingStorageMessages: replayPendingStorageMessages,
+            // Sync engine hooks (arcade-sync.js) — no-ops until module block D
+            // wires window.__arcade.sync.
+            onStateWritten: (gameId, key, value) => { if (window.__arcade.sync) window.__arcade.sync.noteLocalWrite(key, value); },
+            onImportCommitted: (keys) => { if (window.__arcade.sync) window.__arcade.sync.noteImportCommitted(keys); }
         };
     })();
 
@@ -1780,10 +1788,12 @@
     // ==========================================
     import { initStorageBridge } from './arcade-storage-bridge.js';
     import { initSaveLoad } from './arcade-save.js';
+    import { initSyncEngine } from './arcade-sync.js';
 
     const storageHost = window.__arcade.storageHost;
     window.__arcade.storage = initStorageBridge(storageHost);
     initSaveLoad(storageHost);
+    window.__arcade.sync = initSyncEngine(storageHost);
     storageHost.replayPendingStorageMessages();
 </script>
 
@@ -1804,7 +1814,7 @@
     // force-load the bridge on open — opening this dialog is a deliberate
     // touch, not something that happens on menu open.
     // ==========================================
-    import { readKnownPeers, renameKnownPeer, deleteKnownPeer } from './arcade-known-peers.js';
+    import { readKnownPeers, renameKnownPeer, deleteKnownPeer, setKnownPeerSyncEnabled } from './arcade-known-peers.js';
     import { ArcadeDiag } from './arcade-diag.js';
 
     (function connectionsDialogController() {
@@ -1976,6 +1986,22 @@
                     .then(() => render()).catch(() => {});
             });
             icons.appendChild(autoBtn);
+
+            const syncBtn = document.createElement('button');
+            syncBtn.type = 'button';
+            syncBtn.className = 'connections-row__icon-btn';
+            const syncOn = peer.syncEnabled === true;
+            syncBtn.textContent = syncOn ? '🔄' : '⛔';
+            syncBtn.title = syncOn
+                ? 'App-data sync is ON — tap to turn off (both devices must turn it on)'
+                : 'App-data sync is OFF — tap to turn on (both devices must turn it on)';
+            syncBtn.setAttribute('aria-label', (syncOn ? 'Disable' : 'Enable') + ' app-data sync for ' + displayName);
+            syncBtn.addEventListener('click', () => {
+                setKnownPeerSyncEnabled(id, !syncOn);
+                if (!syncOn && window.__arcade.sync) window.__arcade.sync.kick(id);
+                render();
+            });
+            icons.appendChild(syncBtn);
 
             const renameBtn = document.createElement('button');
             renameBtn.type = 'button';
