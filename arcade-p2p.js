@@ -85,6 +85,7 @@ import { RendezvousManager, RDV_BUILD } from './p2p/rendezvous.js';
 import { MqttCarrier, MultiCarrier } from './p2p/rendezvous-carriers.js';
 import { readKnownPeers, writeKnownPeers, setKnownPeerPaused } from './arcade-known-peers.js';
 import { ArcadeDiag } from './arcade-diag.js';
+import { isDeviceId, validatePeerEnvelope } from './arcade-envelope.js';
 
 // Free public MQTT-over-WSS brokers used as the untrusted dead-drop. They
 // see only ciphertext on unlinkable rotating topics, and only during repair.
@@ -394,7 +395,7 @@ function isFingerprintSuspect(deviceId, known) {
 // deviceIds are machine-generated on the honest path: either a UUID
 // (crypto.randomUUID) or the 'dev-' fallback. Anything else is a peer making
 // ids up — reject before it can touch knownPeers or the reconnect machinery.
-const DEVICE_ID_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|dev-[a-z0-9]{6,50})$/i;
+// The shape itself lives in arcade-envelope.js (isDeviceId / DEVICE_ID_RE).
 
 function stampLiveSession() {
     try { localStorage.setItem(LAST_LIVE_SESSION_KEY, String(Date.now())); } catch (e) {}
@@ -410,7 +411,7 @@ function stampLiveSession() {
  * "tell the user", never "silently trust" and never "silently block".
  */
 function recordPeerIdentity(deviceId, remoteName, fingerprint) {
-    if (typeof deviceId !== 'string' || deviceId.length > 64 || !DEVICE_ID_RE.test(deviceId)) return null;
+    if (!isDeviceId(deviceId)) return null;
     const safeRemoteName = (typeof remoteName === 'string' && remoteName.trim())
         ? remoteName.trim().slice(0, 60) : 'Unnamed device';
     const safeFp = (typeof fingerprint === 'string' && /^[0-9A-F]{2}(:[0-9A-F]{2}){19,63}$/.test(fingerprint)) ? fingerprint : null;
@@ -600,11 +601,14 @@ async function ensureAddon() {
             if (!d.incoming) return;
             let env = null;
             try { env = JSON.parse(d.text); } catch (err) { return; }
-            if (!env || env.arcade !== 1) return;
-            if (env.kind === 'presence' || env.kind === 'presence-ack') {
+            // Shape gate (arcade-envelope.js): discriminator, per-kind field
+            // checks, and the deviceId pattern for identity frames. Routing
+            // decisions (relayed gates, targeting, attribution) stay below.
+            const shape = validatePeerEnvelope(env);
+            if (!shape.ok) return;
+            if (shape.kind === 'presence') {
                 // The remote launcher says a game with this gameId is mounted
                 // and listening over there.
-                if (typeof env.gameId !== 'string') return;
                 // Relayed presence originated at another joiner — attribute
                 // it via the relay tag, not the link (which names the host).
                 const presDeviceId = linkSenderDeviceId(d);
@@ -617,7 +621,7 @@ async function ensureAddon() {
                 }
                 return;
             }
-            if (env.kind === 'sync') {
+            if (shape.kind === 'sync') {
                 // Launcher-level replication frames: direct links only (a relayed or
                 // host-forwarded frame must never carry another device's sync data),
                 // and only once the sender's identity binding completed.
@@ -627,10 +631,9 @@ async function ensureAddon() {
                 for (const fn of syncListeners) { try { fn(syncDev, env); } catch (err) {} }
                 return;
             }
-            if (env.kind !== 'identity') {
+            if (shape.kind === 'game') {
                 // A game's message. Route by gameId, attributing the sending
                 // device when its identity handshake has completed.
-                if (typeof env.gameId !== 'string') return;
                 const isHub = mp.peerNode.isHost;
                 // `fromDevice` is a HOST-stamped attribution on frames the
                 // host bridge forwards joiner→joiner. A sender-supplied value
@@ -667,7 +670,7 @@ async function ensureAddon() {
                 let hostForwarded = false;
                 if (!isHub && !d.relayed && 'fromDevice' in env) {
                     hostForwarded = true;
-                    if (typeof env.fromDevice === 'string' && DEVICE_ID_RE.test(env.fromDevice)) {
+                    if (isDeviceId(env.fromDevice)) {
                         fromDeviceId = env.fromDevice;
                     }
                 } else {
@@ -687,9 +690,12 @@ async function ensureAddon() {
                 }
                 return;
             }
+            // shape.kind === 'identity' — deviceId shape already vetted above;
+            // recordPeerIdentity re-checks it (defense in depth for its other
+            // callers) and owns name/fingerprint normalization.
             const fp = d.relayed ? null : mp.peerNode.getPeerFingerprint(d.peerId);
             const detail = recordPeerIdentity(env.deviceId, env.name, fp);
-            if (!detail) return; // malformed deviceId — bind nothing
+            if (!detail) return; // bind nothing
             if (d.relayed && !mp.peerNode.isHost && typeof d.from === 'string'
                     && env.deviceId !== getMyDeviceId()) {
                 // Another joiner, reachable only through the host. The relay

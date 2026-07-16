@@ -304,6 +304,71 @@ try {
         await clockPage.close();
     }
 
+    // ── 9b. Blob concurrency caps (#60): per-peer + global open-transfer bounds ──
+    // Reject-newest: the transfer that would exceed the cap gets one
+    // 'too-many' error and its id is dead-marked (later chunks drop silently);
+    // in-flight transfers are never evicted. Fresh accumulators + unique ids
+    // so §8's dead-map/error residue can't contaminate counts.
+    {
+        await frame3.evaluate(() => {
+            window.__blobs2 = []; window.__blobErrs2 = [];
+            Arcade.peer.onBlob((blob, meta) => blob.text().then(t => window.__blobs2.push({ text: t, id: meta.id })));
+            Arcade.peer.onBlobError((e) => window.__blobErrs2.push(e));
+        });
+        const injectFrom = (payload, fromPeer) => page.evaluate(({ p, fp }) => {
+            const entry = [...document.querySelectorAll('iframe')].find(f => f.src.includes('/bridge-test/'));
+            entry.contentWindow.postMessage({ type: 'arcade:peer.message', payload: p, fromPeer: fp }, '*');
+        }, { p: payload, fp: fromPeer });
+        const openChunk = (id) => ({ __arcadeBlob: { id, seq: 0, total: 2, size: 10, mime: '', name: id + '.bin', bytes: enc('hello') } });
+        const poll = async (fn) => {
+            let out = null;
+            for (let i = 0; i < 40; i++) {
+                out = await frame3.evaluate(() => ({ blobs: window.__blobs2, errs: window.__blobErrs2 }));
+                if (fn(out)) break;
+                await page.waitForTimeout(50);
+            }
+            return out;
+        };
+
+        // Per-peer cap: 8 open reassemblies from one peer admit, the 9th refuses…
+        for (let i = 1; i <= 9; i++) await injectFrom(openChunk('pp' + i), 'flood-a');
+        // …while a different peer is untouched by flood-a's bucket.
+        await injectFrom(openChunk('px1'), 'other-b');
+        let s = await poll(o => o.errs.length >= 1);
+        check('blob cap: 9th concurrent transfer from one peer → too-many',
+            s.errs.length === 1 && s.errs[0].id === 'pp9' && s.errs[0].reason === 'too-many', JSON.stringify(s.errs));
+        check('blob cap: per-peer isolation — another peer still admits', !s.errs.some(e => e.id === 'px1'));
+
+        // Dead-marking: the refused id's NEXT chunk drops silently (one error
+        // per refused transfer, not one per chunk — 2048 error events would
+        // themselves be a flooding vector into onBlobError).
+        await injectFrom({ __arcadeBlob: { id: 'pp9', seq: 1, total: 2, size: 10, mime: '', name: 'pp9.bin', bytes: enc('world') } }, 'flood-a');
+        await page.waitForTimeout(250);
+        s = await frame3.evaluate(() => ({ errs: window.__blobErrs2 }));
+        check('blob cap: refused id is dead-marked — retransmit fires no second error',
+            s.errs.filter(e => e.id === 'pp9').length === 1, JSON.stringify(s.errs));
+
+        // Capacity frees: abort one open transfer, then a fresh single-chunk
+        // transfer from the same peer admits AND completes (delivery proves
+        // admission; completion leaves the table, freeing its slot again).
+        await injectFrom({ __arcadeBlobAbort: { id: 'pp1' } }, 'flood-a');
+        await injectFrom({ __arcadeBlob: { id: 'pp10', seq: 0, total: 1, size: 5, mime: 'text/plain', name: 'pp10.txt', bytes: enc('freed') } }, 'flood-a');
+        s = await poll(o => o.blobs.some(b => b.id === 'pp10'));
+        check('blob cap: slot frees on abort — new transfer admits and delivers',
+            s.blobs.some(b => b.id === 'pp10' && b.text === 'freed'), JSON.stringify(s.blobs));
+
+        // Global cap: open = 7 (pp2..pp8) + 1 (px1) = 8; four more peers × 7
+        // ids each (per-peer never trips) can admit 24 before the table hits
+        // 32, so exactly 8 + 28 − 32 = 4 refusals, all global.
+        for (let gp = 1; gp <= 4; gp++) {
+            for (let i = 1; i <= 7; i++) await injectFrom(openChunk('g' + gp + '-' + i), 'glob-' + gp);
+        }
+        s = await poll(o => o.errs.filter(e => e.id.startsWith('g')).length >= 4);
+        const gErrs = s.errs.filter(e => e.id.startsWith('g'));
+        check('blob cap: global bound refuses exactly the overflow (4 of 28)',
+            gErrs.length === 4 && gErrs.every(e => e.reason === 'too-many'), JSON.stringify(gErrs));
+    }
+
     // ── 10. Eviction suspend-hint (#41): flush runs before teardown ──
     {
         const evictPage = await browser.newPage();

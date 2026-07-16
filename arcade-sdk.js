@@ -80,7 +80,8 @@
  *   Arcade.peer.onReady(fn)                       remote same-game listening
  *   Arcade.peer.sendBlob(blob, { onProgress }) / onBlob(fn)
  *   Arcade.peer.onBlobError(fn)   failed incoming transfer: { id, name,
- *                                 reason: 'timeout'|'aborted'|'integrity', ... }
+ *                                 reason: 'timeout'|'aborted'|'integrity'
+ *                                 |'malformed'|'oversize'|'too-many', ... }
  *   Arcade.peer.queue() / onQueue(fn)             replay-queue visibility
  *
  *   // Launcher-mediated UI
@@ -206,10 +207,15 @@
 
     // Remote peer roster — seeded from the launcher's welcome, kept fresh by
     // arcade:peer.identity / arcade:peer.ready broadcasts.
+    // Keep in sync with arcade-envelope.js's DEVICE_ID_RE (this file is a
+    // classic script served standalone to game iframes — it cannot import
+    // ESM): deviceIds are machine-minted UUIDs or the 'dev-' fallback shape.
+    var DEVICE_ID_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|dev-[a-z0-9]{6,50})$/i;
     var remotePeers = {}; // deviceId -> { deviceId, name, at }
     function noteRemotePeer(deviceId, name) {
-        if (typeof deviceId !== 'string' || !deviceId || deviceId.length > 64) return null;
-        if (isDunderKey(deviceId)) return null; // never key the roster object by __proto__/constructor/prototype
+        if (typeof deviceId !== 'string' || !deviceId || deviceId.length > 64
+                || !DEVICE_ID_RE.test(deviceId)) return null;
+        if (isDunderKey(deviceId)) return null; // redundant post-regex; documents the roster-keying invariant
         var prev = remotePeers[deviceId];
         var rec = {
             deviceId: deviceId,
@@ -813,6 +819,12 @@
     var BLOB_MAX_CHUNK_DECODED = BLOB_CHUNK_BYTES + 256; // slack for base64/framing
     var BLOB_MAX_TOTAL_BYTES = BLOB_MAX_CHUNKS * BLOB_CHUNK_BYTES;
     var BLOB_DEAD_TTL_MS = 30 * 1000;
+    // Concurrency caps (#60): bound how many reassemblies can be OPEN at
+    // once — per-transfer byte caps alone let a hostile-but-paired peer pin
+    // memory by opening many transfer ids inside one TTL window. Legitimate
+    // senders stream one transfer at a time (sendBlob), so 8 is generous.
+    var BLOB_RX_MAX_PER_PEER = 8;
+    var BLOB_RX_MAX_TOTAL = 32;
     var blobSendCounter = 0;
     // Keyed by fromPeer|id (NOT id alone): in a multi-seat session ids are
     // guessable, so keying by id let any peer poison or abort another seat's
@@ -826,7 +838,7 @@
         fire(listeners.peerBlobError, {
             id: id,
             name: st ? st.name : '',
-            reason: reason, // 'timeout' | 'aborted' | 'integrity' | 'malformed' | 'oversize'
+            reason: reason, // 'timeout' | 'aborted' | 'integrity' | 'malformed' | 'oversize' | 'too-many'
             received: st ? st.received : 0,
             total: st ? st.total : 0,
             fromPeer: fromPeer || (st ? st.fromPeer : undefined)
@@ -894,6 +906,27 @@
         if (blobRxDead[key]) return;
         var st = blobRx[key];
         if (!st) {
+            // Concurrency cap (#60), checked before the chunks allocation.
+            // Reject the NEW transfer rather than evicting an in-flight one —
+            // eviction would let a flooder abort a victim's legitimate
+            // transfer. An undefined fromPeer (older launcher bridge) shares
+            // the same 'peer' bucket rxKey() uses. Dead-marking the refused
+            // id means its remaining chunks drop silently at the gate above
+            // (one 'too-many' per transfer, not up to 2048); sendBlob mints a
+            // fresh id per call, so an application-level retry is never
+            // shadowed — capacity frees as soon as any transfer completes,
+            // aborts, or times out.
+            var openTotal = 0, openSamePeer = 0;
+            var bucket = fromPeer || 'peer';
+            for (var openKey in blobRx) {
+                openTotal++;
+                if ((blobRx[openKey].fromPeer || 'peer') === bucket) openSamePeer++;
+            }
+            if (openSamePeer >= BLOB_RX_MAX_PER_PEER || openTotal >= BLOB_RX_MAX_TOTAL) {
+                blobRxDead[key] = Date.now();
+                fireBlobError(meta.id, null, 'too-many', fromPeer);
+                return;
+            }
             st = blobRx[key] = {
                 id: meta.id,
                 chunks: new Array(meta.total),
@@ -1872,6 +1905,10 @@
         //                 died without an abort, ...)
         //   'aborted'   — the sender explicitly gave up mid-transfer
         //   'integrity' — assembled bytes did not match the sender's hash
+        //   'malformed' — a chunk carried undecodable bytes
+        //   'oversize'  — a chunk or the transfer exceeded its byte caps
+        //   'too-many'  — the sender (or everyone combined) already has too
+        //                 many transfers open; retry after one finishes
         // A failed transfer is dropped entirely; the sender should resend.
         onBlobError: makeSubscriber(listeners.peerBlobError),
 

@@ -146,7 +146,16 @@ export const mqttCodec = {
                     mult *= 128;
                     if ((buf[i] & 0x80) === 0) { ok = true; i++; break; }
                 }
-                if (!ok) break; // varint incomplete
+                if (!ok) {
+                    // Incomplete varint: wait for more bytes — unless we
+                    // already hold its 4-byte maximum, in which case a
+                    // terminator can never arrive (MQTT 3.1.1 protocol
+                    // violation) and there is no recoverable frame boundary.
+                    // Drop the stream state rather than buffer hostile bytes
+                    // forever; the carrier reconnects on broker silence.
+                    if (buf.length >= 5) buf = new Uint8Array(0);
+                    break;
+                }
                 if (len > MAX_PACKET_BYTES) {
                     // Oversized/hostile packet: consume and discard its bytes
                     // without retaining them; skip any part not yet received.
@@ -161,11 +170,20 @@ export const mqttCodec = {
                 const body = buf.subarray(i, i + len);
                 if (type === PKT.PUBLISH) {
                     const qos = (buf[0] >> 1) & 0x03;
-                    const topicLen = (body[0] << 8) | body[1];
-                    const topic = new TextDecoder().decode(body.subarray(2, 2 + topicLen));
-                    const payloadStart = 2 + topicLen + (qos > 0 ? 2 : 0);
-                    const payload = new TextDecoder().decode(body.subarray(payloadStart));
-                    packets.push({ type: 'publish', topic, payload });
+                    const topicLen = body.length >= 2 ? ((body[0] << 8) | body[1]) : -1;
+                    if (topicLen < 0 || 2 + topicLen > body.length) {
+                        // Declared topic length overruns the packet body (or
+                        // the body can't even hold the length prefix): a
+                        // protocol violation, not a decodable publish. Emit a
+                        // typed benign packet; the common slice below keeps
+                        // the stream frame-synced.
+                        packets.push({ type: 'other', header: buf[0] });
+                    } else {
+                        const topic = new TextDecoder().decode(body.subarray(2, 2 + topicLen));
+                        const payloadStart = 2 + topicLen + (qos > 0 ? 2 : 0);
+                        const payload = new TextDecoder().decode(body.subarray(payloadStart));
+                        packets.push({ type: 'publish', topic, payload });
+                    }
                 } else if (type === PKT.CONNACK) {
                     packets.push({ type: 'connack', ok: body[1] === 0 });
                 } else if (type === PKT.SUBACK) {
