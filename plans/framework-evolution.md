@@ -243,8 +243,8 @@ model and shouldn't be back-doored in. Make it a deliberate v2, not an accident.
 
 ## Suggested sequence
 
-1. **Now, cheap, high-leverage:** ~~C1 LICENSE~~ ✅ · ~~C3 CI gate~~ ✅ · A4 storage-error/persist() ·
-   D2 `html.escape` (+ fixes the live sowduku XSS) · ~~the fingerprint-pin + inbound-size security
+1. **Now, cheap, high-leverage:** ~~C1 LICENSE~~ ✅ · ~~C3 CI gate~~ ✅ · ~~A4 storage-error/persist()~~ ✅ ·
+   ~~D2 `html.escape`~~ ✅ (fixed the live sowduku XSS) · ~~the fingerprint-pin + inbound-size security
    items~~ ✅ (all landed).
 2. **Foundation:** C2 `catalog.json` · A1 `Arcade.store`/`files` · A3 UI bridge · D1 rng/daily/share.
 3. **Sovereignty payload:** B1 per-app+encrypted export · B2 auto-backup · **B3 state sync** ·

@@ -135,10 +135,10 @@ Captured in detail per the instruction. Sequenced *after* batch 1; the sovereign
 Phase 1 storage landing first.
 
 **Sovereignty (depends on Phase 1 storage):**
-- [#28](https://github.com/paulgibeault/paulgibeault.github.io/issues/28) `Arcade.sync` — multi-device per-key LWW state replication over P2P *(crown jewel)*
+- ✅ [#28](https://github.com/paulgibeault/paulgibeault.github.io/issues/28) `Arcade.sync` — multi-device per-key LWW state replication over P2P *(crown jewel)* — **DONE** (merged #62)
 - [#29](https://github.com/paulgibeault/paulgibeault.github.io/issues/29) Per-app + passphrase-encrypted export; reconsider the hand-edit checksum hard-reject
 - [#30](https://github.com/paulgibeault/paulgibeault.github.io/issues/30) Automatic local backup (rolling IDB snapshot + File System Access folder)
-- [#31](https://github.com/paulgibeault/paulgibeault.github.io/issues/31) Backup-to-trusted-peer
+- ✅ [#31](https://github.com/paulgibeault/paulgibeault.github.io/issues/31) Backup-to-trusted-peer — **DONE** (merged #64)
 - [#32](https://github.com/paulgibeault/paulgibeault.github.io/issues/32) Cross-device user identity (Ed25519 cross-sign) + recovery + `revoke(deviceId)`
 - ✅ [#33](https://github.com/paulgibeault/paulgibeault.github.io/issues/33) Self-hostable broker + TURN config (`_meta.rdvBrokers`) — **DONE** (G-res-1: `_meta.rdvBrokers` override landed in #54; the cheapest resilience win, promoted out of the deferred pile). TURN config still open.
 
@@ -157,7 +157,7 @@ Phase 1 storage landing first.
 
 **Security / robustness (not in batch 1):**
 - ✅ [#41](https://github.com/paulgibeault/paulgibeault.github.io/issues/41) P2P robustness follow-ups: blob integrity/abort — **DONE** (closed by #51: per-blob hash + `blob-abort` + TTL). Handshake race and eviction suspend-hint addressed in the #54 remediation.
-- [#43](https://github.com/paulgibeault/paulgibeault.github.io/issues/43) Document first-party trust boundary + move P2P key stores out of app reach *(Phase-1 P1.3)*
+- ✅ [#43](https://github.com/paulgibeault/paulgibeault.github.io/issues/43) Document first-party trust boundary + move P2P key stores out of app reach *(Phase-1 P1.3)* — **DONE** (closed)
 
 **v2 epic:**
 - [#42](https://github.com/paulgibeault/paulgibeault.github.io/issues/42) Cross-origin multi-tenant app isolation + capability/permission model + user-added app URLs

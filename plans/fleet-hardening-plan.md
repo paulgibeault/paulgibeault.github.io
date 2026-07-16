@@ -22,6 +22,18 @@
 >
 > Part C2 (suspend-leaking timers) is now **behaviorally resolved per-game** — see the updated C2.
 
+> ## ✅ Update — 2026-07-15
+> Of the "STILL OPEN" list above, all but the refactor have since landed:
+> 1. ✅ **sowduku stored XSS + migration sentinel (C1)** — fixed, merged (sowduku#4).
+> 2. ✅ **Framework P2P security checklist #21** — closed; remediated across #54/#57 plus the
+>    #59–#61 hygiene batch (shared envelope validator `arcade-envelope.js`, blob concurrency caps,
+>    MQTT codec unit suite).
+> 3. ✅ **CI test gate (D1)** — shipped (`--pool` gate + unit suites in `pages.yml`).
+> 4. ✅ Envelope validator, mqtt-codec test — shipped (#59, #61). **B13 refactor is still partial**
+>    (see `framework-launcher.md` B13) — `platformController` is down to ~1,500 lines via the P4-d
+>    storage/save extraction, but the `loadP2P`/`arcade-p2p-wiring.js` split hasn't happened.
+> 5. ✅ **Part E docs + issue hygiene** — the 7 paired per-game issues are all closed.
+
 ## Context
 
 Multiplayer (WebRTC datachannels + MQTT-broker auto-reconnect rendezvous) just shipped and works. Before it, a hardened security review produced GitHub issue **#21** (two ship-blockers fixed in PR #22; a longer checklist deferred), and `plans/framework-launcher.md` left Part-A/B framework items partly open. Separately, a seven-part per-game review produced one issue per game; **those fixes are now all merged (2026-07-10)** — the residual per-game work is small (and tracked in each game plan), except sowduku's stored XSS.

@@ -63,13 +63,15 @@ and most of Part B (11/13). See each plan for the merged-commit evidence.
 
 </details>
 
-## Remaining work (priority order) — see `fleet-hardening-plan.md` for detail
+## Remaining work — see `fleet-hardening-plan.md` for detail
 
-1. **sowduku stored XSS + migration sentinel** — still exploitable (Part C1). Top priority.
-2. **Framework P2P security checklist #21** (Part A, phases A1–A5) — none implemented.
-3. **CI test gate** (Part D1) — highest leverage; do early.
-4. **Part D2/D3, Part B** (SDK cache-bust, acceptance negative-assert, envelope validator,
-   mqtt-codec test, B13 refactor, B11 ls-proxy retirement — now unblocked).
-5. **Docs & issue hygiene** (Part E): close the 7 paired integration issues (PRs merged),
-   version reconcile, doc corrections.
+Everything in the original priority list has landed except the B13 refactor:
+
+1. ✅ sowduku stored XSS + migration sentinel (Part C1) — fixed, merged (sowduku#4).
+2. ✅ Framework P2P security checklist #21 (Part A, phases A1–A5) — closed, remediated in #54/#57
+   plus the #59–#61 hygiene batch.
+3. ✅ CI test gate (Part D1) — shipped.
+4. ✅ Envelope validator, mqtt-codec test, B11 ls-proxy retirement — shipped (#59, #61). **B13
+   refactor (de-god `platformController`) is still partial** — see `framework-launcher.md` B13.
+5. ✅ Docs & issue hygiene (Part E) — the 7 paired integration issues are all closed.
 6. Low-priority per-game cleanups (toasts/stats/enhancements) — tracked in each game's issue.
