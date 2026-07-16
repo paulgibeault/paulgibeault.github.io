@@ -39,6 +39,9 @@ jobs:
       - name: Rendezvous unit tests (crypto AAD/tamper + MQTT codec resync — no browser)
         run: node tools/rendezvous-unit.mjs
 
+      - name: MQTT codec unit tests (varint edges + malformed-input rejection — no browser)
+        run: node tools/mqtt-codec-unit.mjs
+
       - name: Save-validation unit tests (import gates + key allowlists — no browser)
         run: node tools/save-validation-unit.mjs
 

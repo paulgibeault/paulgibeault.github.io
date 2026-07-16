@@ -12,6 +12,7 @@
     "p2p-reconnect": "node tools/p2p-reconnect-acceptance.mjs",
     "sync-acceptance": "node tools/sync-acceptance.mjs",
     "rendezvous-unit": "node tools/rendezvous-unit.mjs",
+    "mqtt-codec-unit": "node tools/mqtt-codec-unit.mjs",
     "p2p-core-unit": "node tools/p2p-core-unit.mjs",
     "save-unit": "node tools/save-validation-unit.mjs",
     "sync-unit": "node tools/sync-unit.mjs",
