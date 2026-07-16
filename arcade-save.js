@@ -52,7 +52,7 @@ import {
 // we verify what was signed, not what we kept, to detect tampering. Returns a
 // discriminated result the caller maps to a toast; on success it hands back
 // everything the commit path needs.
-export async function validateSaveBundle(parsed) {
+export async function validateSaveBundle(parsed, opts) {
     // Gate 4: shape — accept schema v1 (localStorage-only) through the
     // current SAVE_SCHEMA (adds stores/files).
     if (!parsed || typeof parsed !== 'object'
@@ -105,10 +105,88 @@ export async function validateSaveBundle(parsed) {
     } catch (e) {
         return { ok: false, reason: 'checksum-error' };
     }
-    if (typeof parsed.checksum !== 'string' || parsed.checksum !== expected) {
+    const checksumOk = typeof parsed.checksum === 'string' && parsed.checksum === expected;
+    // Human-only override: a mismatch is a hard reject by default (the
+    // posture every non-interactive caller — peer backup, local backup —
+    // keeps, since neither ever passes opts). Only the interactive
+    // file-import path may set allowChecksumMismatch, and only after the
+    // user has explicitly confirmed a warning (see importParsedBundle).
+    if (!checksumOk && !(opts && opts.allowChecksumMismatch)) {
         return { ok: false, reason: 'checksum-mismatch' };
     }
-    return { ok: true, isV2, cleanData, cleanKeys, droppedKeys, protectedSkipped, parsedStores, parsedFiles };
+    return { ok: true, isV2, cleanData, cleanKeys, droppedKeys, protectedSkipped, parsedStores, parsedFiles, checksumOk };
+}
+
+// ---- optional passphrase encryption (#29, Node-testable) ----
+// AES-GCM with a PBKDF2-stretched passphrase key, mirroring p2p/rendezvous-
+// crypto.js's decrypt-then-parse discipline (auth-tag failure returns null,
+// never partial/garbage bytes reaching JSON.parse) — but as standalone
+// helpers, since that module only exports its RendezvousCrypto class (no
+// generic AEAD-with-provided-key primitive) and derives its key from a
+// high-entropy pairing secret via HKDF, not a low-entropy passphrase via
+// PBKDF2. Encrypts the WHOLE serialized bundle string; the plaintext inside
+// carries its own format/schemaVersion, so this envelope only needs its own.
+export const ENC_FORMAT = 'pauls-arcade-save-enc';
+export const ENC_VERSION = 1;
+// PBKDF2-SHA256 iteration count — sub-second on modern hardware for a
+// one-shot interactive export/import, well above legacy minimums.
+const ENC_ITERATIONS = 250000;
+
+// Chunked to avoid a call-stack blowout: String.fromCharCode(...bytes) on a
+// large typed array (a bundle can be tens of MB with blobs) can exceed the
+// engine's argument-spread limit.
+function bytesToB64(bytes) {
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+    }
+    return btoa(binary);
+}
+function b64ToBytes(b64) {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+}
+
+async function deriveAesKey(passphrase, salt, iterations, usage) {
+    const baseKey = await crypto.subtle.importKey('raw', new TextEncoder().encode(passphrase), 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey(
+        { name: 'PBKDF2', salt, iterations, hash: 'SHA-256' },
+        baseKey, { name: 'AES-GCM', length: 256 }, false, [usage]
+    );
+}
+
+export async function encryptBundleJson(json, passphrase) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await deriveAesKey(passphrase, salt, ENC_ITERATIONS, 'encrypt');
+    const aad = new TextEncoder().encode(ENC_FORMAT + '/v' + ENC_VERSION);
+    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad }, key, new TextEncoder().encode(json));
+    return {
+        format: ENC_FORMAT, v: ENC_VERSION, kdf: 'PBKDF2-SHA256', iterations: ENC_ITERATIONS,
+        salt: bytesToB64(salt), iv: bytesToB64(iv), ciphertext: bytesToB64(new Uint8Array(ciphertext))
+    };
+}
+
+// Returns the decrypted JSON string, or null on ANY failure (wrong
+// passphrase, tampered ciphertext, malformed envelope) — the caller never
+// sees a partially-decrypted or unauthenticated result.
+export async function decryptBundleJson(envelope, passphrase) {
+    if (!envelope || envelope.format !== ENC_FORMAT || typeof envelope.salt !== 'string'
+        || typeof envelope.iv !== 'string' || typeof envelope.ciphertext !== 'string') {
+        return null;
+    }
+    try {
+        const salt = b64ToBytes(envelope.salt);
+        const iv = b64ToBytes(envelope.iv);
+        const iterations = Number.isInteger(envelope.iterations) ? envelope.iterations : ENC_ITERATIONS;
+        const key = await deriveAesKey(passphrase, salt, iterations, 'decrypt');
+        const aad = new TextEncoder().encode(envelope.format + '/v' + envelope.v);
+        const plaintextBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv, additionalData: aad }, key, b64ToBytes(envelope.ciphertext));
+        return new TextDecoder().decode(plaintextBuf);
+    } catch (e) { return null; } // wrong passphrase or tampered ciphertext — AES-GCM auth tag fails closed
 }
 
 export function initSaveLoad(host) {
@@ -296,21 +374,42 @@ export function initSaveLoad(host) {
         }
     }
 
-    async function buildBundle(data) {
+    // opts.appId (#29) scopes the bundle to one app: localStorage keys,
+    // store DBs, and files dir are all filtered to that app's arcade.v1.
+    // prefix, and _meta/global are excluded entirely (per-app data shouldn't
+    // carry device identity or shared settings). Whole-arcade export
+    // (exportSave, and the backup engines via exportBundleString) calls this
+    // with no opts and is completely unaffected.
+    async function buildBundle(data, opts) {
+        const appId = opts && opts.appId;
+        const scopedData = appId ? filterDataByApp(data, appId) : data;
         const dbNames = await listArcadeDbNames();
-        const gameIds = await gatherGameIds(data, dbNames);
-        const stores = await collectStores(dbNames);
-        const files = await collectFiles(gameIds, dbNames);
+        // gatherGameIds scans dbNames/OPFS independently of `data` and would
+        // otherwise surface OTHER apps that merely have a store/files DB but
+        // no localStorage key — force to exactly {appId} instead.
+        const scopedDbNames = (appId && dbNames)
+            ? dbNames.filter((n) => n.indexOf(KEY_PREFIX + appId + '.') === 0)
+            : dbNames;
+        const gameIds = appId ? new Set([appId]) : await gatherGameIds(scopedData, dbNames);
+        const stores = await collectStores(scopedDbNames);
+        const files = await collectFiles(gameIds, scopedDbNames);
         return {
             format: SAVE_FORMAT,
             schemaVersion: SAVE_SCHEMA,
             exportedAt: new Date().toISOString(),
             appVersion: '1.0.0',
-            checksum: await checksumBundle(data, stores, files),
-            data: data,
+            checksum: await checksumBundle(scopedData, stores, files),
+            data: scopedData,
             stores: stores,
             files: files
         };
+    }
+
+    function filterDataByApp(data, appId) {
+        const prefix = KEY_PREFIX + appId + '.';
+        const out = {};
+        for (const k of Object.keys(data)) if (k.indexOf(prefix) === 0) out[k] = data[k];
+        return out;
     }
 
     function countFiles(files) {
@@ -340,6 +439,63 @@ export function initSaveLoad(host) {
         const extra = (storeCount || fileCount) ? ' + ' + storeCount + ' stores, ' + fileCount + ' files' : '';
         if (ok) showToast('Saved ' + keyCount + ' keys' + extra + ' to your Downloads folder.');
         else showToast('Save failed: browser blocked the download.', { error: true });
+    }
+
+    // ---- save (export) — per-app / encrypted (#29) ----
+    // A deliberately separate flow from exportSave(): the plain "Export to
+    // File" button stays a single click with zero prompts. This one asks up
+    // to two optional questions (scope, then passphrase) before downloading.
+    async function exportSaveAdvanced() {
+        const data = collectArcadeKeys();
+        const dbNames = await listArcadeDbNames();
+        const gameIds = [...(await gatherGameIds(data, dbNames))].sort();
+        let appId;
+        if (gameIds.length > 0) {
+            const choice = await host.dialog({
+                message: 'Export everything, or just one app?\n\nApps with data: ' + gameIds.join(', ')
+                    + '\n\nType an app name to export only that app, or leave blank for everything.',
+                input: true, inputValue: '', okLabel: 'Continue', cancelLabel: 'Cancel'
+            });
+            if (choice === null) return; // cancelled
+            const trimmed = choice.trim();
+            if (trimmed) {
+                if (gameIds.indexOf(trimmed) === -1) {
+                    showToast('Unknown app "' + trimmed + '" — export cancelled.', { error: true });
+                    return;
+                }
+                appId = trimmed;
+            }
+        }
+        const passphrase = await host.dialog({
+            message: 'Optional: enter a passphrase to encrypt this export. Leave blank for a plain-text file.',
+            input: true, inputType: 'password', inputValue: '', okLabel: 'Export', cancelLabel: 'Cancel'
+        });
+        if (passphrase === null) return; // cancelled
+
+        let bundle;
+        try { bundle = await buildBundle(data, { appId }); }
+        catch (err) { showToast('Save failed: could not serialize data.', { error: true }); return; }
+        const keyCount = Object.keys(bundle.data).length;
+        const storeCount = Object.keys(bundle.stores).length;
+        const fileCount = countFiles(bundle.files);
+        if (keyCount === 0 && storeCount === 0 && fileCount === 0) {
+            showToast('Nothing to save' + (appId ? ' for "' + appId + '"' : '') + '.', { error: true });
+            return;
+        }
+        let payload = bundle;
+        if (passphrase) {
+            try { payload = await encryptBundleJson(JSON.stringify(bundle), passphrase); }
+            catch (e) { showToast('Encryption failed.', { error: true }); return; }
+        }
+        const namePart = (appId || 'all') + (passphrase ? '-encrypted' : '');
+        const ok = downloadJSON('pauls-arcade-save-' + namePart + '-' + isoStamp() + '.json', payload);
+        const extra = (storeCount || fileCount) ? ' + ' + storeCount + ' stores, ' + fileCount + ' files' : '';
+        if (ok) {
+            showToast('Saved ' + keyCount + ' keys' + extra
+                + (appId ? ' for "' + appId + '"' : '') + (passphrase ? ', encrypted' : '') + '.');
+        } else {
+            showToast('Save failed: browser blocked the download.', { error: true });
+        }
     }
 
     // ---- load (import) ----
@@ -391,6 +547,24 @@ export function initSaveLoad(host) {
         let parsed;
         try { parsed = JSON.parse(text); }
         catch (e) { showToast('Not valid JSON.', { error: true }); return; }
+        // Encrypted export (#29): detected before any of the normal shape
+        // gates run — the outer envelope is never a save bundle itself.
+        if (parsed && parsed.format === ENC_FORMAT) {
+            const passphrase = await host.dialog({
+                message: 'This backup is encrypted. Enter the passphrase to decrypt it:',
+                input: true, inputType: 'password', inputValue: '', okLabel: 'Decrypt', cancelLabel: 'Cancel'
+            });
+            if (passphrase === null) return; // cancelled
+            const plaintext = await decryptBundleJson(parsed, passphrase);
+            if (plaintext === null) {
+                // Single attempt by design — re-clicking Import from File
+                // tries again rather than looping a passphrase prompt.
+                showToast('Incorrect passphrase, or the backup is corrupted.', { error: true });
+                return;
+            }
+            try { parsed = JSON.parse(plaintext); }
+            catch (e) { showToast('Decrypted data is not a valid save.', { error: true }); return; }
+        }
         await importParsedBundle(parsed, {});
     }
 
@@ -401,7 +575,24 @@ export function initSaveLoad(host) {
     // says whose backup it is. Returns true only when the commit happened.
     async function importParsedBundle(parsed, opts) {
         // Gates 4–6: shape, per-key allowlist, checksum (pure, unit-tested).
-        const v = await validateSaveBundle(parsed);
+        let v = await validateSaveBundle(parsed);
+        let checksumOverridden = false;
+        // Human-only override (#29): a checksum-mismatched file is normally
+        // a hard reject. Give the user an explicit, separate warning before
+        // re-validating with the override flag — never silently downgrade a
+        // reject into an accept.
+        if (!v.ok && v.reason === 'checksum-mismatch') {
+            const proceed = window.confirm(
+                'This file\'s checksum doesn\'t match its contents — it may be hand-edited or corrupted.\n\n'
+                + 'Importing anyway skips this integrity check. Continue at your own risk?'
+            );
+            if (!proceed) {
+                showToast('Checksum mismatch — file may be corrupt.', { error: true });
+                return false;
+            }
+            v = await validateSaveBundle(parsed, { allowChecksumMismatch: true });
+            checksumOverridden = true;
+        }
         if (!v.ok) {
             const MSG = {
                 'not-a-save': 'File is not a valid arcade save.',
@@ -421,6 +612,7 @@ export function initSaveLoad(host) {
         const asyncSummary = (storeEntryCount || importFileCount)
             ? 'It will also restore ' + storeEntryCount + ' stored records and ' + importFileCount + ' files.\n' : '';
         const summary = ((opts && opts.intro) ? opts.intro + '\n\n' : '')
+            + (checksumOverridden ? '⚠️ This file\'s checksum could not be verified — importing without an integrity guarantee.\n' : '')
             + 'This will import ' + cleanKeys.length + ' arcade keys from the file, '
             + 'overwriting their current values. Saved data not in the file is kept as-is.\n'
             + asyncSummary
@@ -485,9 +677,11 @@ export function initSaveLoad(host) {
     }
 
     const btnSave = document.getElementById('btn-save');
+    const btnSaveAdvanced = document.getElementById('btn-save-advanced');
     const btnLoad = document.getElementById('btn-load');
     const fileLoad = document.getElementById('file-load');
     btnSave.addEventListener('click', () => { exportSave(); });
+    btnSaveAdvanced.addEventListener('click', () => { exportSaveAdvanced(); });
     btnLoad.addEventListener('click', () => { fileLoad.click(); });
     fileLoad.addEventListener('change', () => {
         const f = fileLoad.files && fileLoad.files[0];

@@ -136,7 +136,7 @@ Phase 1 storage landing first.
 
 **Sovereignty (depends on Phase 1 storage):**
 - ✅ [#28](https://github.com/paulgibeault/paulgibeault.github.io/issues/28) `Arcade.sync` — multi-device per-key LWW state replication over P2P *(crown jewel)* — **DONE** (merged #62)
-- [#29](https://github.com/paulgibeault/paulgibeault.github.io/issues/29) Per-app + passphrase-encrypted export; reconsider the hand-edit checksum hard-reject
+- ✅ [#29](https://github.com/paulgibeault/paulgibeault.github.io/issues/29) Per-app + passphrase-encrypted export; reconsider the hand-edit checksum hard-reject — **DONE** ("Export App / Encrypted…" + human-only checksum override, `arcade-save.js`)
 - ✅ [#30](https://github.com/paulgibeault/paulgibeault.github.io/issues/30) Automatic local backup (rolling IDB snapshot + File System Access folder) — **DONE** (`arcade-local-backup.js`/`arcade-local-backup-core.js`, PR #65)
 - ✅ [#31](https://github.com/paulgibeault/paulgibeault.github.io/issues/31) Backup-to-trusted-peer — **DONE** (merged #64)
 - [#32](https://github.com/paulgibeault/paulgibeault.github.io/issues/32) Cross-device user identity (Ed25519 cross-sign) + recovery + `revoke(deviceId)`
