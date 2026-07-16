@@ -110,6 +110,10 @@ function peerEnvelopeTests() {
         'presence-ack classified as presence');
     ok(validatePeerEnvelope({ arcade: 1, kind: 'sync' }).kind === 'sync',
         'sync passes structurally (body owned by validateSyncEnvelope)');
+    ok(validatePeerEnvelope({ arcade: 1, kind: 'backup' }).kind === 'backup',
+        'backup passes structurally (body owned by validateBackupEnvelope)');
+    ok(validatePeerEnvelope({ arcade: 1, kind: 'backup', gameId: 'g' }).kind === 'backup',
+        'backup with a smuggled gameId still classifies as backup, never game');
     ok(validatePeerEnvelope({ arcade: 1, kind: 'identity', deviceId: 'evil<script>' }).reason === 'bad-deviceId',
         'identity with malformed deviceId rejected');
     ok(validatePeerEnvelope({ arcade: 1, kind: 'identity', deviceId: UUID }).kind === 'identity',

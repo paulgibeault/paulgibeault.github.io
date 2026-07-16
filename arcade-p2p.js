@@ -21,6 +21,11 @@
  *     host-forwarded — and dispatched to onSyncEnvelope(fn) listeners as
  *     fn(fromDeviceId, env). Sent with sendSyncEnvelope(deviceId, env), which
  *     targets exactly that device's direct link.
+ *   { arcade: 1, kind: 'backup', ... }    — backup-to-trusted-peer transfer
+ *     frames (offer/accept/decline/chunk/ack; see arcade-backup.js). Same
+ *     delivery rules as 'sync': direct links with a completed identity
+ *     binding only, dispatched via onBackupEnvelope(fn), sent with
+ *     sendBackupEnvelope(deviceId, env).
  *
  * Status vocabulary mapping (transport → SDK), aggregated across ALL peer
  * links so one wobbling link never flaps the global status:
@@ -457,6 +462,7 @@ let sdkStatus = 'idle';
 const statusListeners = [];
 const messageListeners = []; // fn(gameId, payload, fromDeviceId, meta)
 const syncListeners = []; // fn(fromDeviceId, env)
+const backupListeners = []; // fn(fromDeviceId, env)
 
 function setStatus(next) {
     if (next === sdkStatus) return;
@@ -629,6 +635,17 @@ async function ensureAddon() {
                 const syncDev = deviceIdForPeerId(d.peerId);
                 if (!syncDev) return;
                 for (const fn of syncListeners) { try { fn(syncDev, env); } catch (err) {} }
+                return;
+            }
+            if (shape.kind === 'backup') {
+                // Backup transfer frames: same delivery rules as 'sync' —
+                // direct links only, identity binding required (a relayed or
+                // host-forwarded frame must never carry another device's
+                // backup data or spoof its origin).
+                if (d.relayed) return;
+                const backupDev = deviceIdForPeerId(d.peerId);
+                if (!backupDev) return;
+                for (const fn of backupListeners) { try { fn(backupDev, env); } catch (err) {} }
                 return;
             }
             if (shape.kind === 'game') {
@@ -934,6 +951,28 @@ export const ArcadeP2P = {
         const pid = deviceIndex.get(deviceId);
         if (pid === undefined || !seatReachable(pid)) return false;
         return addon.sendTo(pid, { ...env, arcade: 1, kind: 'sync' });
+    },
+
+    /** Subscribe to launcher-level backup envelopes: fn(fromDeviceId, env). Direct links only. */
+    onBackupEnvelope(fn) {
+        backupListeners.push(fn);
+        return () => {
+            const i = backupListeners.indexOf(fn);
+            if (i >= 0) backupListeners.splice(i, 1);
+        };
+    },
+
+    /**
+     * Send a launcher-level backup envelope to one paired device over its
+     * DIRECT link only — the same contract as sendSyncEnvelope (see the
+     * transport listener's `kind:'backup'` branch). Returns false when there
+     * is no live session, or when `deviceId` is unknown / unreachable.
+     */
+    sendBackupEnvelope(deviceId, env) {
+        if (!addon || (sdkStatus !== 'connected' && sdkStatus !== 'interrupted')) return false;
+        const pid = deviceIndex.get(deviceId);
+        if (pid === undefined || !seatReachable(pid)) return false;
+        return addon.sendTo(pid, { ...env, arcade: 1, kind: 'backup' });
     },
 
     /**

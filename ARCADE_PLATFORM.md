@@ -343,6 +343,43 @@ replication, converge-after-reconnect, restart survival, conflict surfacing,
 exclusion + hostile-frame refusal, tombstones) plus the Node unit matrix in
 `tools/sync-unit.mjs`; both in CI.
 
+### Backup-to-trusted-peer (IMPLEMENTED, #31)
+
+"My phone backs up to my laptop whenever they're paired" — no cloud. When a
+pair's `knownPeers[deviceId].backupTarget` flag is on, connecting (or the 💾
+toggle in the Multiplayer dialog) builds the device's full save bundle — the
+SAME checksummed export a save-file download produces (`arcade-save.js`
+`buildBundle`: localStorage + `Arcade.store` + `Arcade.files`) — and offers it
+over a launcher-level `{ arcade:1, kind:'backup', v:1, op }` envelope
+(`offer → accept/decline → chunk×parts → ack`, 64 KB chunks, ≤512 parts). The
+receiver keeps the newest **3 generations per sender** in the device-local
+`arcade-backup` IndexedDB; 📥 restores the latest through the full save-import
+gate chain (validate, confirm, auto-backup, snapshot/rollback commit). Engine:
+`arcade-backup.js` (`initBackupEngine(host)`), pure validator/chunking/
+retention in `arcade-backup-core.js` (Node-tested by `tools/backup-unit.mjs`).
+
+- **Consent, both sides:** the flag is symmetric (offer mine + accept theirs)
+  and per-pair. The first offer to a device that was never asked raises a
+  consent dialog; declining is remembered (`backupTarget:false`) and later
+  offers die silently. Same delivery rules as sync — direct links with a
+  completed identity binding, refused while the fingerprint is suspect — and a
+  completed transfer must pass the full `validateSaveBundle` gate (shape,
+  per-key allowlist, checksum) before a generation is stored, so a
+  hostile-but-paired peer cannot park junk in this device's IDB.
+- **Churn-proof:** the receiver acks the stored checksum; the sender persists
+  it per-peer and re-offers only when its state actually changed, so reconnect
+  churn moves zero bundle bytes and never burns a generation. A device holding
+  nothing importable (fresh: only protected meta keys) never offers at all.
+- **Deferred:** encrypt-at-rest with a key derived from the rendezvous pair
+  secret (DTLS already protects transit; needs a pair-base accessor out of
+  `RendezvousManager`), and a generation-picker UI (restore takes the latest;
+  older generations are kept and reachable via `Arcade`-side tooling).
+
+Verified by `tools/backup-acceptance.mjs` (two launchers, real WebRTC:
+multi-chunk replication, restore-through-import-gates, checksum dedupe,
+retention cap, consent prompt + symmetric return offer, remembered decline,
+hostile-frame refusal) plus `tools/backup-unit.mjs`; both in CI.
+
 **Bfcache resume gap:** a page the browser restores from its back-forward cache (e.g. Back after navigating to a different page) doesn't always re-run index.html's startup script — it resumes the frozen JS heap instead. Without a second trigger, a connection killed by that navigation would sit dead until the user reconnects by hand, since the startup-only `resumeRendezvous()` check never got a chance to run again. index.html listens for `pageshow` and re-runs the same freshness check whenever `event.persisted` is true.
 
 ---

@@ -112,6 +112,9 @@ a natural "don't sync this" companion.
 `knownPeers` trust flags. Add `knownPeers[deviceId].backupTarget` (consent-prompted both sides),
 a launcher-to-launcher `kind:'backup'` envelope that bypasses game routing, N generations kept in
 IndexedDB keyed by sender. "My phone backs up to my laptop whenever they're paired" — no cloud.
+✅ **DONE** (#31) — `arcade-backup.js`/`arcade-backup-core.js`, 💾 toggle + 📥 restore in the
+Multiplayer dialog; restore reuses the full save-import gate chain. Encrypt-at-rest (key derived
+from the rendezvous pair secret) deferred — needs a pair-base accessor out of RendezvousManager.
 
 **B5. User identity above device identity + recovery.** Today identity = per-device deviceId +
 ~monthly-rotating DTLS fingerprint + pairwise secrets; **device loss = total loss**, and every

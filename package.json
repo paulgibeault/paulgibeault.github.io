@@ -11,6 +11,8 @@
     "p2p-multiseat": "node tools/p2p-multiseat-acceptance.mjs",
     "p2p-reconnect": "node tools/p2p-reconnect-acceptance.mjs",
     "sync-acceptance": "node tools/sync-acceptance.mjs",
+    "backup-acceptance": "node tools/backup-acceptance.mjs",
+    "backup-unit": "node tools/backup-unit.mjs",
     "rendezvous-unit": "node tools/rendezvous-unit.mjs",
     "mqtt-codec-unit": "node tools/mqtt-codec-unit.mjs",
     "p2p-core-unit": "node tools/p2p-core-unit.mjs",

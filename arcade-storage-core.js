@@ -200,6 +200,17 @@ export function idbAll(db) {
         tx.onerror = () => reject(tx.error);
     });
 }
+// Keys only — for callers that index large values without materializing
+// them (arcade-backup.js's generation index: bundle strings can be MBs;
+// idbAll would load every one just to be discarded).
+export function idbKeys(db) {
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction('kv', 'readonly');
+        const req = tx.objectStore('kv').getAllKeys();
+        tx.oncomplete = () => resolve(req.result || []);
+        tx.onerror = () => reject(tx.error);
+    });
+}
 export function idbPut(db, key, value) {
     return new Promise((resolve, reject) => {
         const tx = db.transaction('kv', 'readwrite');

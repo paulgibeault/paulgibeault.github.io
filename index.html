@@ -1185,6 +1185,7 @@
                 p2pBridge = ArcadeP2P;
                 window.__arcade.p2p = ArcadeP2P; // debug + acceptance tests
                 if (window.__arcade.sync) window.__arcade.sync.attachP2P(ArcadeP2P);
+                if (window.__arcade.backup) window.__arcade.backup.attachP2P(ArcadeP2P);
                 return ArcadeP2P;
             }).catch((e) => {
                 p2pLoadPromise = null;
@@ -1792,6 +1793,7 @@
     import { initStorageBridge } from './arcade-storage-bridge.js';
     import { initSaveLoad } from './arcade-save.js';
     import { initSyncEngine } from './arcade-sync.js';
+    import { initBackupEngine } from './arcade-backup.js';
     import { validateToast } from './arcade-envelope.js';
 
     const storageHost = window.__arcade.storageHost;
@@ -1801,8 +1803,30 @@
     // handle to "drop the toast", never a crash.
     window.__arcade.envelope = { validateToast };
     window.__arcade.storage = initStorageBridge(storageHost);
-    initSaveLoad(storageHost);
+    window.__arcade.save = initSaveLoad(storageHost);
     window.__arcade.sync = initSyncEngine(storageHost);
+    // Backup-to-trusted-peer (#31): rides the save module's bundle API for
+    // both directions. The consent hook reads window.__arcade.dialog at CALL
+    // time — it's only ever invoked once a P2P offer arrives, long after the
+    // classic script defined the dialog helper.
+    window.__arcade.backup = initBackupEngine({
+        getBundleJson: () => window.__arcade.save.exportBundleString(),
+        importBundleJson: (json, intro) => window.__arcade.save.importBundleJson(json, intro),
+        showToast: storageHost.showToast,
+        confirmBackupOffer: ({ name }) => window.__arcade.dialog({
+            message: '"' + name + '" wants to keep a backup of their arcade data on this device.\n\n'
+                + 'Backups go both ways: this device will store their last few saves, and yours '
+                + 'will back up to theirs. Everything stays on your devices — no cloud.\n\n'
+                + 'You can change this anytime in Multiplayer (💾).',
+            okLabel: 'Allow', cancelLabel: 'No'
+        }).then((yes) => {
+            // The engine records the flag right after this resolves; refresh
+            // an open Multiplayer dialog a beat later so its 💾 row isn't
+            // stale (setTimeout runs after the engine's .then).
+            setTimeout(() => { if (window.__arcade.renderKnownPeers) window.__arcade.renderKnownPeers(); }, 0);
+            return !!yes;
+        })
+    });
     storageHost.replayPendingStorageMessages();
 </script>
 
@@ -1823,7 +1847,7 @@
     // force-load the bridge on open — opening this dialog is a deliberate
     // touch, not something that happens on menu open.
     // ==========================================
-    import { readKnownPeers, renameKnownPeer, deleteKnownPeer, setKnownPeerSyncEnabled } from './arcade-known-peers.js';
+    import { readKnownPeers, renameKnownPeer, deleteKnownPeer, setKnownPeerSyncEnabled, setKnownPeerBackupTarget } from './arcade-known-peers.js';
     import { ArcadeDiag } from './arcade-diag.js';
 
     (function connectionsDialogController() {
@@ -2011,6 +2035,38 @@
                 render();
             });
             icons.appendChild(syncBtn);
+
+            const backupBtn = document.createElement('button');
+            backupBtn.type = 'button';
+            backupBtn.className = 'connections-row__icon-btn';
+            const backupOn = peer.backupTarget === true;
+            backupBtn.textContent = backupOn ? '💾' : '📴';
+            backupBtn.title = backupOn
+                ? 'Backups are ON — this device keeps their last saves, yours back up to theirs — tap to turn off'
+                : 'Backups are OFF — tap to back up to each other, no cloud (the other device will be asked to allow it)';
+            backupBtn.setAttribute('aria-label', (backupOn ? 'Disable' : 'Enable') + ' peer backups for ' + displayName);
+            backupBtn.addEventListener('click', () => {
+                setKnownPeerBackupTarget(id, !backupOn);
+                if (!backupOn && window.__arcade.backup) window.__arcade.backup.kick(id);
+                render();
+            });
+            icons.appendChild(backupBtn);
+
+            // Any peer that ever engaged the backup feature keeps its restore
+            // entry — turning the toggle off must not orphan generations
+            // already stored (the button toasts "no backups yet" when empty).
+            if (peer.backupTarget !== undefined) {
+                const restoreBtn = document.createElement('button');
+                restoreBtn.type = 'button';
+                restoreBtn.className = 'connections-row__icon-btn';
+                restoreBtn.textContent = '📥';
+                restoreBtn.title = 'Restore ' + displayName + '\'s latest backup stored on this device (if any)';
+                restoreBtn.setAttribute('aria-label', 'Restore the latest backup from ' + displayName);
+                restoreBtn.addEventListener('click', () => {
+                    if (window.__arcade.backup) window.__arcade.backup.restoreLatest(id).catch(() => {});
+                });
+                icons.appendChild(restoreBtn);
+            }
 
             const renameBtn = document.createElement('button');
             renameBtn.type = 'button';
