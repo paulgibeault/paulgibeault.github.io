@@ -93,6 +93,7 @@
 
 import { RendezvousCrypto as RC } from './rendezvous-crypto.js';
 import { ConnectionUtils } from './p2p-core.js';
+import { initialMachine, transition } from './rendezvous-episode-core.js';
 
 // Bumped on every rendezvous protocol/behaviour change. The bridge prints
 // this at boot: the FIRST question a connection log must answer is "which
@@ -283,7 +284,11 @@ export class RendezvousManager extends EventTarget {
         this.episodes = new Map();      // pairId → episode
         this._startingEpisodes = new Set(); // pairIds mid-_startEpisode, before the slot is claimed
         this._tombstoned = new Set();   // pairIds forgotten via disablePair — refuse stale re-persists
-        this.delayTimers = new Map();   // pairId → clearFn
+        // Episode state machines (rendezvous-episode-core.js): one per pair.
+        // The machine currently owns the pre-episode SCHEDULING states (the
+        // old delayTimers logic); live episodes migrate onto it next.
+        this.machines = new Map();      // pairId → machine
+        this._pairTimers = new Map();   // pairId → Map<timerId, clearFn>
         this._peerLocks = new Map();    // peerId → queue tail (pairing ops serialized per peer)
         this._recWrites = new Map();    // pairId → queue tail (record writes serialized per pair)
 
@@ -298,8 +303,11 @@ export class RendezvousManager extends EventTarget {
         this.pm.removeEventListener('control-ext', this._onExtBound);
         this.pm.removeEventListener('status', this._onStatusBound);
         for (const [pairId, ep] of this.episodes) this._cleanupEpisode(pairId, ep);
-        for (const clear of this.delayTimers.values()) clear();
-        this.delayTimers.clear();
+        for (const timers of this._pairTimers.values()) {
+            for (const clear of timers.values()) clear();
+        }
+        this._pairTimers.clear();
+        this.machines.clear();
         this.myRands.clear();
         this.pendingRands.clear();
         for (const ex of this.pairExchanges.values()) { if (ex.timer) ex.timer(); }
@@ -888,6 +896,113 @@ export class RendezvousManager extends EventTarget {
         this._emit('pair-established', { pairId, peerId, role: ex.rec.role });
     }
 
+    // ---- episode state machine plumbing ------------------------------------
+    // The pure core (rendezvous-episode-core.js) decides; the methods here
+    // execute its effects. transition() itself is synchronous — effects run
+    // in order afterwards, awaiting the async ones, and long-running work
+    // (record reads, carrier setup) re-enters through _dispatch with a
+    // generation-stamped completion event, so stale completions die in the
+    // core instead of needing ad-hoc re-checks.
+
+    _machine(pairId) {
+        let m = this.machines.get(pairId);
+        if (!m) { m = initialMachine(); this.machines.set(pairId, m); }
+        return m;
+    }
+
+    _dispatch(pairId, ev) {
+        const m = this._machine(pairId);
+        const r = transition(m, ev, this.options, Date.now());
+        if (r.effects.length) {
+            this._runEffects(pairId, m, r.effects).catch((e) => {
+                this._diag(`pair ${pairId}: effect execution failed on ${ev.type} (${e && e.message})`, 'warn');
+            });
+        }
+        return r;
+    }
+
+    _setPairTimer(pairId, id, ms, onFire) {
+        this._clearPairTimer(pairId, id);
+        let timers = this._pairTimers.get(pairId);
+        if (!timers) { timers = new Map(); this._pairTimers.set(pairId, timers); }
+        const handle = setTimeout(() => {
+            timers.delete(id);
+            onFire();
+        }, ms);
+        timers.set(id, () => clearTimeout(handle));
+    }
+
+    _clearPairTimer(pairId, id) {
+        const timers = this._pairTimers.get(pairId);
+        const clear = timers && timers.get(id);
+        if (clear) { clear(); timers.delete(id); }
+    }
+
+    async _runEffects(pairId, m, effects) {
+        for (const eff of effects) {
+            switch (eff.t) {
+                case 'startTimer':
+                    // Timer payloads are computed AT FIRE TIME (liveness may
+                    // have changed while the timer ran).
+                    this._setPairTimer(pairId, eff.id, eff.ms, () => {
+                        if (this._destroyed) return;
+                        if (eff.id === 'delay') {
+                            this._dispatch(pairId, { type: 'T_DELAY', connectedNow: !!this._connectedPeerIdFor(pairId) });
+                        }
+                        // 'demote'/'stall'/'lstall:*' arm once live episodes
+                        // run on the machine (later migration step).
+                    });
+                    break;
+                case 'cancelTimer':
+                    this._clearPairTimer(pairId, eff.id);
+                    break;
+                case 'readRecord': {
+                    // Serialized like the legacy t1 body: observe queued
+                    // record writes (a just-received bye, a racing pausePair),
+                    // not a stale snapshot.
+                    const gen = eff.gen;
+                    this._serial(this._recWrites, pairId, () => dbGet(pairId).catch(() => null))
+                        .then((rec) => {
+                            if (this._destroyed) return;
+                            this._dispatch(pairId, {
+                                type: 'DELAY_READ', gen,
+                                rec: rec ? { enabled: !!rec.enabled, role: rec.role } : null,
+                                connectedNow: !!this._connectedPeerIdFor(pairId),
+                            });
+                        }).catch(() => {});
+                    break;
+                }
+                case 'beginSetup': {
+                    // TRANSITIONAL: live episodes still run on the legacy
+                    // path. The machine hands over here and returns to idle;
+                    // _startEpisode's own guards re-validate everything.
+                    const peerId = m.peerId;
+                    const opts = eff.opts || {};
+                    this.machines.delete(pairId);
+                    this._startEpisode(pairId, peerId, opts);
+                    break;
+                }
+                case 'persistTouch':
+                    // Legacy _onStatus 'connected' record touch (no episode).
+                    this._updateRec(pairId, (rec) => {
+                        if (!rec) return null;
+                        rec.lastPeerId = eff.peerId;
+                        rec.lastSeenAt = Date.now();
+                        delete rec.byeAt; // a live link supersedes any old hang-up
+                        return rec;
+                    }).catch(() => {});
+                    break;
+                case 'diagIllegal':
+                    this._diag(`pair ${pairId}: machine ignored ${eff.event} in ${eff.state}`, 'warn');
+                    break;
+                default:
+                    // An effect family whose shell wiring lands in a later
+                    // migration step reaching here is a bug — say so loudly.
+                    this._diag(`pair ${pairId}: unhandled machine effect ${eff.t}`, 'error');
+            }
+        }
+    }
+
     // ---- triggers ----------------------------------------------------------
 
     /**
@@ -909,7 +1024,6 @@ export class RendezvousManager extends EventTarget {
         const pairId = this.pairsByPeerId.get(peerId);
         if (!pairId) return;
         if (status === 'connected') {
-            this._clearDelay(pairId);
             // Pairing frames ride no outbox: anything sent while the link
             // was down is gone. If an exchange is still in flight for this
             // peer, re-send its material now — a link flap mid-pairing used
@@ -919,53 +1033,22 @@ export class RendezvousManager extends EventTarget {
             if (ep && !ep.settled) {
                 this._settleEpisode(pairId, ep);
             } else {
-                this._updateRec(pairId, rec => {
-                    if (!rec) return null;
-                    rec.lastPeerId = peerId;
-                    rec.lastSeenAt = Date.now();
-                    delete rec.byeAt; // a live link supersedes any old hang-up
-                    return rec;
-                }).catch(() => {});
+                // Machine: clears any scheduled delay and touches the record.
+                this._dispatch(pairId, { type: 'CONNECTED', peerId });
             }
         } else if (status === 'interrupted') {
-            this._scheduleEpisode(pairId, peerId);
-        } else if (status === 'disconnected' || status === 'failed' || status === 'closed') {
-            this._clearDelay(pairId);
-            this._startEpisode(pairId, peerId);
-        }
-    }
-
-    _clearDelay(pairId) {
-        const clear = this.delayTimers.get(pairId);
-        if (clear) { clear(); this.delayTimers.delete(pairId); }
-    }
-
-    _scheduleEpisode(pairId, peerId) {
-        if (this.delayTimers.has(pairId) || this.episodes.has(pairId)) return;
-        this._diag(`pair ${pairId}: link interrupted — rendezvous episode in ${this.options.listenerDelayMs / 1000}s (listener) / ${this.options.callerDelayMs / 1000}s (caller) unless in-band repair wins`);
-        // Give the v1.7 in-band machinery first claim on the repair. The
-        // listener side is passive (subscribe + ring) so it starts sooner;
-        // the caller's shadow offer waits longer.
-        const t1 = setTimeout(async () => {
-            this.delayTimers.delete(pairId);
-            // Serialized read so a just-queued pausePair/bye is observed before
-            // we commit to a role/delay (_startEpisode re-validates too).
-            const rec = await this._serial(this._recWrites, pairId, () => dbGet(pairId).catch(() => null));
-            if (!rec || !rec.enabled) return;
-            if (this._connectedPeerIdFor(pairId)) return;
-            if (rec.role === 'listener') {
-                this._startEpisode(pairId, peerId);
-            } else {
-                const extra = Math.max(0, this.options.callerDelayMs - this.options.listenerDelayMs);
-                const t2 = setTimeout(() => {
-                    this.delayTimers.delete(pairId);
-                    if (this._connectedPeerIdFor(pairId)) return;
-                    this._startEpisode(pairId, peerId);
-                }, extra);
-                this.delayTimers.set(pairId, () => clearTimeout(t2));
+            // A live episode already owns the repair; otherwise the machine
+            // schedules the delayed start (in-band repair gets first claim:
+            // listener 15s, caller 30s).
+            if (this.episodes.has(pairId)) return;
+            const r = this._dispatch(pairId, { type: 'INTERRUPTED', peerId });
+            if (r.effects.length) {
+                this._diag(`pair ${pairId}: link interrupted — rendezvous episode in ${this.options.listenerDelayMs / 1000}s (listener) / ${this.options.callerDelayMs / 1000}s (caller) unless in-band repair wins`);
             }
-        }, this.options.listenerDelayMs);
-        this.delayTimers.set(pairId, () => clearTimeout(t1));
+        } else if (status === 'disconnected' || status === 'failed' || status === 'closed') {
+            if (this.episodes.has(pairId) || this._startingEpisodes.has(pairId)) return;
+            this._dispatch(pairId, { type: 'TERMINAL', peerId });
+        }
     }
 
     /**
@@ -1571,18 +1654,23 @@ export class RendezvousManager extends EventTarget {
         this._diag(`pair ${pairId}: episode FAILED (${why}) — re-arming quietly in ${this.options.rearmDelayMs / 1000}s`, 'error');
         this._cleanupEpisode(pairId, ep);
         if (ep.announced) this._emit('gave-up', { pairId, peerId: ep.peerId, why });
-        if (!this.delayTimers.has(pairId)) {
-            const peerId = ep.peerId;
-            const t = setTimeout(() => {
-                this.delayTimers.delete(pairId);
-                this._startEpisode(pairId, peerId, { quiet: true });
-            }, this.options.rearmDelayMs);
-            this.delayTimers.set(pairId, () => clearTimeout(t));
+        // Quiet re-arm through the machine's scheduled(rearm) stage.
+        const peerId = ep.peerId;
+        const m = this._machine(pairId);
+        if (m.lifecycle === 'idle') {
+            m.lifecycle = 'scheduled';
+            m.delayStage = 'rearm';
+            m.peerId = peerId;
+            this._setPairTimer(pairId, 'delay', this.options.rearmDelayMs, () => {
+                if (this._destroyed) return;
+                this._dispatch(pairId, { type: 'T_DELAY', connectedNow: !!this._connectedPeerIdFor(pairId) });
+            });
         }
     }
 
     _cancelEpisode(pairId) {
-        this._clearDelay(pairId);
+        // Kill any scheduled delay / pending machine state first.
+        this._dispatch(pairId, { type: 'CANCEL', why: 'superseded' });
         const ep = this.episodes.get(pairId);
         if (ep) {
             ep.settled = true;
