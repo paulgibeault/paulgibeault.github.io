@@ -84,9 +84,9 @@ launch/quit so apps are bookmarkable and installed PWAs re-open where the user l
 ✅ **DONE** (#36) — ids resolve only through `catalog.json`; `#p2p-*` fragments take precedence.
 (The A6 neutral-vocabulary half of issue #36 remains open.)
 
-**A6. Neutral vocabulary.** Present `appId`/`Platform.*` names with `gameId`/`Arcade.*` as aliases;
-add an app-integration doc twin to `GAME_INTEGRATION.md`. Cheap now, expensive after more
-integrations calcify the game vocabulary.
+**A6. Neutral vocabulary.** ❌ **DROPPED (2026-07-16)** — decided to keep the `Arcade`/`gameId`
+framing for now rather than maintain a parallel `appId`/`Platform.*` alias with no adopter yet.
+Revisit as its own issue if a non-game integration actually needs it.
 
 ## Workstream B — Deliver sovereignty concretely
 
@@ -257,7 +257,7 @@ model and shouldn't be back-doored in. Make it a deliberate v2, not an accident.
 3. **Sovereignty payload:** ~~B1 per-app+encrypted export~~ ✅ · ~~B2 auto-backup~~ ✅ ·
    ~~B3 state sync~~ ✅ · ~~B4 backup-to-peer~~ ✅ (all landed).
 4. **Adoption:** C4 de-brand · C5 starter template · C6 SDK versioning · B5 user identity ·
-   B6 self-host broker/TURN.
+   B6 self-host broker/TURN. (A6 dropped — see above.)
 5. **Long poles / v2:** C7 framework/content split (after B13) · A2 full capability model ·
    C8 PWA · the multi-tenant cross-origin epic.
 
