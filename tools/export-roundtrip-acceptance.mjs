@@ -13,31 +13,19 @@
 // Exit code: 0 if all checks pass, 1 otherwise.
 
 import { chromium } from 'playwright';
-import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { serveRepo } from './lib/static-server.mjs';
+import { createRecorder } from './lib/check-recorder.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = 4797;
 const GID = 'roundtrip-test';
 
-const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.json': 'application/json', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png' };
-const server = http.createServer(async (req, res) => {
-    try {
-        let p = decodeURIComponent(req.url.split('?')[0]);
-        if (p.endsWith('/')) p += 'index.html';
-        const file = path.join(ROOT, p);
-        if (!file.startsWith(ROOT)) { res.writeHead(403).end(); return; }
-        const body = await readFile(file);
-        res.writeHead(200, { 'content-type': MIME[path.extname(file)] || 'application/octet-stream' });
-        res.end(body);
-    } catch { res.writeHead(404).end('not found'); }
-});
-await new Promise(r => server.listen(PORT, '127.0.0.1', r));
+const server = await serveRepo({ root: ROOT, port: PORT });
 
-const checks = [];
-const check = (name, ok, detail) => { checks.push({ name, ok, detail: detail || '' }); };
+const { check, summarize } = createRecorder();
 
 // Helpers injected into the page context (raw storage — the launcher itself
 // isn't Arcade.init'd, so we seed/read the underlying IndexedDB/OPFS directly).
@@ -141,11 +129,4 @@ try {
     server.close();
 }
 
-let failed = 0;
-for (const c of checks) {
-    console.log(`  ${c.ok ? '✓' : '✗'} ${c.name}${c.detail && !c.ok ? '   (' + c.detail + ')' : ''}`);
-    if (!c.ok) failed++;
-}
-console.log('');
-if (failed) { console.log(`${failed} check(s) FAILED.`); process.exit(1); }
-console.log('All export-roundtrip acceptance checks passed.');
+process.exit(summarize({ label: 'export-roundtrip acceptance' }));

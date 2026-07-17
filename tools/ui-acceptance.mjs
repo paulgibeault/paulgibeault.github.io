@@ -13,37 +13,21 @@
 // Exit code: 0 if all checks pass, 1 otherwise.
 
 import { chromium } from 'playwright';
-import http from 'node:http';
-import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { serveRepo } from './lib/static-server.mjs';
+import { createRecorder } from './lib/check-recorder.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = 4802;
 
-const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.json': 'application/json', '.css': 'text/css' };
-const server = http.createServer(async (req, res) => {
-    try {
-        let p = decodeURIComponent(req.url.split('?')[0]);
-        if (p.endsWith('/')) p += 'index.html';
-        const file = path.join(ROOT, p);
-        if (!file.startsWith(ROOT)) { res.writeHead(403).end(); return; }
-        const body = await readFile(file);
-        res.writeHead(200, {
-            'content-type': MIME[path.extname(file)] || 'application/octet-stream',
-            // Opaque-origin frames send Origin: null — mirror GitHub Pages.
-            'access-control-allow-origin': '*',
-        });
-        res.end(body);
-    } catch { res.writeHead(404).end('not found'); }
-});
-await new Promise(r => server.listen(PORT, '127.0.0.1', r));
+// cors: opaque-origin frames send Origin: null — mirror GitHub Pages.
+const server = await serveRepo({ root: ROOT, port: PORT, cors: true });
 
 const BASE = `http://127.0.0.1:${PORT}`;
 const GAME_PATH = '/tools/fixtures/ui-test/';
 
-const checks = [];
-const check = (name, ok, detail) => { checks.push({ name, ok, detail: detail || '' }); };
+const { check, summarize } = createRecorder({ indent: '', detailStyle: 'wide-dash', emptyDetailOnFail: true });
 
 const DIALOG_OPEN = '#arcade-dialog:not(.hidden)';
 
@@ -349,10 +333,4 @@ try {
     server.close();
 }
 
-let pass = 0, fail = 0;
-for (const c of checks) {
-    console.log(`${c.ok ? '✓' : '✗'} ${c.name}${c.ok ? '' : '  — ' + c.detail}`);
-    c.ok ? pass++ : fail++;
-}
-console.log(`\n${pass}/${pass + fail} ui-acceptance checks passed`);
-process.exit(fail ? 1 : 0);
+process.exit(summarize({ style: 'ratio', label: 'ui-acceptance' }));
