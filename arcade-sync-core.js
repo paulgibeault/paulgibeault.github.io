@@ -18,7 +18,14 @@ import { DEVICE_ID_PATTERN } from './arcade-envelope.js';
 // ---- protocol + storage constants ----
 export const SYNC_PROTOCOL_V = 1;
 export const SYNC_DB = 'arcade-sync';
-export const SYNC_TOMBSTONE_TTL_MS = 30 * 24 * 3600 * 1000;
+// Tombstones are retained indefinitely, bounded only by the per-app cap
+// (oldest evicted first). There is deliberately NO time-based tombstone GC:
+// any TTL creates a deletion-resurrection window — a device offline (or
+// re-paired from a drawer) longer than the TTL still holds the pre-deletion
+// value, and once the tombstone is gone the deleter has no record left to
+// defend the deletion with, so the stale value replicates back everywhere.
+// The residual window is therefore ">CAP deletions of the same app while a
+// stale device holds one of the evicted keys", not a wall-clock countdown.
 export const SYNC_TOMBSTONE_CAP_PER_APP = 512;
 
 // ---- HLC (hybrid logical clock) ----

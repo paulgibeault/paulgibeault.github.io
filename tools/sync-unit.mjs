@@ -16,7 +16,6 @@
 import {
     SYNC_PROTOCOL_V,
     SYNC_DB,
-    SYNC_TOMBSTONE_TTL_MS,
     SYNC_TOMBSTONE_CAP_PER_APP,
     HLC_RE,
     hlcPack,
@@ -31,6 +30,7 @@ import {
     isConcurrentLoss,
     validateSyncEnvelope
 } from '../arcade-sync-core.js';
+import * as syncCore from '../arcade-sync-core.js';
 import {
     syncEligibleKey,
     SYNC_MAX_ENTRIES,
@@ -52,8 +52,12 @@ function constantsTests() {
     console.log('\nconstants');
     ok(SYNC_PROTOCOL_V === 1, 'SYNC_PROTOCOL_V is 1');
     ok(SYNC_DB === 'arcade-sync', 'SYNC_DB is "arcade-sync"');
-    ok(SYNC_TOMBSTONE_TTL_MS === 30 * 24 * 3600 * 1000, 'SYNC_TOMBSTONE_TTL_MS is 30 days');
     ok(SYNC_TOMBSTONE_CAP_PER_APP === 512, 'SYNC_TOMBSTONE_CAP_PER_APP is 512');
+    // Deliberately NO time-based tombstone TTL: any TTL re-opens the
+    // deletion-resurrection window (a device offline past the TTL pulls the
+    // deleted key back as brand-new). Retention is cap-only; this import
+    // check pins that the constant stays deleted.
+    ok(!('SYNC_TOMBSTONE_TTL_MS' in syncCore), 'no tombstone TTL constant exists (cap-only GC)');
     // The sync IDB database name must never be picked up by the save-export
     // store enumeration regex — that's what keeps device sync bookkeeping
     // (and everything derived from it) out of every backup, structurally.
