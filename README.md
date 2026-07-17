@@ -86,6 +86,13 @@ opaque-frame storage bridge, and launcher-aware settings/lifecycle hints.
   from the Multiplayer dialog's Advanced panel. Read this if you want zero
   third parties in the loop.
 
+- **[POSITIONING.md](POSITIONING.md)** — how the platform compares to its
+  closest neighbors (Poki/CrazyGames SDKs, itch.io, Playroom Kit, PartyKit,
+  Trystero, PeerJS, Yjs/Automerge): what each wins on, where this platform
+  deliberately differs, and why zero-server/zero-account/zero-ad data
+  sovereignty is the product rather than the games. Read this to understand
+  what the platform is *for*.
+
 ## Local development
 
 ```sh
