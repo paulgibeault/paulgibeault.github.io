@@ -22,9 +22,13 @@ state machine in the stack. Implementation: `p2p-core.js`, `sdp-codec.js`,
 ## 1. Design goals
 
 1. **No infrastructure of our own.** No signaling server, no accounts, no
-   TURN. The only third parties ever touched are optional public STUN
-   (address reflection only) and, for the opt-in rendezvous layer, public
-   dead-drop relays that carry ciphertext they cannot read, link, or forge.
+   TURN *required*. The only third parties touched by default are optional
+   public STUN (address reflection only) and, for the opt-in rendezvous
+   layer, public dead-drop relays that carry ciphertext they cannot read,
+   link, or forge. A user who wants zero third parties — or whose symmetric
+   NAT demands a relay — can point both roles at servers they run
+   (`arcade.v1._meta.rdvBrokers` / `arcade.v1._meta.iceServers`; see the
+   repo-root SELF_HOSTING.md).
 2. **The human exchange is the root of trust.** Cryptographic identity and
    all later automation derive from the one in-person ceremony.
 3. **Sessions outlive connections.** The unit apps care about (the *session*:
@@ -473,8 +477,12 @@ reachable while ANY one broker is reachable from both devices), and
 `LoopbackCarrier` (`BroadcastChannel`, same-origin testing). Production wires a
 `MultiCarrier` over three public brokers (mosquitto / emqx / hivemq); a user can
 override the list via `arcade.v1._meta.rdvBrokers` (a JSON array of `wss://`
-URLs). Nostr relays are a candidate future carrier (requires secp256k1 signing,
-i.e. a vendored dependency).
+URLs — self-hosting walkthrough in the repo-root SELF_HOSTING.md). Topics are
+broker-agnostic, so mixed fleets interoperate as long as at least one broker
+overlaps between two devices' lists. The sibling `arcade.v1._meta.iceServers`
+key (a JSON `RTCIceServer[]`) likewise overrides the transport's built-in
+public-STUN list — the only way to add TURN. Nostr relays are a candidate
+future carrier (requires secp256k1 signing, i.e. a vendored dependency).
 
 A carrier is expected to be **self-healing** (1.10): `MqttCarrier.connect()`
 resolves on its first successful broker session and never rejects — it

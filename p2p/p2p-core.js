@@ -250,6 +250,11 @@ export class PeerManager extends EventTarget {
             // 'local'    = zero ICE servers; nothing external is ever contacted;
             //              connections work on the same LAN only.
             iceMode: options.iceMode === 'local' ? 'local' : 'anywhere',
+            // Custom ICE servers (RTCIceServer[]: {urls, username?, credential?}).
+            // Replaces the built-in public STUN list when non-empty — the only
+            // way to get TURN. Ignored entirely in 'local' mode. Validation is
+            // the caller's job (see arcade-p2p.js's iceServersConfig).
+            iceServers: Array.isArray(options.iceServers) ? options.iceServers : null,
             // Resilience tuning (v1.7) — see the class comment.
             heartbeatIntervalMs: options.heartbeatIntervalMs || 5000,
             heartbeatTimeoutMs: options.heartbeatTimeoutMs || 12000,
@@ -362,7 +367,10 @@ export class PeerManager extends EventTarget {
     }
 
     _buildRtcConfig() {
-        const rtcConfig = this.options.iceMode === 'local' ? { iceServers: [] } : { ...STUN_SERVERS };
+        const custom = this.options.iceServers;
+        const rtcConfig = this.options.iceMode === 'local'
+            ? { iceServers: [] }
+            : { iceServers: (custom && custom.length) ? custom : STUN_SERVERS.iceServers };
         if (this._certificate) rtcConfig.certificates = [this._certificate];
         return rtcConfig;
     }

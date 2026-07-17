@@ -455,6 +455,97 @@ body.app-in-game .launcher-menu[data-open="true"] .launcher-menu__panel {
     text-align: center;
 }
 
+/* Advanced (self-hosted broker & TURN) — collapsed by default; expert-only
+   knobs stay out of the way of the everyday call/hang-up flow. */
+.connections-dialog__advanced {
+    flex-shrink: 0;
+    margin: 0 16px 8px;
+    border: 1px solid var(--card-border);
+    border-radius: 6px;
+}
+.connections-dialog__advanced summary {
+    cursor: pointer;
+    user-select: none;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    padding: 8px 10px;
+    outline: none;
+}
+.connections-dialog__advanced summary:hover,
+.connections-dialog__advanced summary:focus-visible {
+    color: var(--field-gold);
+}
+.connections-dialog__advanced-body {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 4px 10px 10px;
+}
+.connections-dialog__advanced-body label {
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--text-secondary);
+    margin-top: 6px;
+}
+.connections-dialog__advanced-input {
+    width: 100%;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--card-border);
+    color: var(--snow-white);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    padding: 6px 8px;
+    border-radius: 6px;
+    resize: vertical;
+}
+.connections-dialog__advanced-input:focus-visible {
+    outline: none;
+    border-color: var(--field-gold);
+}
+.connections-dialog__advanced-hint {
+    font-size: 0.64rem;
+    color: var(--text-secondary);
+    margin: 4px 0 0;
+}
+.connections-dialog__advanced-hint a {
+    color: var(--field-gold);
+}
+.connections-dialog__advanced-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 6px;
+}
+.connections-dialog__advanced-save {
+    background: transparent;
+    border: 1px solid var(--field-gold-dim);
+    color: var(--field-gold);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    padding: 6px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+.connections-dialog__advanced-save:hover,
+.connections-dialog__advanced-save:focus-visible {
+    background: var(--field-gold-dim);
+    border-color: var(--field-gold);
+    outline: none;
+}
+.connections-dialog__advanced-status {
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    color: var(--text-secondary);
+}
+.connections-dialog__advanced-status--error {
+    color: var(--tactical-red);
+}
+
 /* Multiplayer dialog footer: a single quiet entry point to the connection
    log — the log itself lives in its own overlay so it never squeezes the
    saved-connections list. */

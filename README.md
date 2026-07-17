@@ -79,6 +79,13 @@ opaque-frame storage bridge, and launcher-aware settings/lifecycle hints.
     AEAD-sealed with per-pair ratcheting keys, topics are unlinkable daily
     HMACs, and the relay can only delay or drop, never impersonate.
 
+- **[SELF_HOSTING.md](SELF_HOSTING.md)** — running your own multiplayer
+  infrastructure: a mosquitto-over-WSS rendezvous broker (so auto-reconnect
+  never depends on the free public brokers) and a coturn TURN server (the
+  only way symmetric-NAT pairs can connect off-LAN). Both are configured
+  from the Multiplayer dialog's Advanced panel. Read this if you want zero
+  third parties in the loop.
+
 ## Local development
 
 ```sh

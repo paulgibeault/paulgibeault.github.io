@@ -110,19 +110,54 @@ const RDV_BROKER_URLS = [
 // arcade.v1._meta.rdvBrokers to a JSON array of wss:// URLs. Empty/invalid ⇒
 // the built-in fleet. The brokers only ever see ciphertext on rotating topics,
 // so trusting a self-hosted one costs nothing beyond the metadata a public one
-// already sees.
+// already sees. SELF_HOSTING.md walks through standing one up.
+
+// Exported so the Multiplayer dialog's Advanced panel can validate before it
+// writes the key — one shape, one place (the arcade-known-peers.js lesson).
+// Returns the valid entries, or null when nothing usable remains.
+export function validateBrokerUrls(arr) {
+    if (!Array.isArray(arr)) return null;
+    const urls = arr.filter((u) => typeof u === 'string' && /^wss:\/\//i.test(u));
+    return urls.length ? urls : null;
+}
+
 function rdvBrokerUrls() {
     try {
         const raw = localStorage.getItem('arcade.v1._meta.rdvBrokers');
         if (raw) {
-            const arr = JSON.parse(raw);
-            const urls = Array.isArray(arr)
-                ? arr.filter((u) => typeof u === 'string' && /^wss:\/\//i.test(u))
-                : [];
-            if (urls.length) return urls;
+            const urls = validateBrokerUrls(JSON.parse(raw));
+            if (urls) return urls;
         }
     } catch (e) {}
     return RDV_BROKER_URLS;
+}
+
+// Custom ICE servers (arcade.v1._meta.iceServers, a JSON RTCIceServer[]) —
+// the only way to add TURN, which symmetric-NAT pairs need off-LAN. Replaces
+// the transport's built-in public STUN list when set; empty/invalid ⇒ null ⇒
+// the built-in default. WARNING for anyone touching the shape: this key rides
+// save-file exports/backups like every arcade.v1.* key, so a static TURN
+// credential stored here leaves the device with every exported save —
+// SELF_HOSTING.md tells users to prefer short-lived credentials.
+export function validateIceServers(arr) {
+    if (!Array.isArray(arr)) return null;
+    const ok = arr.filter((s) => s && typeof s === 'object'
+        && (typeof s.urls === 'string' || (Array.isArray(s.urls) && s.urls.length && s.urls.every((u) => typeof u === 'string')))
+        && [].concat(s.urls).every((u) => /^(stun|turn|turns):/i.test(u))
+        && (s.username === undefined || typeof s.username === 'string')
+        && (s.credential === undefined || typeof s.credential === 'string'));
+    return ok.length ? ok : null;
+}
+
+function iceServersConfig() {
+    try {
+        const raw = localStorage.getItem('arcade.v1._meta.iceServers');
+        if (raw) {
+            const valid = validateIceServers(JSON.parse(raw));
+            if (valid) return valid;
+        }
+    } catch (e) {}
+    return null;
 }
 
 let rdv = null;
@@ -550,7 +585,11 @@ async function ensureAddon() {
         await loadLocalScript('./p2p/vendor/html5-qrcode.min.js', 'Html5Qrcode');
 
         const { default: P2PAddon } = await import('./p2p/p2p-addon.js');
-        const mp = new P2PAddon();
+        // Custom ICE servers apply to EVERY RTCPeerConnection this PeerManager
+        // ever builds — first ceremony, in-band repair, and rendezvous
+        // reconnect all go through the same _buildRtcConfig().
+        const ice = iceServersConfig();
+        const mp = new P2PAddon(ice ? { iceServers: ice } : {});
         await mp.init();
         ArcadeDiag.log('bridge', 'transport booted');
         // Transport-level diagnostics (interruptions, in-band repair, ICE)
@@ -974,6 +1013,14 @@ export const ArcadeP2P = {
         if (pid === undefined || !seatReachable(pid)) return false;
         return addon.sendTo(pid, { ...env, arcade: 1, kind: 'backup' });
     },
+
+    /**
+     * Write-side validators for the Multiplayer dialog's Advanced panel
+     * (self-hosted broker / TURN overrides). Same functions the read side
+     * uses, so what the panel accepts is exactly what the bridge honors.
+     */
+    validateBrokerUrls,
+    validateIceServers,
 
     /**
      * Sync-gate support (arcade-sync.js): read-only passthrough to the
