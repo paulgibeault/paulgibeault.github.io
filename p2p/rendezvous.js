@@ -603,6 +603,20 @@ export class RendezvousManager extends EventTarget {
         }
     }
 
+    /**
+     * Read model: the number of live (unsettled) episodes. The supported way
+     * for callers to ask "is any session being repaired / any pair reachable
+     * right now?" — e.g. to gate a nudgeAll() on wake. `episodes` itself is
+     * internal; its shape is free to change.
+     */
+    episodesActive() {
+        let n = 0;
+        for (const ep of this.episodes.values()) {
+            if (!ep.settled) n++;
+        }
+        return n;
+    }
+
     async _nudgeEpisode(pairId, ep, why) {
         try {
             if (ep.carrier && typeof ep.carrier.ensureAlive === 'function') ep.carrier.ensureAlive();

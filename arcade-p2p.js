@@ -202,15 +202,10 @@ function rdvCarrierFactory() {
 // Terminal link statuses have already been removed from the transport's peers
 // map by the time their event fires, so aggregation only ever sees live links.
 function aggregateStatus(mp) {
-    let connected = false, interrupted = false, pending = false;
-    mp.peerNode.peers.forEach((p) => {
-        if (p.status === 'connected') connected = true;
-        else if (p.status === 'interrupted') interrupted = true;
-        else pending = true;
-    });
-    if (connected) return 'connected';
-    if (interrupted) return 'interrupted';
-    if (pending) return 'connecting';
+    const s = mp.peerNode.statusSummary();
+    if (s.connected) return 'connected';
+    if (s.interrupted) return 'interrupted';
+    if (s.finalizing + s.pending) return 'connecting';
     // A rendezvous episode means a session is being repaired even though its
     // dead link has left the peers map — games should keep waiting, not reset.
     if (rdvReconnecting.size) return 'interrupted';
@@ -368,18 +363,10 @@ function linkSenderDeviceId(d) {
     return d.relayed ? deviceIdForRelayFrom(d.from) : deviceIdForPeerId(d.peerId);
 }
 
-// A joiner's single direct link is by definition the host. Prefer the live
-// peers entry typed 'host'; during a stash-repair window (entry torn down,
-// outbox stashed) the stash preserves the link type, so look there next.
+// A joiner's single direct link is by definition the host; the transport
+// resolves it (live entry first, then a stash-repair window's session).
 function hostLinkPeerId() {
-    if (!addon || addon.peerNode.isHost) return null;
-    for (const [pid, p] of addon.peerNode.peers) {
-        if (p.type === 'host') return pid;
-    }
-    for (const [pid, s] of addon.peerNode.sessionStash) {
-        if (s.type === 'host') return pid;
-    }
-    return null;
+    return addon ? addon.peerNode.hostLinkId() : null;
 }
 
 // Is a transport peerId still a reachable seat? Live in `peers`, or stashed
@@ -389,8 +376,8 @@ function hostLinkPeerId() {
 // delivery into a dead seat).
 function seatReachable(peerId) {
     if (!addon || peerId === undefined || peerId === null) return false;
-    if (addon.peerNode.peers.has(peerId)) return true;
-    return !!(addon.peerNode.sessionStash && addon.peerNode.sessionStash.has(peerId) && rdvReconnecting.has(peerId));
+    if (addon.peerNode.hasLink(peerId)) return true;
+    return addon.peerNode.hasStashedSession(peerId) && rdvReconnecting.has(peerId);
 }
 
 // Roster: the per-device view of every DIRECT link (a host sees all joiners;
@@ -409,11 +396,11 @@ function rosterSnapshot() {
     const known = readKnownPeers();
     const out = [];
     for (const [deviceId, peerId] of deviceIndex) {
-        const p = addon.peerNode.peers.get(peerId);
+        const linkStatus = addon.peerNode.linkStatus(peerId);
         let status = null;
-        if (p) {
-            status = p.status === 'connected' ? 'connected' : 'interrupted';
-        } else if (addon.peerNode.sessionStash && addon.peerNode.sessionStash.has(peerId)
+        if (linkStatus) {
+            status = linkStatus === 'connected' ? 'connected' : 'interrupted';
+        } else if (addon.peerNode.hasStashedSession(peerId)
                 && rdvReconnecting.has(peerId) && !(known[deviceId] && known[deviceId].paused)) {
             // A stashed session counts as a seat only while a rendezvous
             // episode is actively repairing it. A stash with NO episode is a
@@ -643,7 +630,7 @@ async function applyRevocation(entry, source) {
     fingerprintSuspects.add(entry.deviceId);
     try {
         const pid = deviceIndex.get(entry.deviceId);
-        if (pid !== undefined && addon && addon.peerNode.peers.has(pid)) {
+        if (pid !== undefined && addon && addon.peerNode.hasLink(pid)) {
             addon.peerNode.disconnectPeer(pid);
             addon.peerNode.forgetSession(pid);
         }
@@ -743,11 +730,11 @@ function syncWakeLock() {
 document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
         syncWakeLock();
-        if (rdv && rdv.episodes.size) {
+        if (rdv && rdv.episodesActive()) {
             ArcadeDiag.log('bridge', 'page visible again — nudging rendezvous');
             rdv.nudgeAll('foreground');
         }
-    } else if (rdv && rdv.episodes.size) {
+    } else if (rdv && rdv.episodesActive()) {
         // Evidence line: a wake lock only stops dimming while VISIBLE. Once
         // hidden, the browser may freeze this page's event loop outright —
         // the log must show where such a gap could have started.
@@ -755,13 +742,13 @@ document.addEventListener('visibilitychange', () => {
     }
 });
 window.addEventListener('online', () => {
-    if (rdv && rdv.episodes.size) {
+    if (rdv && rdv.episodesActive()) {
         ArcadeDiag.log('bridge', 'network back online — nudging rendezvous');
         rdv.nudgeAll('online');
     }
 });
 window.addEventListener('pageshow', (e) => {
-    if (e.persisted && rdv && rdv.episodes.size) {
+    if (e.persisted && rdv && rdv.episodesActive()) {
         ArcadeDiag.log('bridge', 'page restored from bfcache — nudging rendezvous');
         rdv.nudgeAll('bfcache');
     }
@@ -996,7 +983,7 @@ async function ensureAddon() {
                 // peer's deviceId and steal its broadcast attribution (S-sec-2).
                 // Strict live-link check so a stale binding doesn't wrongly block
                 // a legitimate relayed (re)appearance.
-                if (deviceIndex.has(env.deviceId) && mp.peerNode.peers.has(deviceIndex.get(env.deviceId))) {
+                if (deviceIndex.has(env.deviceId) && mp.peerNode.hasLink(deviceIndex.get(env.deviceId))) {
                     ArcadeDiag.log('bridge', `ignored relayed identity for ${env.deviceId}: already a live direct seat`);
                     return;
                 }
@@ -1026,7 +1013,7 @@ async function ensureAddon() {
                 // how a user recovers a dead link), which mints a new peerId.
                 const boundPeerId = deviceIndex.get(env.deviceId);
                 if (boundPeerId !== undefined && boundPeerId !== d.peerId
-                        && mp.peerNode.peers.has(boundPeerId)) {
+                        && mp.peerNode.hasLink(boundPeerId)) {
                     ArcadeDiag.log('bridge', `refused identity rebind: ${env.deviceId} still live on ${boundPeerId} (claim from ${d.peerId})`);
                     return;
                 }
@@ -1107,7 +1094,7 @@ async function ensureAddon() {
             // rendezvous layer already recorded the bye, so the teardown
             // below starts a quiet standby (callable), not a repair episode.
             const { peerId } = e.detail || {};
-            if (peerId && mp.peerNode.peers.has(peerId)) {
+            if (peerId && mp.peerNode.hasLink(peerId)) {
                 mp.peerNode.disconnectPeer(peerId);
             }
             const devId = peerId ? deviceIdForPeerId(peerId) : null;
@@ -1342,10 +1329,10 @@ export const ArcadeP2P = {
     connectionState(deviceId) {
         const peerId = deviceIndex.get(deviceId);
         if (addon && peerId) {
-            const p = addon.peerNode.peers.get(peerId);
-            if (p) {
-                if (p.status === 'connected') return 'connected';
-                if (p.status === 'interrupted') return 'interrupted';
+            const linkStatus = addon.peerNode.linkStatus(peerId);
+            if (linkStatus) {
+                if (linkStatus === 'connected') return 'connected';
+                if (linkStatus === 'interrupted') return 'interrupted';
                 return 'connecting';
             }
         }
@@ -1361,18 +1348,7 @@ export const ArcadeP2P = {
      */
     queueSnapshot() {
         if (!addon) return { depth: 0, limit: 0, overflowed: false };
-        let depth = 0, overflowed = false;
-        addon.peerNode.peers.forEach((p) => {
-            depth = Math.max(depth, (p.outbox || []).length);
-            if (p.outboxOverflowed) overflowed = true;
-        });
-        if (addon.peerNode.sessionStash) {
-            addon.peerNode.sessionStash.forEach((s) => {
-                depth = Math.max(depth, (s.outbox || []).length);
-                if (s.outboxOverflowed) overflowed = true;
-            });
-        }
-        return { depth, limit: (addon.peerNode.options && addon.peerNode.options.outboxLimit) || 1000, overflowed };
+        return addon.peerNode.outboxSnapshot();
     },
 
     /**
@@ -1537,8 +1513,7 @@ export const ArcadeP2P = {
         fingerprintSuspects.delete(deviceId);
         await ensureAddon(); // rdv is only populated once the addon has loaded
         const peerId = deviceIndex.get(deviceId);
-        const livePeer = peerId ? addon.peerNode.peers.get(peerId) : null;
-        if (livePeer && livePeer.status === 'connected') {
+        if (peerId && addon.peerNode.linkStatus(peerId) === 'connected') {
             // The link is live: enabling here is a fresh trust event, so mint
             // (or refresh) the pairing secret over the channel — this also
             // consumes a pending pair-request random from the other side.
@@ -1556,7 +1531,7 @@ export const ArcadeP2P = {
             stampLiveSession();
             return true;
         }
-        if (peerId && addon.peerNode.peers.has(peerId)) {
+        if (peerId && addon.peerNode.hasLink(peerId)) {
             // Link exists but isn't fully up (mid-ceremony/interrupted) — a
             // best-effort mint; completion needs the channel to open.
             await rdv.enablePair(peerId, deviceId).catch(() => {});
@@ -1608,7 +1583,7 @@ export const ArcadeP2P = {
         // dead-drop with an offer nobody should answer).
         await rdv.pausePair(deviceId).catch(() => {});
         const peerId = deviceIndex.get(deviceId);
-        if (peerId && addon.peerNode.peers.has(peerId)) {
+        if (peerId && addon.peerNode.hasLink(peerId)) {
             const byeSent = rdv.sendBye(peerId);
             if (!byeSent) {
                 // The channel wasn't open (link interrupted/mid-repair): the
@@ -1621,7 +1596,7 @@ export const ArcadeP2P = {
             // Give the bye frame a beat to flush before the pc closes under it.
             await new Promise((r) => setTimeout(r, 250));
         }
-        if (peerId && addon.peerNode.peers.has(peerId)) {
+        if (peerId && addon.peerNode.hasLink(peerId)) {
             addon.peerNode.disconnectPeer(peerId);
         }
         return true;

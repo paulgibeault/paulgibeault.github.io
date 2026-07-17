@@ -174,8 +174,8 @@ All messages namespaced `arcade:` to avoid collision.
 ### Handshake
 
 ```
-child → parent:  { type: 'arcade:hello',   gameId, version: 3 }
-parent → child:  { type: 'arcade:welcome', version: 2, peerStatus: 'idle',
+child → parent:  { type: 'arcade:hello',   gameId }
+parent → child:  { type: 'arcade:welcome', peerStatus: 'idle',
                    caps: ['peer.sendTo', 'peer.roster', 'peer.meta', 'storage.bridge', 'ui.bridge'],  // capability flags (absent ⇒ [])
                    peers: [{ deviceId, name, status, direct }, ...],   // live remote devices (roster seed)
                    settings: { fontScale, theme, reducedMotion, audioVolume, handedness },
@@ -373,8 +373,10 @@ lives with the other storage allowlists in `arcade-storage-core.js`.
   segments) with values ≤64 KB — the same boundary discipline as the storage
   bridge. Enabling sync for a pair intentionally grants that device bounded
   write authority over app state; that is the feature.
-- **Durability:** HLC clock, per-key records, tombstones (30-day TTL, capped
-  per app), and per-pair replication cursors persist in the device-local
+- **Durability:** HLC clock, per-key records, tombstones (cap-only GC: the
+  oldest beyond 512 per app are evicted — deliberately no wall-clock TTL, so
+  an offline device can't outlive a tombstone and resurrect a deleted key),
+  and per-pair replication cursors persist in the device-local
   `arcade-sync` IndexedDB — sync converges across restarts, and deletes don't
   resurrect. A save-file import re-stamps imported synced keys as fresh local
   edits, so imports win over older remote state on the next exchange.
@@ -620,7 +622,7 @@ Verified by `tools/export-advanced-acceptance.mjs` (scoped + encrypted export/im
 
 - ~~**IndexedDB migration** for storage if any single game outgrows localStorage's ~5 MB ceiling.~~ **Shipped** — `Arcade.store` (async IndexedDB KV) and `Arcade.files` (OPFS/IDB blobs); both ride the save bundle.
 - **Last-N auto-backups in IndexedDB** as a secondary recovery channel.
-- **SDK version negotiation** — the handshake already carries `version`; bump and branch when the protocol changes.
+- **SDK version negotiation** — there is deliberately no version number on the wire (the dead `hello.version`/`welcome.version` fields were retired); `welcome.caps` is the launcher↔SDK compat contract — new features add a cap, and an SDK missing one degrades. Revisit only if a change can't be expressed as an additive cap.
 - **Certificate-pinned reconnect** — cache an `RTCCertificate` in IndexedDB so a previously-paired device's DTLS fingerprint is verifiable across sessions, as a foundation for shorter reconnect payloads. Named/recognized known peers (see "Known peers" above) already cover the naming half of this; the ceremony itself is still a full offer/answer round trip.
 - **PWA manifest + Android `share_target`** — installed launcher receives shared invite links directly; improves the re-entry story on both platforms.
 - **Audio-chirp answer leg** — ~140-byte payloads fit in a 2–4 s WebAudio FSK chirp; joiner's phone "sings" the answer to the host's laptop. Best return path for the phone→laptop direction where QR is most awkward.
