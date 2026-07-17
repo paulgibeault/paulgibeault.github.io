@@ -510,11 +510,21 @@ future carrier (requires secp256k1 signing, i.e. a vendored dependency).
 
 A carrier is expected to be **self-healing** (1.10): `MqttCarrier.connect()`
 resolves on its first successful broker session and never rejects — it
-redials with backoff (1 s → 30 s) on failure or loss, re-issues every
-subscription on each new session, and treats a missed PINGRESP as a dead
-socket. Free public brokers restart routinely; carrier loss is an outage to
-ride out, never an error that kills an episode. `publish()` during an
-outage throws, which the episode's republish schedule absorbs.
+redials with jittered backoff (1 s → 30 s, up to +40% spread so a shared
+network outage doesn't re-dial every device in lockstep; a page-wide
+sliding-window brake additionally defers pathological dial churn), re-issues
+every subscription on each new session, and treats a missed PINGRESP as a
+dead socket. Free public brokers restart routinely; carrier loss is an
+outage to ride out, never an error that kills an episode. `publish()` during
+an outage throws, which the episode's republish schedule absorbs.
+
+Episodes do not hold private carriers: each leases topics from a per-device
+`CarrierPool`, so a device holds **one socket per broker total** (3, not 3
+per armed pair). Leases speak the full carrier interface; the pooled fleet
+is built lazily on the first lease and closed after the last lease releases
+plus a linger (so an episode that settles and immediately re-arms reuses
+warm sockets). The pool changes socket economics only — topics, payloads,
+and cadences on the wire are identical.
 
 ## 8. Security considerations
 

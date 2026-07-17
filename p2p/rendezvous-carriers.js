@@ -31,6 +31,15 @@
  *                     broker must never strand two paired devices again
  *                     (test.mosquitto.org was down a whole evening,
  *                     2026-07-09 field logs).
+ *   CarrierPool     — ONE shared underlying carrier per device, handed out
+ *                     as ref-counted leases that each speak the full
+ *                     carrier interface. Every rendezvous episode used to
+ *                     mint its own MultiCarrier (3 sockets per PAIR); the
+ *                     pool makes it 3 sockets per DEVICE, however many
+ *                     pairs are armed. A lease's close() releases its
+ *                     topic subscriptions; the underlying carrier closes
+ *                     only after the last lease is gone (plus a linger,
+ *                     so settle→rearm churn doesn't redial brokers).
  */
 
 // ---------------------------------------------------------------------------
@@ -39,6 +48,38 @@
 // Longer than any realistic broker round trip, so a merely non-zero-RTT broker
 // isn't torn down by a ping that raced the 30s keepalive interval.
 const PING_GRACE_MS = 10000;
+
+// Redial backoff with jitter. Every device on a shared network loses its
+// broker sockets at the same instant (router reboot, broker restart), and a
+// fixed [1s,2s,5s,…] ladder has them all re-dialing in synchronized waves —
+// exactly the thundering herd a free public broker punishes. Up to +40% of
+// the base spreads the wave; the base ladder still bounds worst-case
+// reconnect latency. Pure and exported for hermetic bound tests.
+const REDIAL_BACKOFF_MS = [1000, 2000, 5000, 15000, 30000];
+export function redialDelay(attempt, rand = Math.random()) {
+    const base = REDIAL_BACKOFF_MS[Math.min(attempt, REDIAL_BACKOFF_MS.length - 1)];
+    return Math.round(base + base * 0.4 * Math.min(Math.max(rand, 0), 1));
+}
+
+// Global brake on dial ATTEMPTS across every MqttCarrier in the page: a
+// sliding window that defers (never cancels) dials past the cap. Sized so the
+// normal worst case — all three broker legs down and cycling their early
+// backoff slots — never trips it; it only catches pathological churn (a bug
+// minting fresh carriers in a loop must not turn the device into a broker
+// hammer). Deliberately rate-based, NOT a concurrency cap: two hung brokers
+// each eat their full 15s dial guard, and a concurrency cap would let them
+// block the third, working broker — legs must dial independently.
+export function makeDialBrake({ windowMs = 60000, max = 20 } = {}) {
+    const stamps = [];
+    return {
+        shouldDefer(now) {
+            while (stamps.length && now - stamps[0] > windowMs) stamps.shift();
+            return stamps.length >= max;
+        },
+        note(now) { stamps.push(now); }
+    };
+}
+const dialBrake = makeDialBrake();
 
 export class LoopbackCarrier {
     constructor(name = 'qrp2p-rdv-loopback') {
@@ -266,6 +307,163 @@ export class MultiCarrier {
 
 // ---------------------------------------------------------------------------
 
+/**
+ * One shared underlying carrier per device, handed out as ref-counted LEASES.
+ *
+ * Each lease speaks the full carrier interface (connect / publish /
+ * subscribe / close / ensureAlive / assignable onSessionUp), so the
+ * rendezvous episode layer — and the acceptance harness's injected test
+ * carrier — need zero changes: `carrierFactory()` simply returns
+ * `pool.acquire()` instead of a fresh MultiCarrier.
+ *
+ * Lifecycle: the underlying carrier is built lazily by `factory()` on the
+ * first lease that connects (or subscribes), which is also when the test
+ * hook is consulted in the launcher — never at pool construction. A lease's
+ * close() releases only ITS topic callbacks; a topic is unsubscribed from
+ * the underlying carrier when its last callback goes, and the underlying
+ * carrier itself closes only after the LAST lease releases plus `lingerMs` —
+ * an episode that settles and immediately re-arms (the common repair churn)
+ * must reuse warm sockets, not redial three brokers. A lease acquired during
+ * the linger cancels it.
+ *
+ * Topics are per-pair HMAC ids, so cross-lease callback fan-out is normally
+ * 1:1; the ref counting is for correctness, not an expected sharing pattern.
+ */
+export class CarrierPool {
+    /**
+     * @param {() => object} factory - builds the underlying carrier; called
+     *   lazily, and again after a linger teardown (carrier instances are
+     *   single-use once closed).
+     * @param {object} [opts]
+     * @param {number} [opts.lingerMs] - how long the underlying carrier
+     *   outlives its last lease.
+     * @param {(msg: string) => void} [opts.onLog] - pool-lifecycle
+     *   diagnostics (build/linger/teardown). Never load-bearing.
+     */
+    constructor(factory, opts = {}) {
+        this.factory = factory;
+        this.lingerMs = opts.lingerMs === undefined ? 45000 : opts.lingerMs;
+        this.onLog = typeof opts.onLog === 'function' ? opts.onLog : null;
+        this.carrier = null;         // shared underlying carrier (lazily built)
+        this.leases = new Set();
+        this.topics = new Map();     // topic → { cbs: Set<cb>, unsub }
+        this._lingerTimer = null;
+    }
+
+    _log(msg) {
+        if (this.onLog) { try { this.onLog(msg); } catch (e) {} }
+    }
+
+    _materialize() {
+        if (this.carrier) return this.carrier;
+        this.carrier = this.factory();
+        this._log('underlying carrier built');
+        // Fan a session (re)establishment out to every lease that asked —
+        // each episode republishes what QoS 0 lost in the dead socket.
+        this.carrier.onSessionUp = () => {
+            for (const lease of this.leases) {
+                if (typeof lease.onSessionUp === 'function') {
+                    try { lease.onSessionUp(); } catch (e) {}
+                }
+            }
+        };
+        return this.carrier;
+    }
+
+    _dropCb(topic, cb) {
+        const entry = this.topics.get(topic);
+        if (!entry || !entry.cbs.delete(cb)) return;
+        if (entry.cbs.size === 0) {
+            this.topics.delete(topic);
+            try { entry.unsub(); } catch (e) {}
+        }
+    }
+
+    _release(lease) {
+        if (!this.leases.delete(lease)) return;
+        for (const sub of lease._subs) this._dropCb(sub.topic, sub.cb);
+        lease._subs.clear();
+        if (this.leases.size === 0 && this.carrier && !this._lingerTimer) {
+            this._log(`last lease released — closing the carrier in ${this.lingerMs}ms unless re-acquired`);
+            this._lingerTimer = setTimeout(() => {
+                this._lingerTimer = null;
+                if (this.leases.size || !this.carrier) return;
+                this._log('linger elapsed — underlying carrier closed');
+                try { this.carrier.close(); } catch (e) {}
+                this.carrier = null;
+                this.topics.clear();
+            }, this.lingerMs);
+        }
+    }
+
+    acquire() {
+        const pool = this;
+        if (this._lingerTimer) { clearTimeout(this._lingerTimer); this._lingerTimer = null; }
+        const lease = {
+            onSessionUp: null,
+            _subs: new Set(),
+            _released: false,
+            async connect() {
+                if (this._released) throw new Error('carrier lease released');
+                if (pool._lingerTimer) { clearTimeout(pool._lingerTimer); pool._lingerTimer = null; }
+                return pool._materialize().connect();
+            },
+            async publish(topic, payload) {
+                if (this._released) throw new Error('carrier lease released');
+                if (!pool.carrier) throw new Error('carrier not connected');
+                return pool.carrier.publish(topic, payload);
+            },
+            subscribe(topic, cb) {
+                if (this._released) return () => {};
+                let entry = pool.topics.get(topic);
+                if (!entry) {
+                    entry = { cbs: new Set(), unsub: null };
+                    pool.topics.set(topic, entry);
+                    entry.unsub = pool._materialize().subscribe(topic, (payload) => {
+                        for (const fn of entry.cbs) { try { fn(payload); } catch (e) {} }
+                    });
+                }
+                entry.cbs.add(cb);
+                const sub = { topic, cb };
+                this._subs.add(sub);
+                return () => {
+                    this._subs.delete(sub);
+                    pool._dropCb(topic, cb);
+                };
+            },
+            ensureAlive() {
+                if (this._released || !pool.carrier) return;
+                if (typeof pool.carrier.ensureAlive === 'function') {
+                    try { pool.carrier.ensureAlive(); } catch (e) {}
+                }
+            },
+            close() {
+                if (this._released) return;
+                this._released = true;
+                pool._release(this);
+            }
+        };
+        this.leases.add(lease);
+        return lease;
+    }
+
+    /** Immediate teardown (tests / page shutdown): no linger, leases dead. */
+    close() {
+        for (const lease of [...this.leases]) { try { lease.close(); } catch (e) {} }
+        // The last lease's release just armed the linger — this teardown is
+        // immediate, so kill it after the loop, not before.
+        if (this._lingerTimer) { clearTimeout(this._lingerTimer); this._lingerTimer = null; }
+        this.leases.clear();
+        this.topics.clear();
+        if (this.carrier) {
+            try { this.carrier.close(); } catch (e) {}
+            this.carrier = null;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
 export class MqttCarrier {
     /**
      * Self-healing MQTT connection: one connect() call keeps a socket alive
@@ -324,6 +522,20 @@ export class MqttCarrier {
 
     _dial() {
         if (this.closed || this.ws || this._dialing) return;
+        if (dialBrake.shouldDefer(Date.now())) {
+            // Deferred, not dropped: retry shortly without consuming a
+            // backoff slot (the brake is about page-wide rate, not this
+            // broker's health).
+            this._log('dial deferred (page-wide redial brake)');
+            if (!this._redialTimer) {
+                this._redialTimer = setTimeout(() => {
+                    this._redialTimer = null;
+                    this._dial();
+                }, 1000 + Math.random() * 1000);
+            }
+            return;
+        }
+        dialBrake.note(Date.now());
         this._dialing = true;
         this._log(`dialing ${this.url}…`);
         const dialedAt = Date.now();
@@ -416,12 +628,10 @@ export class MqttCarrier {
 
     _scheduleRedial() {
         if (this.closed || this._redialTimer || this.ws || this._dialing) return;
-        const BACKOFF = [1000, 2000, 5000, 15000, 30000];
-        const delay = BACKOFF[Math.min(this._backoffIdx++, BACKOFF.length - 1)];
         this._redialTimer = setTimeout(() => {
             this._redialTimer = null;
             this._dial();
-        }, delay);
+        }, redialDelay(this._backoffIdx++));
     }
 
     _onFrame(bytes) {
