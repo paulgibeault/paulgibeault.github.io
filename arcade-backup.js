@@ -49,9 +49,19 @@
  * accepted, a generation is listed/restored, or an offer needs the
  * last-acked checksum — a device that never opts in never creates it.
  *
- * Deferred (see the PR notes for #31): encrypt-at-rest with a key derived
- * from the rendezvous pair secret. DTLS already protects transit; at-rest
- * bundles are exactly as protected as the rest of the origin's storage.
+ * Encrypt-at-rest (the #31 deferral, now implemented): stored generations
+ * are AES-256-GCM-sealed under a key HKDF-derived from the rendezvous pair
+ * secret for that sender (pairDetachedKey, non-extractable, own info label
+ * — full domain separation from the signaling key schedule), with the
+ * sender's deviceId bound as AAD so a generation can't be swapped between
+ * peers. DTLS protects transit; this protects the bundle sitting in the
+ * TARGET's IDB from being read without the pair record. Availability beats
+ * confidentiality for a backup feature: when no pair secret exists (manual
+ * ceremony only, or the pair was forgotten) generations fall back to
+ * plaintext with a diag note, and legacy plaintext generations stay
+ * restorable forever. A generation sealed under a FORMER pair secret
+ * (re-paired since) is unreadable by design — restore surfaces that instead
+ * of silently yielding bytes nobody authenticated.
  */
 
 import {
@@ -65,7 +75,7 @@ import {
     planGenerationStore,
     validateBackupEnvelope
 } from './arcade-backup-core.js';
-import { validateSaveBundle } from './arcade-save.js';
+import { validateSaveBundle, bytesToB64, b64ToBytes } from './arcade-save.js';
 import { idbOpen, idbGet, idbPut, idbKeys, idbDel } from './arcade-storage-core.js';
 import { readKnownPeers, setKnownPeerBackupTarget } from './arcade-known-peers.js';
 import { ArcadeDiag } from './arcade-diag.js';
@@ -89,6 +99,61 @@ const BUNDLE_CACHE_MS = 30 * 1000;
 // Chunk frames sent per macrotask — same pacing idea as the SDK's blob
 // sender: never monopolize the event loop or flood the transport outbox.
 const SEND_BATCH = 8;
+// HKDF info label for the at-rest key (see header). Versioned so a future
+// envelope change can re-derive under a fresh label instead of ambiguating
+// old ciphertexts.
+const AT_REST_INFO = 'arcade-backup/at-rest/v1';
+
+// Lazily resolves the per-pair at-rest key. Dynamic import on purpose:
+// initBackupEngine is loaded eagerly by index.html's module block, and the
+// rendezvous module (and its subtree) must keep loading only when P2P
+// features are actually exercised.
+async function atRestKey(deviceId) {
+    try {
+        const { pairDetachedKey } = await import('./p2p/rendezvous.js');
+        return await pairDetachedKey(deviceId, AT_REST_INFO);
+    } catch (e) { return null; }
+}
+
+function atRestAad(deviceId) {
+    return new TextEncoder().encode(AT_REST_INFO + '|' + deviceId);
+}
+
+// {json} (plaintext fallback / legacy) or {enc:1, iv, ct} (sealed).
+async function sealAtRest(deviceId, json) {
+    const key = await atRestKey(deviceId);
+    if (!key) {
+        ArcadeDiag.log('backup', `no pair secret for ${deviceId} — generation stored unencrypted (availability over confidentiality)`);
+        return { json };
+    }
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv, additionalData: atRestAad(deviceId) },
+        key, new TextEncoder().encode(json));
+    return { enc: 1, iv: bytesToB64(iv), ct: bytesToB64(new Uint8Array(ct)) };
+}
+
+// Returns the bundle JSON string, or null on ANY failure (missing pair
+// record, re-paired-since key mismatch, tampered ciphertext) — mirroring
+// decryptBundleJson's fail-closed discipline.
+async function openAtRest(deviceId, rec) {
+    if (rec && typeof rec.json === 'string') return rec.json; // legacy/fallback plaintext
+    if (!rec || rec.enc !== 1 || typeof rec.iv !== 'string' || typeof rec.ct !== 'string') return null;
+    const key = await atRestKey(deviceId);
+    if (!key) {
+        ArcadeDiag.log('backup', `generation from ${deviceId} is sealed but no pair secret exists — unreadable (re-pair with the device that sent it)`);
+        return null;
+    }
+    try {
+        const pt = await crypto.subtle.decrypt(
+            { name: 'AES-GCM', iv: b64ToBytes(rec.iv), additionalData: atRestAad(deviceId) },
+            key, b64ToBytes(rec.ct));
+        return new TextDecoder().decode(pt);
+    } catch (e) {
+        ArcadeDiag.log('backup', `sealed generation from ${deviceId} failed to decrypt — pair secret changed since it was stored`);
+        return null;
+    }
+}
 
 export function initBackupEngine(host) {
     const showToast = host.showToast || (() => {});
@@ -293,9 +358,10 @@ export function initBackupEngine(host) {
             let key = genKey(fromDeviceId, ms);
             while (existing.some((g) => g.key === key)) key = genKey(fromDeviceId, ++ms);
             const meta = { checksum: buf.checksum, chars: json.length, exportedAt: buf.exportedAt || '', receivedAt: ms };
-            // Split rows: the bundle string under 'g|…', its meta under
-            // 'm|…' — ensureDb's index build reads only the latter.
-            await idbPut(db, key, { json });
+            // Split rows: the bundle string under 'g|…' (sealed at rest when
+            // a pair secret exists — see sealAtRest), its meta under 'm|…'
+            // — ensureDb's index build reads only the latter.
+            await idbPut(db, key, await sealAtRest(fromDeviceId, json));
             await idbPut(db, 'm' + key.slice(1), meta);
             existing.push({ key, ...meta });
             for (const pk of plan.prune) {
@@ -420,12 +486,15 @@ export function initBackupEngine(host) {
         const newest = list[list.length - 1];
         let rec;
         try { rec = await idbGet(db, newest.key); } catch (e) { rec = null; }
-        if (!rec || typeof rec.json !== 'string') {
+        const json = rec ? await openAtRest(deviceId, rec) : null;
+        if (typeof json !== 'string') {
+            // openAtRest already diag-logged the specific reason (no pair
+            // secret vs key changed) — the toast stays user-sized.
             showToast('Could not read the stored backup.', { error: true });
             return false;
         }
         const when = new Date(newest.receivedAt).toLocaleString();
-        return host.importBundleJson(rec.json,
+        return host.importBundleJson(json,
             'Restore "' + peerName(deviceId) + '"’s backup received ' + when + '?');
     }
 
