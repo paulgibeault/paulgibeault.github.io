@@ -104,7 +104,7 @@
 
 import { RendezvousManager, RDV_BUILD } from './p2p/rendezvous.js';
 import { DEFAULT_ICE_SERVERS } from './p2p/p2p-core.js';
-import { MqttCarrier, MultiCarrier } from './p2p/rendezvous-carriers.js';
+import { MqttCarrier, MultiCarrier, CarrierPool } from './p2p/rendezvous-carriers.js';
 import { readKnownPeers, writeKnownPeers, setKnownPeerPaused, markKnownPeerRevoked } from './arcade-known-peers.js';
 import { ArcadeDiag } from './arcade-diag.js';
 import { isDeviceId, validatePeerEnvelope, validateRevocationEntry } from './arcade-envelope.js';
@@ -187,7 +187,15 @@ let rdv = null;
 // unrelated stashed/departed session read as 'interrupted' in the roster.
 const rdvReconnecting = new Set();
 
-function rdvCarrierFactory() {
+// ONE broker fleet per device, however many pairs are armed: every episode
+// used to mint its own MultiCarrier (3 WSS sockets per PAIR), so a device
+// with N repairing/standby pairs held 3N sockets to the same three public
+// brokers. Episodes now lease topics from this shared pool — 3 sockets per
+// DEVICE — and the underlying fleet is (re)built lazily, which is also when
+// the test hook and any rdvBrokers override are consulted (a changed broker
+// list applies on the next pool build, i.e. after all episodes settle plus
+// the pool's linger).
+const rdvPool = new CarrierPool(() => {
     // Test hook: acceptance injects a loopback/dead-drop carrier here.
     if (typeof window !== 'undefined' && window.__arcadeRdvCarrierFactory) {
         return window.__arcadeRdvCarrierFactory();
@@ -197,6 +205,10 @@ function rdvCarrierFactory() {
         try { label = new URL(url).hostname.split('.').slice(-2)[0]; } catch (e) {} // mosquitto / emqx / hivemq
         return new MqttCarrier({ url, onLog: (msg) => ArcadeDiag.log('mqtt', `[${label}] ${msg}`) });
     }));
+}, { onLog: (msg) => ArcadeDiag.log('mqtt', `[pool] ${msg}`) });
+
+function rdvCarrierFactory() {
+    return rdvPool.acquire();
 }
 
 // Terminal link statuses have already been removed from the transport's peers
