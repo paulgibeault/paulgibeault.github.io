@@ -415,6 +415,16 @@ body.app-in-game .launcher-menu[data-open="true"] .launcher-menu__panel {
     color: var(--text-secondary);
 }
 
+/* Everything between the fixed header and footer scrolls as one unit, so an
+   expanded Advanced panel (or a long saved-connections list) can never push
+   the footer outside the panel's max-height. */
+.connections-dialog__scroll {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow-y: auto;
+}
+
 .connections-dialog__list-heading {
     padding: 10px 16px 0;
 }
@@ -441,7 +451,7 @@ body.app-in-game .launcher-menu[data-open="true"] .launcher-menu__panel {
 }
 
 .connections-dialog__list {
-    overflow-y: auto;
+    flex-shrink: 0;
     padding: 8px 10px 14px;
     display: flex;
     flex-direction: column;
