@@ -88,12 +88,22 @@ async function cryptoTests() {
     ok(cCaller !== cListener, 'confirmMac is role-bound (caller != listener)');
     ok(await throwsAsync(async () => RC.confirmMac(baseAB, 'nobody')), 'confirmMac rejects an unknown role');
 
-    // Ratchet advances the base.
-    const th = await RC.transcriptHash('AA:BB', 'CC:DD');
-    const thSwap = await RC.transcriptHash('CC:DD', 'AA:BB');
-    ok(Buffer.compare(Buffer.from(th), Buffer.from(thSwap)) === 0, 'transcriptHash is order-independent');
-    const ratcheted = await RC.ratchet(baseAB, th);
-    ok((await RC.keyCheck(ratcheted)) !== (await RC.keyCheck(baseAB)), 'ratchet produces a new base (different keyCheck)');
+    // --- Wire pin: the fixed epoch (interop with every deployed client) ---
+    // The ratchet is removed (PROTOCOL.md §7.2/§7.5): the completed epoch is 0
+    // for a pair's life, so every deployed client seals offers ('o'), answers
+    // ('a') and rings ('r') at epoch completed+1 = 1 and accepts exactly 1
+    // (old builds accepted 1–3 but could never produce 2 or 3). If either of
+    // these pins fails, new clients stop interoperating with old ones — the
+    // sealed epoch may only change behind a protocol version bump.
+    const WIRE_EPOCH = 1;
+    for (const dir of ['o', 'a', 'r']) {
+        const blob = await RC.seal(aead1, pt, dir, WIRE_EPOCH);
+        ok((await RC.open(aead1, blob, dir, WIRE_EPOCH)) === pt,
+            `wire pin: "${dir}" blob seals and opens at the fixed epoch ${WIRE_EPOCH}`);
+    }
+    // The AAD an old client feeds AES-GCM for an epoch-1 offer, byte for byte.
+    ok(Buffer.from(RC.aad('o', WIRE_EPOCH)).equals(Buffer.from('qrp2p/rdv/v1|o|1', 'utf8')),
+        'wire pin: AAD bytes for ("o", 1) are exactly utf8("qrp2p/rdv/v1|o|1")');
 }
 
 function codecTests() {

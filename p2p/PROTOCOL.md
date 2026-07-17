@@ -1,6 +1,6 @@
 # QRP2P Protocol Specification
 
-**Version:** 1.11 · **Status:** Implemented · **Date:** 2026-07-10
+**Version:** 1.11 · **Status:** Implemented · **Date:** 2026-07-17
 
 > Maintained in this repo alongside the implementation (`p2p/`, see
 > `p2p/README.md`). The protocol originated in the now-archived
@@ -40,8 +40,9 @@ state machine in the stack. Implementation: `p2p-core.js`, `sdp-codec.js`,
 ## 2. Conventions and terminology
 
 - **Link** — one `RTCPeerConnection` + data channel between two devices,
-  identified by a `peerId` (7-char base36, minted by the inviter; both sides
-  key the link by the same value).
+  identified by a `peerId` (24-char base36 string carrying 96 bits from a
+  CSPRNG — unguessable because the session stash is keyed by it; minted by
+  the inviter, both sides key the link by the same value).
 - **Session** — the reliability state (sequence counters, outbox) and app
   meaning attached to a `peerId`. A session may span many links over time.
 - **Inviter / joiner** — roles in a ceremony: the inviter creates the offer.
@@ -251,7 +252,7 @@ DTLS fingerprint that is stable across page loads.
   this layer is **trust-on-first-use with change notice**: a changed
   fingerprint on a *manual* ceremony is recorded and surfaced to the user,
   never silently trusted and never hard-failed (the in-person exchange is
-  itself the authentication). Durable pair binding lives in §7's ratcheting
+  itself the authentication). Durable pair binding lives in §7's pairing
   secret, which survives certificate rotation.
 
 ## 7. Rendezvous (zero-touch reconnection)
@@ -283,7 +284,9 @@ device's id). When both randoms have crossed, each side derives:
 
 A record `{base, role, epoch: 0, enabled, lastPeerId, lastSeenAt, byeAt?}`
 persists in IndexedDB (`qrp2p-rendezvous`), with `base` as a non-extractable
-`CryptoKey`. Re-pairing on a later manual ceremony REPLACES the record —
+`CryptoKey`. The `epoch` field is vestigial — always written as 0 and read
+tolerantly (ratchet removed, §7.2); it stays in the record so old and new
+builds load each other's records. Re-pairing on a later manual ceremony REPLACES the record —
 every physical meeting is a fresh trust event.
 
 `enabled` is the local suspend switch: `pausePair()` clears it (episodes and
@@ -305,20 +308,23 @@ but the device remains callable.
 ### 7.2 Key schedule
 
 ```
-ikm            = sort32(randA, randB)[0] || sort32(randA, randB)[1]
-pairBase_0     = HKDF-SHA256(ikm,        salt=0^32,           info="qrp2p/rdv/v1/base")
-topicKey_n     = HKDF-SHA256(pairBase_n, salt=0^32,           info="qrp2p/rdv/v1/topic")   → HMAC-SHA256 key
-aeadKey_n      = HKDF-SHA256(pairBase_n, salt=0^32,           info="qrp2p/rdv/v1/aead")    → AES-256-GCM key
-pairBase_{n+1} = HKDF-SHA256(pairBase_n, salt=transcriptHash, info="qrp2p/rdv/v1/ratchet")
-transcriptHash = SHA-256( sort(ownFp, peerFp).join("|") )     — fingerprints of the NEW connection
+ikm      = sort32(randA, randB)[0] || sort32(randA, randB)[1]
+pairBase = HKDF-SHA256(ikm,      salt=0^32, info="qrp2p/rdv/v1/base")
+topicKey = HKDF-SHA256(pairBase, salt=0^32, info="qrp2p/rdv/v1/topic")   → HMAC-SHA256 key
+aeadKey  = HKDF-SHA256(pairBase, salt=0^32, info="qrp2p/rdv/v1/aead")    → AES-256-GCM key
 ```
 
-The ratchet (§7.5) is **specified but currently disabled in the
-implementation** — see the frozen-ratchet note in §7.5. With it disabled the
-epoch never advances (`pairBase_n = pairBase_0` for the pair's life), so the
+`pairBase` is fixed for the pair's life; only a fresh manual ceremony
+replaces it. **Ratchet removed:** an earlier revision specified a
+per-reconnect ratchet (`pairBase_{n+1} = HKDF-SHA256(pairBase_n,
+salt=transcriptHash, info="qrp2p/rdv/v1/ratchet")`, with `transcriptHash`
+bound to the new connection's DTLS fingerprints). It has been removed — not
+merely disabled — until a two-sided commit exists (see the note in §7.5);
+re-introduction requires a protocol version bump, and the retired
+`…/ratchet` info label MUST NOT be reused with different semantics. So the
 forward-secrecy / post-compromise-recovery properties it would provide are
 **not** in force today. Confidentiality against the relay still holds (the base
-never touches a broker); what the frozen ratchet costs is forward secrecy /
+never touches a broker); what the removed ratchet costs is forward secrecy /
 key rotation on the signaling keys between manual pairings. Cross-episode replay
 is defended separately, by the persistent per-pair nonce cache (§7.4), so it does
 NOT depend on the ratchet. See §7.4 and §8 for what actually defends replay now.
@@ -328,7 +334,7 @@ NOT depend on the ratchet. See §7.4 and §8 for what actually defends replay no
 The rendezvous topic for UTC day `d` (format `YYYY-MM-DD`):
 
 ```
-topic(d) = lowercase_hex( HMAC-SHA256(topicKey_n, "topic/" || d)[0..15] )
+topic(d) = lowercase_hex( HMAC-SHA256(topicKey, "topic/" || d)[0..15] )
 ```
 
 Participants SHOULD subscribe to `topic(d-1)`, `topic(d)`, `topic(d+1)` for
@@ -340,8 +346,9 @@ and across pairs; no device identifier ever reaches a relay.
 Everything published to a carrier is:
 
 ```
-blob = b64url( nonce(12) || AES-256-GCM(aeadKey_n, packed_payload, aad) )
+blob = b64url( nonce(12) || AES-256-GCM(aeadKey, packed_payload, aad) )
 aad  = "qrp2p/rdv/v1|" || direction || "|" || epoch      direction ∈ {"o","a","r"}
+                                                         epoch = the literal "1" (fixed, below)
 ```
 
 `packed_payload` is the §3.1 codec output for the offer/answer ("o"/"a"),
@@ -354,13 +361,17 @@ asking the caller role to publish a fresh offer (§7.5). Rules:
 - The direction tag prevents reflection (an echoed offer can never
   authenticate as an answer); brokers that echo publishes to their sender
   are harmless for the same reason.
-- **Epochs** are per-pair counters that *would* advance only on ratchet. The
-  caller seals with `epoch = completed + 1`; the listener accepts a window of
-  `completed + 1 … + 3` (crash-recovery skew) and rejects anything at or below
-  its completed epoch. **With the ratchet frozen (§7.5) the completed epoch
-  stays 0 for the pair's life**, so this is a fixed window (epochs 1–3), not a
-  moving floor. The epoch alone therefore does not make a recorded blob "dead on
-  arrival" across episodes — that property is restored by a **persistent
+- **Epoch** is a fixed field: with the ratchet removed (§7.2, §7.5) the
+  completed epoch is 0 for the pair's life, so every sender seals with the
+  literal `1` (`completed + 1`) and a receiver accepts exactly `1` — nothing
+  else is ever produced on the wire. (The ratchet-era design accepted a
+  `+1 … +3` crash-recovery window, but an epoch-skewed peer had necessarily
+  ratcheted its base too, so slots `+2`/`+3` could never authenticate; the
+  window has been deleted without wire effect. Interop holds in both
+  directions: old builds seal at 1 and accept 1–3 ⊇ {1}.) The epoch field is
+  kept in the AAD purely for byte compatibility; changing its value is a
+  protocol version bump. The epoch therefore does not make a recorded blob
+  "dead on arrival" across episodes — that property comes from a **persistent
   cross-episode nonce cache** instead (below). What defends replay today:
   (a) a bounded per-pair FIFO of processed offer/ring nonces (`rec.seenNonces`,
   cap 512) persisted in the pairing record, seeded into every new episode — a
@@ -372,9 +383,9 @@ asking the caller role to publish a fresh offer (§7.5). Rules:
   any replayed *ceremony* payload, which are inert (§4). Only fresh legitimate
   nonces are appended to the FIFO (replays are rejected before they reach it),
   so a broker cannot pump the record's size.
-- **Exchange nonces** protect *within* the epoch window, where a relay can
-  still delay or duplicate blobs (epochs advance only on success, so an
-  abandoned attempt leaves valid-looking litter). Offers and rings carry a
+- **Exchange nonces** protect *within* an episode, where a relay can
+  still delay or duplicate blobs (an abandoned attempt leaves
+  valid-looking litter). Offers and rings carry a
   random `n`; an answer echoes its offer's `n` and is rejected on mismatch,
   duplicate offers/rings are dropped by `n`, and an answered offer that
   never produces a connection is retired after `answerStallMs` (30 s) so a
@@ -433,19 +444,21 @@ deterministic politeness (caller = impolite, listener = polite).
 episode. The carrier is closed at settlement — a CONNECTED pair maintains no
 presence on relays.
 
-**Frozen ratchet (implementation note).** The spec above calls for both sides
-to ratchet (`§7.2`) and persist `epoch = usedEpoch` when the sealed exchange
-completed (`exchanged`). **The implementation deliberately does NOT ratchet or
-persist the epoch** (`_settleEpisode`): a ratchet advances only if *both* sides
-agree the exchange completed, and any one-sided divergence (a race where an
-in-band recovery wins, a settle that lands on one device but not the other)
-would leave the two devices holding different `pairBase_n` — permanently deaf,
-recoverable only by a full manual re-ceremony. That failure was worse in
-practice than the replay/forward-secrecy properties the ratchet buys, so the
-epoch is frozen at 0 and the base is fixed for the pair's life. Consequences and
-the compensating defenses are documented in §7.4; the trade is also reflected in
-§8. Re-enabling the ratchet needs a two-sided commit (both devices confirm the
-new base before either adopts it), which is future work.
+**Ratchet removed (implementation note).** An earlier revision specified a
+per-reconnect ratchet: both sides advance `pairBase` and persist
+`epoch = usedEpoch` when the sealed exchange completed (`exchanged`). A safe
+ratchet advances only if *both* sides agree the exchange completed, and any
+one-sided divergence (a race where an in-band recovery wins, a settle that
+lands on one device but not the other) would leave the two devices holding
+different bases — permanently deaf, recoverable only by a full manual
+re-ceremony. That failure was worse in practice than the replay/forward-secrecy
+properties the ratchet buys, so the ratchet machinery has been **removed until
+a two-sided commit exists** (both devices confirm the new base before either
+adopts it): the base is fixed for the pair's life, the stored `epoch` stays 0,
+and every blob is sealed and accepted at the fixed epoch 1 (§7.4).
+Re-introduction is a wire-breaking change and **requires a protocol version
+bump**. Consequences and the compensating defenses are documented in §7.4; the
+trade is also reflected in §8.
 
 **Presence trade-off (changed in 1.10):** pre-1.10, episodes were one-shot
 and a device kept *no* standing presence on relays; the cost was that any
@@ -503,10 +516,10 @@ outage throws, which the episode's republish schedule absorbs.
 | Relay reads/forges signaling | AEAD with pairing-derived keys; decrypt-then-parse (§7.4) |
 | Relay/observer links a pair across days | daily HMAC topics, no identifiers; standing subscriptions are pseudonymous and per-day (§7.5, §9) |
 | Replay/duplication WITHIN an episode | per-episode exchange nonces (`deadNonces`/`seenRings`) + stalled-exchange retirement (§7.4) |
-| Replayed rendezvous blobs ACROSS episodes | **defended** — even with the ratchet frozen (§7.5, epoch floor fixed at 0), a bounded per-pair FIFO of processed offer/ring nonces (`rec.seenNonces`, cap 512) is persisted in the pairing record and seeded into every new episode, so a recorded offer/ring replayed in any later episode is rejected on sight (§7.4). Defense-in-depth: per-episode decrypt **rate limit** and inert ceremony ICE creds |
-| Hostile broker induces decrypt work (junk-blob flood) | ≤16 KB frame cap + per-episode decrypt-attempt rate limit (~10/s) (§7.4) |
+| Replayed rendezvous blobs ACROSS episodes | **defended** — even with the ratchet removed (§7.5, sealed epoch fixed at 1), a bounded per-pair FIFO of processed offer/ring nonces (`rec.seenNonces`, cap 512) is persisted in the pairing record and seeded into every new episode, so a recorded offer/ring replayed in any later episode is rejected on sight (§7.4). Defense-in-depth: per-episode decrypt **rate limit** and inert ceremony ICE creds |
+| Hostile broker induces decrypt work (junk-blob flood) | ≤16 KB MQTT packet cap (the **carrier parser's** `MAX_PACKET_BYTES` — distinct from the link layer's 256 KB `maxAppFrameBytes` app-frame cap, §10) + per-episode decrypt-attempt rate limit (~10/s) (§7.4) |
 | Reflection (offer ↔ answer ↔ ring) | direction tag in AAD (§7.4) |
-| Recorded traffic + later key theft (forward secrecy) | **NOT provided today** — the per-reconnect ratchet that would bind keys to each new DTLS transcript is specified but frozen (§7.5); base confidentiality against the relay still holds |
+| Recorded traffic + later key theft (forward secrecy) | **NOT provided today** — the per-reconnect ratchet that would bind keys to each new DTLS transcript is removed until a two-sided commit exists (§7.2, §7.5; re-introduction requires a protocol version bump); base confidentiality against the relay still holds |
 | MITM on rendezvous reconnect | new fingerprints travel only inside the AEAD; without `pairBase_n` substitution is impossible |
 | Stranger introduction via rendezvous | no secret → no topic, no key; pairing requires the manual ceremony (§7.1) |
 
@@ -538,15 +551,18 @@ reflexive address of a client that asked for it.
 | rdv sealed directions | `o` (offer) `a` (answer) `r` (ring) |
 | control frame kinds | `ping` `pong` `ack` `resync` `signal` `ext` |
 | ext namespaces | `rdv` |
-| HKDF info strings | `qrp2p/rdv/v1/{base,topic,aead,ratchet,confirm,check}` |
+| HKDF info strings | `qrp2p/rdv/v1/{base,topic,aead,confirm,check}` (`qrp2p/rdv/v1/ratchet` is RETIRED with the removed ratchet — reserved, never reuse) |
 | AAD prefix | `qrp2p/rdv/v1|` |
+| sealed epoch | fixed literal `1` (ratchet removed, §7.4; changing it requires a protocol version bump) |
 | IndexedDB | `qrp2p-identity/identity` · `qrp2p-rendezvous/pairs` |
 | MQTT namespace | `qrp2p/r/v1/` |
+| max app frame | 256 KB (`maxAppFrameBytes`, link layer §5.1 — largest single app frame accepted off a link) |
+| max MQTT packet | 16 KB (`MAX_PACKET_BYTES`, carrier parser §7.6 — oversize packets are skipped, not buffered) |
 
 Defaults: heartbeat 5 s / timeout 12 s · wake probe 3 s · grace 5 min ·
 restart retry 10 s · outbox 1000 · stash 8 sessions · episode 10 min ·
 caller backoff 0/5/30/120/300 s · listener delay 15 s · caller delay 30 s ·
-resume window 6 h · epoch acceptance window +3.
+resume window 6 h.
 
 ## 11. Version history
 
@@ -559,4 +575,4 @@ resume window 6 h · epoch acceptance window +3.
 | 1.9 | rendezvous: pairing, key schedule, sealed dead-drop re-signaling, session adoption, carriers |
 | 1.10 | reconnect-lifecycle hardening: self-healing carriers, standby/ring/bye, exchange nonces, quiet-phase episodes |
 | 1.11 | targeted sends: public `sendTo`, `noRelay` app-frame flag, hub strips forged inbound `relayed` |
-| 2.x (`RDV_BUILD` `v2.4`) | `pair-confirm` key-confirmation before persisting; serialized per-pair record writes; `MultiCarrier` fan-out across several public brokers; flap-resend. **Ratchet frozen** (see §7.5) — epoch stays 0; a per-episode decrypt rate-limit + day-topic-rollover resubscribe added |
+| 2.x (`RDV_BUILD` `v2.4`) | `pair-confirm` key-confirmation before persisting; serialized per-pair record writes; `MultiCarrier` fan-out across several public brokers; flap-resend. **Ratchet frozen, then removed** (see §7.5) — the sealed epoch is the fixed literal `1` and the never-reachable `+3` acceptance window was deleted (wire-identical); a per-episode decrypt rate-limit + day-topic-rollover resubscribe added |
