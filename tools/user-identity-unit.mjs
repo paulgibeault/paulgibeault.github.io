@@ -143,7 +143,12 @@ async function revocationGateTests() {
     ok(await verifyRevocation(userPub, rev), 'a well-formed revocation verifies');
     ok(!(await verifyRevocation(userPub, { ...rev, deviceId: DEV_B })), 'rejects a tampered target deviceId');
     ok(!(await verifyRevocation(userPub, { ...rev, revokedAt: now + 1 })), 'rejects a tampered revokedAt');
-    ok(!(await verifyRevocation(userPub, { ...rev, sig: rev.sig.slice(0, -2) + 'AA' })),
+    // Tamper the FIRST char, guaranteed different: the last b64url char of an
+    // Ed25519 sig carries 4 unused padding bits, and the final byte (the S
+    // scalar's most-significant byte, < 0x10) is genuinely 0x00 about 1 run
+    // in 16 — a slice(0,-2)+'AA' "tamper" then decodes to the ORIGINAL bytes
+    // and verifies, which made this check a 1-in-16 CI flake.
+    ok(!(await verifyRevocation(userPub, { ...rev, sig: (rev.sig[0] === 'A' ? 'B' : 'A') + rev.sig.slice(1) })),
         'rejects a tampered signature');
     const other = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
     const otherPub = bytesToB64url(new Uint8Array(await crypto.subtle.exportKey('raw', other.publicKey)));
