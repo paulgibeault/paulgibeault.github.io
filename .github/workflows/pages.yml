@@ -32,7 +32,7 @@ jobs:
                    arcade-storage-core.js arcade-storage-bridge.js arcade-ui-bridge.js arcade-save.js \
                    arcade-sync-core.js arcade-sync.js arcade-catalog.js \
                    arcade-envelope.js arcade-backup-core.js arcade-backup.js \
-                   arcade-local-backup-core.js arcade-local-backup.js \
+                   arcade-local-backup-core.js arcade-local-backup.js arcade-user-identity.js \
                    p2p/*.js tools/*.mjs; do
             echo "checking $f"
             node --check "$f"
@@ -52,6 +52,9 @@ jobs:
 
       - name: Envelope unit tests (wire-envelope validators + deviceId pattern — no browser)
         run: node tools/envelope-unit.mjs
+
+      - name: User-identity unit tests (seed/recovery-code codec + cert/revocation gates — no browser)
+        run: node tools/user-identity-unit.mjs
 
       - name: Backup unit tests (backup envelope validator, chunking, retention — no browser)
         run: node tools/backup-unit.mjs
@@ -78,6 +81,12 @@ jobs:
 
       - name: UI-bridge acceptance (attributed dialogs, title, quit veto, openFile, copy)
         run: node tools/ui-acceptance.mjs
+
+      - name: User-identity acceptance (Ed25519 in-browser, recovery round-trip, Identity panel)
+        run: node tools/user-identity-acceptance.mjs
+
+      - name: Cross-sign acceptance (userPub pinning, revoke push + gossip, silent auto-promote)
+        run: node tools/p2p-crosssign-acceptance.mjs
 
       - name: Export/import roundtrip (store/files in save bundle; P2P excluded)
         run: node tools/export-roundtrip-acceptance.mjs

@@ -73,6 +73,9 @@ below — this interacts with the same-origin trust boundary.**
 "arm-to-confirm"), `Arcade.ui.setTitle`, `Arcade.ui.onBeforeQuit(fn→Promise<bool>)` so a
 mid-edit journal can veto the quit button, an open-file broker (apps get `allow-downloads` but no
 *open* path), and a share-sheet.
+✅ **DONE** (#35) — `arcade-ui-bridge.js`: launcher-mediated `confirm`/`prompt`/`setTitle`,
+`onBeforeQuit` quit-veto, `openFile`/`share`/`copy`, all attribution/no-password/active-only/
+timeboxed-veto decisions applied (PR #67).
 
 **A4. Fix silent data loss + durability** (cheap, sovereignty-critical): `Arcade.state.set()` must
 return the write-success boolean it currently discards (`arcade-sdk.js:694-703`); add
@@ -129,12 +132,21 @@ device pair needs its own manual ceremony. Add a user-level Ed25519 signing key 
 cross-signs each device's fingerprint; recovery = export the user key as a mnemonic/QR (fits the
 project's printed-pairing-card aesthetic); add an authenticated `revoke(deviceId)` frame. Bonus:
 a cert rotation re-signed by the same user key needs no scary "fingerprint changed" toast.
+✅ **DONE** (#32) — `arcade-user-identity.js` + "🔑 Identity & device recovery" panel: Ed25519 key
+in the export-excluded `qrp2p-identity` IDB, grouped Crockford-base32 recovery code + QR (chosen
+over a BIP39 mnemonic — no new word-list dep), TOFU userPub pinning via verified device certs on
+the identity frame, silent auto-promote of re-attested fingerprint rotations (the Bonus), and
+signed `kind:'revoke'` with direct push + identity-frame gossip and a one-way local latch. A
+recovered device still does one ceremony per peer (decided: recognition without auto-trust).
 
 **B6. Self-hostable broker + TURN.** The carrier interface is already cleanly swappable in code, but
 broker/STUN URLs are hardcoded and there is **no TURN at all** (so symmetric-NAT pairs can't connect
 off-LAN). Read `arcade.v1._meta.rdvBrokers` (+ optional TURN/STUN) with current values as default;
 add an "advanced" field in the Multiplayer dialog and a "self-host mosquitto-over-WSS" docs page.
 Cheap, high sovereignty value; topics are broker-agnostic so mixed fleets interoperate.
+✅ **DONE** (#33) — `_meta.iceServers` read by `PeerManager`/`arcade-p2p.js`, Multiplayer dialog
+Advanced panel edits brokers + ICE servers with validation, `SELF_HOSTING.md` covers
+mosquitto-over-WSS + coturn (PR #69).
 
 ## Workstream C — Make it adoptable by others
 
@@ -253,11 +265,12 @@ model and shouldn't be back-doored in. Make it a deliberate v2, not an accident.
 1. **Now, cheap, high-leverage:** ~~C1 LICENSE~~ ✅ · ~~C3 CI gate~~ ✅ · ~~A4 storage-error/persist()~~ ✅ ·
    ~~D2 `html.escape`~~ ✅ (fixed the live sowduku XSS) · ~~the fingerprint-pin + inbound-size security
    items~~ ✅ (all landed).
-2. **Foundation:** C2 `catalog.json` · A1 `Arcade.store`/`files` · A3 UI bridge · D1 rng/daily/share.
+2. **Foundation:** ~~C2 `catalog.json`~~ ✅ · ~~A1 `Arcade.store`/`files`~~ ✅ · ~~A3 UI bridge~~ ✅ ·
+   D1 rng/daily/share ✅ (SDK-side; game adoption is per-repo follow-up).
 3. **Sovereignty payload:** ~~B1 per-app+encrypted export~~ ✅ · ~~B2 auto-backup~~ ✅ ·
    ~~B3 state sync~~ ✅ · ~~B4 backup-to-peer~~ ✅ (all landed).
-4. **Adoption:** C4 de-brand · C5 starter template · C6 SDK versioning · B5 user identity ·
-   B6 self-host broker/TURN. (A6 dropped — see above.)
+4. **Adoption:** C4 de-brand · C5 starter template · C6 SDK versioning · ~~B5 user identity~~ ✅ ·
+   ~~B6 self-host broker/TURN~~ ✅. (A6 dropped — see above.)
 5. **Long poles / v2:** C7 framework/content split (after B13) · A2 full capability model ·
    C8 PWA · the multi-tenant cross-origin epic.
 

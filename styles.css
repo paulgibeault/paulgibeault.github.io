@@ -556,6 +556,44 @@ body.app-in-game .launcher-menu[data-open="true"] .launcher-menu__panel {
     color: var(--tactical-red);
 }
 
+/* Identity & device recovery (#32): the panel reuses the Advanced block's
+   classes; only the recovery-code display and the revoked-row state are
+   new. The code gets a light card so it photographs/prints legibly, and
+   the QR keeps the white quiet zone scanners need on a dark theme. */
+.connections-dialog__identity-code {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    letter-spacing: 1px;
+    word-break: break-all;
+    user-select: all;
+    background: rgba(255, 255, 255, 0.92);
+    color: #1a1a1a;
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin-top: 8px;
+}
+.connections-dialog__identity-qr {
+    display: flex;
+    justify-content: center;
+    margin-top: 8px;
+}
+.connections-dialog__identity-qr img,
+.connections-dialog__identity-qr canvas {
+    background: #fff;
+    padding: 8px;
+    border-radius: 6px;
+}
+.connections-row--revoked {
+    opacity: 0.65;
+}
+.connections-row--revoked .connections-row__name {
+    text-decoration: line-through;
+    text-decoration-thickness: 1px;
+}
+.connections-row__status--revoked {
+    color: var(--tactical-red);
+}
+
 /* Multiplayer dialog footer: a single quiet entry point to the connection
    log — the log itself lives in its own overlay so it never squeezes the
    saved-connections list. */

@@ -78,12 +78,32 @@ export function validatePeerEnvelope(env) {
     }
     if (env.kind === 'sync') return { ok: true, kind: 'sync' };
     if (env.kind === 'backup') return { ok: true, kind: 'backup' }; // body owned by validateBackupEnvelope
+    if (env.kind === 'revoke') return { ok: true, kind: 'revoke' }; // body owned by validateRevocationEntry
     if (env.kind === 'identity') {
         if (!isDeviceId(env.deviceId)) return { ok: false, reason: 'bad-deviceId' };
         return { ok: true, kind: 'identity' };
     }
     if (typeof env.gameId !== 'string') return { ok: false, reason: 'bad-gameId' };
     return { ok: true, kind: 'game' };
+}
+
+/**
+ * Shape gate for a signed device-revocation entry (#32) — used both for a
+ * direct kind:'revoke' envelope's body and for each element of an identity
+ * frame's gossip `uid.revocations` list. Shape ONLY: the cryptographic
+ * verification (Ed25519 against the userPub already on file for the target
+ * deviceId — never one carried in the same frame) is owned by arcade-p2p.js
+ * via arcade-user-identity.js's verifyRevocation.
+ * @returns {{ok:true, entry:{deviceId:string, revokedAt:number, sig:string}}
+ *           | {ok:false}}
+ */
+export function validateRevocationEntry(e) {
+    if (!isPlainObject(e)) return { ok: false };
+    if (!isDeviceId(e.deviceId)) return { ok: false };
+    if (typeof e.revokedAt !== 'number' || !isFinite(e.revokedAt) || e.revokedAt <= 0) return { ok: false };
+    // Ed25519 sigs are 64 bytes → exactly 86 base64url chars.
+    if (typeof e.sig !== 'string' || e.sig.length !== 86 || !/^[A-Za-z0-9_-]+$/.test(e.sig)) return { ok: false };
+    return { ok: true, entry: { deviceId: e.deviceId, revokedAt: e.revokedAt, sig: e.sig } };
 }
 
 /**

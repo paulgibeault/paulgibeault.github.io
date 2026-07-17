@@ -17,6 +17,7 @@ import {
     isPlainObject,
     isCappedString,
     validatePeerEnvelope,
+    validateRevocationEntry,
     validateToast,
     validateUiOp
 } from '../arcade-envelope.js';
@@ -206,6 +207,29 @@ function uiOpTests() {
         'quitHook coerces only literal true');
 }
 
+function revocationEntryTests() {
+    console.log('\nvalidateRevocationEntry (#32)');
+    const SIG = 'A'.repeat(86); // 64 bytes base64url = exactly 86 chars
+    const good = { deviceId: UUID, revokedAt: 1751500000000, sig: SIG };
+    ok(validatePeerEnvelope({ arcade: 1, kind: 'revoke' }).kind === 'revoke',
+        'kind revoke classifies (body owned by validateRevocationEntry)');
+    const v = validateRevocationEntry(good);
+    ok(v.ok && v.entry.deviceId === UUID && v.entry.revokedAt === good.revokedAt && v.entry.sig === SIG,
+        'well-formed entry accepted and normalized');
+    ok(validateRevocationEntry({ ...good, extra: 'x' }).entry.extra === undefined,
+        'unknown fields are stripped from the normalized entry');
+    ok(!validateRevocationEntry(null).ok, 'null rejected');
+    ok(!validateRevocationEntry([]).ok, 'array rejected');
+    ok(!validateRevocationEntry({ ...good, deviceId: 'evil<script>' }).ok, 'malformed deviceId rejected');
+    ok(!validateRevocationEntry({ ...good, revokedAt: '1751500000000' }).ok, 'string revokedAt rejected');
+    ok(!validateRevocationEntry({ ...good, revokedAt: 0 }).ok, 'zero revokedAt rejected');
+    ok(!validateRevocationEntry({ ...good, revokedAt: Infinity }).ok, 'Infinity revokedAt rejected');
+    ok(!validateRevocationEntry({ ...good, sig: SIG.slice(1) }).ok, 'short sig rejected');
+    ok(!validateRevocationEntry({ ...good, sig: SIG + 'A' }).ok, 'long sig rejected');
+    ok(!validateRevocationEntry({ ...good, sig: 'A'.repeat(85) + '+' }).ok,
+        'non-base64url sig alphabet rejected');
+}
+
 function crossModuleConsistencyTests() {
     console.log('\ncross-module consistency');
     // Guards accidental drift of the shared pattern from its historical form
@@ -229,6 +253,7 @@ signalPayloadTests();
 peerEnvelopeTests();
 toastTests();
 uiOpTests();
+revocationEntryTests();
 crossModuleConsistencyTests();
 console.log('');
 if (fail) { console.log(fail + ' check(s) FAILED.'); process.exit(1); }

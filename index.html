@@ -404,6 +404,37 @@
                 </div>
             </div>
         </details>
+        <!-- User identity & device recovery (#32): one Ed25519 user key above
+             the per-device identity (arcade-user-identity.js). The private
+             key lives in IndexedDB and is never part of save exports; the
+             recovery code below IS the key — treat it like one. Same
+             disclosure/Save/status pattern as the Advanced panel above. -->
+        <details class="connections-dialog__advanced" id="connections-dialog-identity">
+            <summary>🔑 Identity &amp; device recovery</summary>
+            <div class="connections-dialog__advanced-body">
+                <p class="connections-dialog__advanced-hint" id="connections-dialog-identity-intro"></p>
+                <div class="connections-dialog__advanced-actions">
+                    <button type="button" class="connections-dialog__advanced-save" id="connections-dialog-identity-create" hidden>Set up device recovery</button>
+                    <button type="button" class="connections-dialog__advanced-save" id="connections-dialog-identity-show" hidden>Show recovery code</button>
+                </div>
+                <div id="connections-dialog-identity-reveal" hidden>
+                    <div class="connections-dialog__identity-code" id="connections-dialog-identity-code"></div>
+                    <div class="connections-dialog__identity-qr" id="connections-dialog-identity-qr"></div>
+                    <p class="connections-dialog__advanced-hint">
+                        Write this code down and keep it somewhere safe (a drawer
+                        beats a screenshot). Anyone who has it can act as you to
+                        your connected devices — and it's the ONLY way back if
+                        this device is lost.
+                    </p>
+                </div>
+                <label for="connections-dialog-identity-restore-input">Restore from a recovery code</label>
+                <textarea id="connections-dialog-identity-restore-input" class="connections-dialog__advanced-input" rows="2" spellcheck="false" autocomplete="off" placeholder="XXXXX-XXXXX-XXXXX-…"></textarea>
+                <div class="connections-dialog__advanced-actions">
+                    <button type="button" class="connections-dialog__advanced-save" id="connections-dialog-identity-restore">Restore</button>
+                    <span class="connections-dialog__advanced-status" id="connections-dialog-identity-status" aria-live="polite"></span>
+                </div>
+            </div>
+        </details>
         </div>
         <footer class="connections-dialog__footer">
             <button type="button" class="connections-dialog__log-link" id="connections-dialog-log-open">🔧 Connection log</button>
@@ -1120,6 +1151,10 @@
                     // fingerprint is expected ~monthly (browser certificate
                     // renewal) or after they clear browser data — but if
                     // neither applies, the user should re-verify in person.
+                    // A rotation re-attested by the peer's user identity
+                    // (#32) arrives with fingerprintChanged already false
+                    // (detail.fingerprintAutoPromoted) — silence is the
+                    // feature, so nothing to do here for that case.
                     if (fingerprintChanged) {
                         showToast('⚠️ ' + name + "'s device identity changed since last time. Normal after ~a month or a browser reset — if unexpected, verify in person.", { error: true });
                         // The bridge refuses to silently rebind the pairing
@@ -1186,6 +1221,14 @@
                     // Their user tapped Hang Up — a deliberate goodbye, not a
                     // failure, so no scary reconnect language.
                     showToast(name + ' hung up. Call them back from Multiplayer anytime.');
+                    if (window.__arcade.renderKnownPeers) window.__arcade.renderKnownPeers();
+                });
+                ArcadeP2P.onRevoked(({ deviceId, name }) => {
+                    // A verified revocation latched (#32) — locally initiated
+                    // or learned from a peer. The bridge already dropped the
+                    // link and quarantined the device; surface it and refresh
+                    // the dialog if it's open.
+                    showToast('🚫 ' + name + ' was revoked by its owner — this device will refuse it from now on.', { error: true });
                     if (window.__arcade.renderKnownPeers) window.__arcade.renderKnownPeers();
                 });
                 // Cross-game "someone messaged you" toast. Peer payloads are
@@ -2017,8 +2060,9 @@
     // force-load the bridge on open — opening this dialog is a deliberate
     // touch, not something that happens on menu open.
     // ==========================================
-    import { readKnownPeers, renameKnownPeer, deleteKnownPeer, setKnownPeerSyncEnabled, setKnownPeerBackupTarget } from './arcade-known-peers.js';
+    import { readKnownPeers, renameKnownPeer, deleteKnownPeer, setKnownPeerSyncEnabled, setKnownPeerBackupTarget, clearKnownPeerRevoked } from './arcade-known-peers.js';
     import { ArcadeDiag } from './arcade-diag.js';
+    import { readUserIdentityMeta, ensureUserIdentity, exportRecoveryCode, importRecoveryCode, userIdentitySupported } from './arcade-user-identity.js';
 
     (function connectionsDialogController() {
         const DEVICE_NAME_KEY = 'arcade.v1._meta.deviceName';
@@ -2081,11 +2125,16 @@
 
         function buildRow(id, peer) {
             const displayName = peer.name || 'Unnamed device';
-            const state = connState(id, peer);
-            const isLive = state === 'connected' || state === 'interrupted' || state === 'connecting';
+            // A revoked device (#32) renders quarantined: no call/reconnect/
+            // sync/backup affordances, just the badge, an Undo (local only),
+            // rename, and delete. The bridge already dropped its link and
+            // refuses re-trust at the API level; this mirrors that state.
+            const revoked = !!peer.revoked;
+            const state = revoked ? 'idle' : connState(id, peer);
+            const isLive = !revoked && (state === 'connected' || state === 'interrupted' || state === 'connecting');
 
             const row = document.createElement('div');
-            row.className = 'connections-row';
+            row.className = 'connections-row' + (revoked ? ' connections-row--revoked' : '');
 
             const top = document.createElement('div');
             top.className = 'connections-row__top';
@@ -2093,7 +2142,9 @@
             nameEl.className = 'connections-row__name';
             nameEl.textContent = displayName;
             top.appendChild(nameEl);
-            const [label, cls] = STATUS_LABEL[state] || STATUS_LABEL.idle;
+            const [label, cls] = revoked
+                ? ['🚫 Revoked', 'revoked']
+                : (STATUS_LABEL[state] || STATUS_LABEL.idle);
             if (label) {
                 const statusEl = document.createElement('span');
                 statusEl.className = 'connections-row__status connections-row__status--' + cls;
@@ -2104,14 +2155,36 @@
 
             const meta = document.createElement('div');
             meta.className = 'connections-row__meta';
-            meta.textContent = 'Last connected ' + relativeTime(peer.lastConnectedAt)
-                + (state === 'idle' && peer.autoReconnect ? ' · listening — Call reaches them while their arcade is open' : '');
+            meta.textContent = revoked
+                ? 'Revoked — your devices refuse this one until you undo it here'
+                : ('Last connected ' + relativeTime(peer.lastConnectedAt)
+                    + (state === 'idle' && peer.autoReconnect ? ' · listening — Call reaches them while their arcade is open' : ''));
             row.appendChild(meta);
 
             const actions = document.createElement('div');
             actions.className = 'connections-row__actions';
 
-            if (isLive) {
+            if (revoked) {
+                // Local-only undo: clearing the latch never emits a wire
+                // message (an un-revoke has no protocol form on purpose) —
+                // other devices each need their own local undo, or a fresh
+                // ceremony after this one re-trusts.
+                const undoBtn = document.createElement('button');
+                undoBtn.type = 'button';
+                undoBtn.className = 'connections-row__btn';
+                undoBtn.textContent = '↩️ Undo revoke';
+                undoBtn.title = 'Trust this device again on THIS device only — reconnecting still needs a fresh invite code';
+                undoBtn.addEventListener('click', () => {
+                    if (!window.confirm('Un-revoke "' + displayName + '" on this device?\n\n' +
+                        'Only do this if the device is back in your hands. Your other devices ' +
+                        'that heard the revocation keep refusing it until you undo it on them too.')) return;
+                    clearKnownPeerRevoked(id);
+                    toast('Un-revoked ' + displayName + ' on this device.');
+                    render();
+                    refreshBridgeRoster();
+                });
+                actions.appendChild(undoBtn);
+            } else if (isLive) {
                 const hangUpBtn = document.createElement('button');
                 hangUpBtn.type = 'button';
                 hangUpBtn.className = 'connections-row__btn';
@@ -2162,6 +2235,9 @@
 
             const icons = document.createElement('div');
             icons.className = 'connections-row__icon-group';
+            // Trust toggles (auto-reconnect / sync / backup / start-over) are
+            // withheld from a revoked row below — quarantine means no
+            // affordance can re-arm the device short of the explicit Undo.
 
             const autoBtn = document.createElement('button');
             autoBtn.type = 'button';
@@ -2188,7 +2264,7 @@
                     })
                     .then(() => render()).catch(() => {});
             });
-            icons.appendChild(autoBtn);
+            if (!revoked) icons.appendChild(autoBtn);
 
             const syncBtn = document.createElement('button');
             syncBtn.type = 'button';
@@ -2204,7 +2280,7 @@
                 if (!syncOn && window.__arcade.sync) window.__arcade.sync.kick(id);
                 render();
             });
-            icons.appendChild(syncBtn);
+            if (!revoked) icons.appendChild(syncBtn);
 
             const backupBtn = document.createElement('button');
             backupBtn.type = 'button';
@@ -2220,7 +2296,7 @@
                 if (!backupOn && window.__arcade.backup) window.__arcade.backup.kick(id);
                 render();
             });
-            icons.appendChild(backupBtn);
+            if (!revoked) icons.appendChild(backupBtn);
 
             // Any peer that ever engaged the backup feature keeps its restore
             // entry — turning the toggle off must not orphan generations
@@ -2267,7 +2343,34 @@
                     toast('Reset connection to ' + displayName + '.');
                 } catch (e) {} finally { render(); }
             });
-            icons.appendChild(startOverBtn);
+            if (!revoked) icons.appendChild(startOverBtn);
+
+            // Revoke (#32): offered ONLY when this peer's pinned user key is
+            // provably OUR OWN (userPub match) — it's "disown my lost
+            // device", never "ban someone else". The bridge re-checks the
+            // same condition, so the button is a convenience, not the gate.
+            const myIdentity = readUserIdentityMeta();
+            if (!revoked && myIdentity && peer.userPub && peer.userPub === myIdentity.userPub) {
+                const revokeBtn = document.createElement('button');
+                revokeBtn.type = 'button';
+                revokeBtn.className = 'connections-row__icon-btn';
+                revokeBtn.textContent = '🛑';
+                revokeBtn.title = 'Revoke — mark this device of yours lost/stolen; your devices will refuse it';
+                revokeBtn.setAttribute('aria-label', 'Revoke ' + displayName);
+                revokeBtn.addEventListener('click', async () => {
+                    if (!window.confirm('Revoke "' + displayName + '"?\n\n' +
+                        'Do this if that device is lost or stolen. This device — and any of your ' +
+                        'devices it can reach — will drop it and refuse to reconnect to it. ' +
+                        'You can undo it here later if the device turns up.')) return;
+                    try {
+                        const b = await window.__arcade.loadP2P();
+                        const done = await b.revokeDevice(id);
+                        toast(done ? 'Revoked ' + displayName + '.' : 'Could not revoke ' + displayName + '.',
+                            done ? undefined : { error: true });
+                    } catch (e) {} finally { render(); refreshBridgeRoster(); }
+                });
+                icons.appendChild(revokeBtn);
+            }
 
             const deleteBtn = document.createElement('button');
             deleteBtn.type = 'button';
@@ -2311,6 +2414,7 @@
             dialog.hidden = false;
             render();
             populateAdvanced();
+            populateIdentity();
             // Live status needs the bridge — load it the same way "Multiplayer"
             // does, then keep the list live for as long as the dialog is open.
             if (window.__arcade.loadP2P) {
@@ -2328,6 +2432,7 @@
         function closeDialog() {
             dialog.hidden = true;
             if (unsubStatus) { unsubStatus(); unsubStatus = null; }
+            hideRecoveryReveal(); // never leave the recovery code in the DOM
             closeLogDialog(); // never leave the log overlay orphaned on top
         }
         window.__arcade.closeConnectionsDialog = closeDialog;
@@ -2555,6 +2660,134 @@
         }
         if (advBrokers && advIce && advSave && advStatus) {
             advSave.addEventListener('click', () => { saveAdvanced(); });
+        }
+
+        // ---- identity & device recovery (#32) ----
+        // Create / show / restore the user-level signing key
+        // (arcade-user-identity.js). The recovery code IS the private key:
+        // it renders only after an explicit confirm, and is wiped from the
+        // DOM the moment the dialog closes.
+        const idIntro = document.getElementById('connections-dialog-identity-intro');
+        const idCreate = document.getElementById('connections-dialog-identity-create');
+        const idShow = document.getElementById('connections-dialog-identity-show');
+        const idReveal = document.getElementById('connections-dialog-identity-reveal');
+        const idCode = document.getElementById('connections-dialog-identity-code');
+        const idQr = document.getElementById('connections-dialog-identity-qr');
+        const idRestoreInput = document.getElementById('connections-dialog-identity-restore-input');
+        const idRestore = document.getElementById('connections-dialog-identity-restore');
+        const idStatus = document.getElementById('connections-dialog-identity-status');
+
+        function setIdStatus(msg, isError) {
+            idStatus.textContent = msg;
+            idStatus.classList.toggle('connections-dialog__advanced-status--error', !!isError);
+        }
+        function hideRecoveryReveal() {
+            idReveal.hidden = true;
+            idCode.textContent = '';
+            idQr.innerHTML = '';
+        }
+        async function populateIdentity() {
+            hideRecoveryReveal();
+            setIdStatus('', false);
+            if (!(await userIdentitySupported())) {
+                idIntro.textContent = 'This browser can’t create the signing key this feature needs '
+                    + '(Ed25519 support arrived in recent browser versions). Everything else works without it.';
+                idCreate.hidden = true;
+                idShow.hidden = true;
+                idRestore.disabled = true;
+                idRestoreInput.disabled = true;
+                return;
+            }
+            const meta = readUserIdentityMeta();
+            if (meta) {
+                idIntro.textContent = 'Device recovery is set up. Your devices sign for each other, so a '
+                    + 'routine browser certificate renewal no longer triggers the "identity changed" warning '
+                    + 'between them — and a revoked (lost) device stays locked out.';
+                idCreate.hidden = true;
+                idShow.hidden = false;
+            } else {
+                idIntro.textContent = 'One key, kept on this device, that vouches for all your devices: '
+                    + 'connect them once and they recognize each other through browser resets — and if one '
+                    + 'is ever lost, you can revoke it and restore your identity from a recovery code.';
+                idCreate.hidden = false;
+                idShow.hidden = true;
+            }
+        }
+        // The QR rendering wants the vendored qrcodejs global, which
+        // normally rides the full P2P bridge. Load just that one script —
+        // showing a recovery code must not boot the transport.
+        function ensureQRCodeLib() {
+            if (window.QRCode) return Promise.resolve(true);
+            return new Promise((resolve) => {
+                const s = document.createElement('script');
+                s.src = './p2p/vendor/qrcode.min.js';
+                s.onload = () => resolve(!!window.QRCode);
+                s.onerror = () => resolve(false);
+                document.head.appendChild(s);
+            });
+        }
+        async function revealRecoveryCode() {
+            const code = await exportRecoveryCode();
+            if (!code) {
+                setIdStatus('Could not read the key from this browser’s storage.', true);
+                return;
+            }
+            idCode.textContent = code;
+            idQr.innerHTML = '';
+            if (await ensureQRCodeLib()) {
+                try {
+                    new window.QRCode(idQr, {
+                        text: code, width: 148, height: 148,
+                        correctLevel: window.QRCode.CorrectLevel.M
+                    });
+                } catch (e) {} // no QR is fine — the text form is canonical
+            }
+            idReveal.hidden = false;
+        }
+        if (idIntro && idCreate && idShow && idRestore && idStatus) {
+            idCreate.addEventListener('click', async () => {
+                idCreate.disabled = true;
+                try {
+                    const res = await ensureUserIdentity();
+                    if (!res) {
+                        setIdStatus('Could not create a key — storage unavailable.', true);
+                        return;
+                    }
+                    await populateIdentity();
+                    setIdStatus('Set up. Save your recovery code now — it’s shown below.', false);
+                    await revealRecoveryCode();
+                    render(); // rows may now show the revoke affordance
+                } finally { idCreate.disabled = false; }
+            });
+            idShow.addEventListener('click', async () => {
+                if (!idReveal.hidden) { hideRecoveryReveal(); return; }
+                if (!window.confirm('Show your recovery code?\n\nAnyone who sees it can act as you to '
+                    + 'your connected devices. Make sure nobody’s looking over your shoulder.')) return;
+                setIdStatus('', false);
+                await revealRecoveryCode();
+            });
+            idRestore.addEventListener('click', async () => {
+                const code = idRestoreInput.value.trim();
+                if (!code) { setIdStatus('Paste or type a recovery code first.', true); return; }
+                if (readUserIdentityMeta()
+                    && !window.confirm('Replace this device’s identity with the one from the code?\n\n'
+                        + 'Its current key is discarded — if you never wrote down ITS recovery code, '
+                        + 'that identity is gone for good. Saved connections are kept either way.')) return;
+                idRestore.disabled = true;
+                try {
+                    const res = await importRecoveryCode(code);
+                    if (!res.ok) {
+                        setIdStatus(res.reason === 'bad-code'
+                            ? 'That code doesn’t check out — look for a typo (dashes and case don’t matter).'
+                            : 'Could not save the restored key — storage unavailable.', true);
+                        return;
+                    }
+                    idRestoreInput.value = '';
+                    await populateIdentity();
+                    setIdStatus('Identity restored. Your other devices will recognize this one after a fresh connection.', false);
+                    render();
+                } finally { idRestore.disabled = false; }
+            });
         }
 
         try { nameInput.value = localStorage.getItem(DEVICE_NAME_KEY) || ''; } catch (e) {}

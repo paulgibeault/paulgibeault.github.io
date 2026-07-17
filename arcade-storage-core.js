@@ -45,7 +45,8 @@ export function isSafeArcadeKey(k) {
 export const IMPORT_PROTECTED_KEYS = new Set([
     KEY_PREFIX + '_meta.knownPeers',
     KEY_PREFIX + '_meta.deviceId',
-    KEY_PREFIX + '_meta.deviceName'
+    KEY_PREFIX + '_meta.deviceName',
+    KEY_PREFIX + '_meta.userIdentity'
 ]);
 export const SAVE_FORMAT = 'pauls-arcade-save';
 // Schema 2 adds `stores` (Arcade.store IndexedDB) and `files`
