@@ -33,6 +33,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serveRepo } from './lib/static-server.mjs';
 import { createRecorder } from './lib/check-recorder.mjs';
+import { ARCADE_PEER_CAPS } from '../arcade-router.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -197,6 +198,17 @@ async function runPerGame() {
             await gameFrame.evaluate(() => window.Arcade?.context?.framed === true),
             '');
 
+        // 11 — caps contract, end to end: the capability list the SDK actually
+        // received through the real sandboxed frame equals the list the router
+        // declares. The list-vs-literal pin lives in caps-contract-unit.mjs;
+        // this is the delivery half (welcome built, posted, filtered, exposed).
+        const gotCaps = await gameFrame.evaluate(() => window.Arcade?.peer?.caps?.() || null);
+        record(11, 'welcome.caps arrives intact (launcher↔SDK compat contract)',
+            Array.isArray(gotCaps)
+                && gotCaps.length === ARCADE_PEER_CAPS.length
+                && ARCADE_PEER_CAPS.every((c) => gotCaps.includes(c)),
+            `got: ${JSON.stringify(gotCaps)} want: ${JSON.stringify([...ARCADE_PEER_CAPS])}`);
+
         // Install lifecycle probes inside the frame BEFORE we drive quit/relaunch.
         await gameFrame.evaluate(() => {
             window.__suspendCount = 0;
@@ -317,6 +329,83 @@ async function runPerGame() {
             }
         } catch (e) {
             record(10, 'offline reload via game SW', false, `setup failed: ${e.message}`);
+        }
+        await ctx.close();
+    }
+
+    // ─── Old-launcher degradation (check 12) ────────────────────────
+    // The compat contract's other direction: a launcher that offers FEWER
+    // caps (older deploy) must degrade the SDK gracefully, never break it.
+    // A same-origin harness page plays the old launcher: it frames the game
+    // un-sandboxed (the SDK's documented legacy same-origin-embed path) and
+    // answers arcade:hello with a hand-crafted reduced welcome. Two shapes:
+    //   A. caps: ['peer.roster'] — roster works; targeted send is REFUSED
+    //      (never silently broadcast); plain broadcast still goes through.
+    //   B. no caps field at all (pre-caps launcher) — caps() is [], and the
+    //      roster is gated off (a welcome seed nothing ever updates must not
+    //      linger — the SDK's documented anti-stale rule).
+    {
+        const ctx = await browser.newContext();
+
+        // Drives one hand-crafted welcome shape against a fresh framed game
+        // and probes the SDK's degraded surface from inside the frame.
+        async function oldLauncherProbe(welcomeExtras) {
+            const page = await ctx.newPage();
+            // Any same-origin document works as the harness parent; catalog.json
+            // always exists and runs no scripts of its own.
+            await page.goto(`${origin}/catalog.json`, { waitUntil: 'load', timeout: 10_000 });
+            await page.evaluate(({ gameUrl, extras }) => {
+                const frame = document.createElement('iframe');
+                frame.src = gameUrl;
+                window.addEventListener('message', (e) => {
+                    if (e.source !== frame.contentWindow) return;
+                    if (!e.data || e.data.type !== 'arcade:hello') return;
+                    frame.contentWindow.postMessage(Object.assign({
+                        type: 'arcade:welcome',
+                        peerStatus: 'connected',
+                        peers: [{ deviceId: 'dev-oldlauncher1', name: 'Old Peer', status: 'connected', direct: true }],
+                        settings: {},
+                    }, extras), location.origin);
+                });
+                document.body.appendChild(frame);
+            }, { gameUrl, extras: welcomeExtras });
+            // Poll rather than listen for frameattached: the frame attaches
+            // during the evaluate above (and reports about:blank until its
+            // navigation commits), so an event listener races and can hang.
+            let frame = null;
+            for (let i = 0; i < 100 && !frame; i++) {
+                frame = page.frames().find((f) => f.url() === gameUrl) || null;
+                if (!frame) await new Promise((r) => setTimeout(r, 100));
+            }
+            if (!frame) throw new Error('game frame never attached');
+            await frame.waitForFunction(() => window.Arcade?.context?.framed === true, null, { timeout: 10_000 });
+            const probe = await frame.evaluate(() => ({
+                caps: window.Arcade.peer.caps(),
+                rosterLen: window.Arcade.peer.peers().length,
+                broadcastOk: window.Arcade.peer.send({ ping: 1 }),
+                targetedOk: window.Arcade.peer.send({ ping: 1 }, { to: 'dev-oldlauncher1' }),
+            }));
+            await page.close();
+            return probe;
+        }
+
+        try {
+            const a = await oldLauncherProbe({ caps: ['peer.roster'] });
+            const b = await oldLauncherProbe({});
+            const aOk = a.caps.length === 1 && a.caps[0] === 'peer.roster'
+                && a.rosterLen === 1        // roster cap present → seed visible
+                && a.broadcastOk === true   // broadcast never needed a cap
+                && a.targetedOk === false;  // sendTo absent → refused, not fanned out
+            const bOk = b.caps.length === 0
+                && b.rosterLen === 0        // roster gated: no cap ⇒ no stale seed
+                && b.broadcastOk === true   // pre-caps launchers still get broadcast
+                && b.targetedOk === false;
+            record(12, 'SDK degrades gracefully under an older launcher\'s reduced caps',
+                aOk && bOk,
+                `reduced: ${JSON.stringify(a)} pre-caps: ${JSON.stringify(b)}`);
+        } catch (e) {
+            record(12, 'SDK degrades gracefully under an older launcher\'s reduced caps',
+                false, `harness failed: ${e.message.split('\n')[0]}`);
         }
         await ctx.close();
     }
