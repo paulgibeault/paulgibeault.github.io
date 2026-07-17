@@ -192,14 +192,16 @@ function readModelTests() {
     ok(pm4.options.outboxLimit !== 1 && pm4.options.maxAppFrameBytes !== 1,
         'setConfig ignores non-tunable and unknown keys (construction-fixed knobs stay put)');
 
-    // episodesActive — the rendezvous side of the read model
+    // episodesActive — the rendezvous side of the read model. Counts LIVE
+    // episode machines (scheduled/starting pairs are pending, not active).
     const rdv = new RendezvousManager(new PeerManager(), {});
-    rdv.episodes.set('p1', { settled: false });
-    rdv.episodes.set('p2', { settled: true });
-    rdv.episodes.set('p3', { settled: false });
-    ok(rdv.episodesActive() === 2, 'episodesActive counts only unsettled episodes');
-    rdv.episodes.clear();
-    ok(rdv.episodesActive() === 0, 'episodesActive: no episodes → 0');
+    rdv._machine('p1').lifecycle = 'live';
+    rdv._machine('p2'); // idle
+    rdv._machine('p3').lifecycle = 'scheduled';
+    rdv._machine('p4').lifecycle = 'live';
+    ok(rdv.episodesActive() === 2, 'episodesActive counts only live episode machines');
+    rdv.machines.clear();
+    ok(rdv.episodesActive() === 0, 'episodesActive: no machines → 0');
     rdv.destroy();
 }
 

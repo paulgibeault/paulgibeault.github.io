@@ -553,8 +553,15 @@ try {
         const rec = await s.J.evaluate(async (nonce) => {
             const r = window.__arcade.p2p._rdv();
             const [pairId, ep] = [...r.episodes.entries()][0];
+            // The in-RAM O(1) cache lives in the MACHINE context: the core
+            // records an accepted nonce when it processes the frame (drive
+            // the real transition — pure, effects returned not executed),
+            // and the rememberNonce effect persists it via _rememberNonce.
+            const { transition } = await import('./p2p/rendezvous-episode-core.js');
+            const m = r.machines.get(pairId);
+            transition(m, { type: 'RING_OPENED', parseOk: true, peerIdMatch: true, n: nonce, liveConnected: true }, r.options, Date.now());
+            const inRam = m.seenNonceSet.has(nonce);
             r._rememberNonce(pairId, ep, nonce);
-            const inRam = ep.seenNonceSet.has(nonce);
             r._rememberNonce(pairId, ep, nonce); // idempotent — must not duplicate
             const noDup = ep.rec.seenNonces.filter((n) => n === nonce).length === 1;
             await new Promise((res) => setTimeout(res, 250)); // let the async persist land
