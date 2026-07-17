@@ -278,7 +278,10 @@ function settle(m) {
     const peerId = m.peerId;
     m.gen++; // kill in-flight setup/arm/build completions
     const effects = [
-        { t: 'persistSettle', peerId },
+        // exchanged rides the effect: the shell needs it after the machine
+        // context has already reset (and a future ratchet commit would hook
+        // in exactly here, with exchanged/peerId in hand).
+        { t: 'persistSettle', peerId, exchanged },
         { t: 'cleanup' },
         { t: 'emit', event: exchanged ? 'reconnected' : 'recovered-inband', payload: { peerId } },
     ];

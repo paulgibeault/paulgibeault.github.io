@@ -93,7 +93,7 @@
 
 import { RendezvousCrypto as RC } from './rendezvous-crypto.js';
 import { ConnectionUtils } from './p2p-core.js';
-import { initialMachine, transition, canPublish } from './rendezvous-episode-core.js';
+import { initialMachine, transition, canPublish, tryKinds, takeDecryptToken } from './rendezvous-episode-core.js';
 
 // Bumped on every rendezvous protocol/behaviour change. The bridge prints
 // this at boot: the FIRST question a connection log must answer is "which
@@ -291,6 +291,8 @@ export class RendezvousManager extends EventTarget {
         this.machines = new Map();      // pairId → machine
         this._pairTimers = new Map();   // pairId → Map<timerId, clearFn>
         this._setupRecs = new Map();    // pairId → rec staged between SETUP_READ and buildEpisode
+        this._builtAnswers = new Map(); // pairId → {pc, payload} staged between build and commit/discard
+        this._armings = new Map();      // pairId → in-flight _armCallerOffer promise (single-flight)
         this._peerLocks = new Map();    // peerId → queue tail (pairing ops serialized per peer)
         this._recWrites = new Map();    // pairId → queue tail (record writes serialized per pair)
 
@@ -311,6 +313,10 @@ export class RendezvousManager extends EventTarget {
         this._pairTimers.clear();
         this.machines.clear();
         this._setupRecs.clear();
+        for (const built of this._builtAnswers.values()) {
+            try { built.pc.close(); } catch (e) {}
+        }
+        this._builtAnswers.clear();
         this.myRands.clear();
         this.pendingRands.clear();
         for (const ex of this.pairExchanges.values()) { if (ex.timer) ex.timer(); }
@@ -381,16 +387,17 @@ export class RendezvousManager extends EventTarget {
 
     /**
      * Remember a processed offer/ring nonce so a broker can't replay that frame
-     * in a LATER episode (S-sec-4a). Adds to the episode's in-RAM mirror for
-     * O(1) checks and persists a bounded FIFO on the pair record. The episode's
-     * own `rec.seenNonces` is kept in sync so _settleEpisode's whole-record
-     * write preserves the additions; a concurrent proactive _updateRec persists
-     * them even if the episode never settles (e.g. the browser is killed).
+     * in a LATER episode (S-sec-4a). The in-RAM O(1) check lives in the
+     * machine's seenNonceSet (updated by the core when it accepts the nonce);
+     * this persists the bounded FIFO on the pair record. `rec.seenNonces` is
+     * kept in sync so the settle path's whole-record write preserves the
+     * additions; the concurrent proactive _updateRec persists them even if
+     * the episode never settles (e.g. the browser is killed).
      */
     _rememberNonce(pairId, ep, nonce) {
-        if (!nonce || ep.seenNonceSet.has(nonce)) return;
-        ep.seenNonceSet.add(nonce);
+        if (!nonce) return;
         if (!Array.isArray(ep.rec.seenNonces)) ep.rec.seenNonces = [];
+        if (ep.rec.seenNonces.includes(nonce)) return;
         ep.rec.seenNonces.push(nonce);
         while (ep.rec.seenNonces.length > SEEN_NONCE_CAP) ep.rec.seenNonces.shift();
         this._updateRec(pairId, r => {
@@ -914,9 +921,30 @@ export class RendezvousManager extends EventTarget {
                             if (wasActive && mm.phase === 'quiet') {
                                 this._diag(`pair ${pairId}: active phase timed out after ${this.options.episodeTimeoutMs / 60000}min — going quiet (still subscribed and reachable)`);
                             }
+                        } else if (eff.id === 'stall') {
+                            // Caller: the adopted answer never opened a channel.
+                            const ep = this.episodes.get(pairId);
+                            const p = ep && this.pm.peers.get(ep.peerId);
+                            const r = this._dispatch(pairId, {
+                                type: 'T_ANSWER_STALL',
+                                connectedNow: !!(p && p.status === 'connected'),
+                            });
+                            if (r.effects.length) {
+                                this._diag(`pair ${pairId}: adopted answer never connected within ${this.options.answerStallMs / 1000}s (ICE could not find a path?) — re-arming a fresh offer`, 'warn');
+                            }
+                        } else if (eff.id.startsWith('lstall:')) {
+                            // Listener: the answered offer never connected —
+                            // retire ITS nonce; unlatch only if still current.
+                            const n = eff.id.slice('lstall:'.length) || null;
+                            const ep = this.episodes.get(pairId);
+                            const p = ep && this.pm.peers.get(ep.peerId);
+                            const connectedNow = !!(p && p.status === 'connected');
+                            const mm = this.machines.get(pairId);
+                            if (!connectedNow && mm && mm.lifecycle === 'live') {
+                                this._diag(`pair ${pairId}: answered offer never connected within ${this.options.answerStallMs / 1000}s (ICE could not find a path?) — retiring it, will answer the caller's next fresh offer`, 'warn');
+                            }
+                            this._dispatch(pairId, { type: 'T_LISTENER_STALL', n, connectedNow });
                         }
-                        // 'stall'/'lstall:*' arm once the exchange family
-                        // runs on the machine (later migration step).
                     });
                     break;
                 case 'cancelTimer':
@@ -1003,12 +1031,12 @@ export class RendezvousManager extends EventTarget {
                     break;
                 }
                 case 'persistSettle': {
-                    // Legacy _settleEpisode's record write. ep.settled goes
-                    // true FIRST so in-flight publish ticks stop immediately.
+                    // The settle record write. ep.settled goes true FIRST so
+                    // in-flight publish ticks stop immediately.
                     const ep = this.episodes.get(pairId);
                     if (!ep) break;
                     ep.settled = true;
-                    this._diag(ep.exchanged
+                    this._diag(eff.exchanged
                         ? `pair ${pairId}: reconnected via sealed exchange — secret held stable (no ratchet)`
                         : `pair ${pairId}: link recovered in-band — episode closed without touching the key`);
                     ep.rec.lastPeerId = ep.peerId;
@@ -1026,11 +1054,93 @@ export class RendezvousManager extends EventTarget {
                         this._pairTimers.delete(pairId);
                     }
                     this._setupRecs.delete(pairId);
+                    const built = this._builtAnswers.get(pairId);
+                    if (built) {
+                        this._builtAnswers.delete(pairId);
+                        try { built.pc.close(); } catch (e) {}
+                    }
                     const ep = this.episodes.get(pairId);
                     if (ep) {
                         ep.settled = true;
                         this._cleanupEpisode(pairId, ep);
                     }
+                    break;
+                }
+                case 'adoptShadow': {
+                    // Caller adoption: install the shadow under the pair's
+                    // peerId; the live entry (possibly still self-repairing
+                    // in-band) was untouched until this very moment.
+                    const ep = this.episodes.get(pairId);
+                    if (!ep || !ep.shadow) break;
+                    this.pm.adoptConnection(ep.peerId, ep.shadow.pc, ep.shadow.dc, { fallbackType: 'client' });
+                    ep.shadow.adopted = true;
+                    break;
+                }
+                case 'acceptAnswer': {
+                    const ep = this.episodes.get(pairId);
+                    if (!ep) break;
+                    await this.pm.acceptAnswer(eff.payload).catch((e) => {
+                        this._diag(`pair ${pairId}: could not apply the sealed answer (${e && e.message})`, 'warn');
+                    });
+                    break;
+                }
+                case 'buildAnswer':
+                    // Long-running (ICE gathering, up to 10s): NOT awaited —
+                    // completion re-enters as ANSWER_BUILD_READY/FAILED.
+                    this._buildAnswer(pairId, eff.gen, eff.payload).catch(() => {});
+                    break;
+                case 'commitAnswer': {
+                    // Adopt the built pc and publish the sealed answer (now +
+                    // republish schedule). The caller committed by publishing;
+                    // any interrupted remnant or superseded attempt is replaced.
+                    const built = this._builtAnswers.get(pairId);
+                    this._builtAnswers.delete(pairId);
+                    const ep = this.episodes.get(pairId);
+                    if (!built) break;
+                    if (!ep || ep.settled) { try { built.pc.close(); } catch (e) {} break; }
+                    const { pc, payload } = built;
+                    try {
+                        this.pm.adoptConnection(payload.peerId, pc, null, { fallbackType: 'host' });
+                        const answerPayload = JSON.stringify({
+                            peerId: payload.peerId,
+                            n: payload.n || undefined,
+                            sessionDesc: { type: pc.localDescription.type, sdp: ConnectionUtils.minifySDP(pc.localDescription.sdp, this.pm.options) }
+                        });
+                        const sealed = await RC.seal(ep.aeadKey, await ConnectionUtils.encodePayload(answerPayload), 'a', ep.usedEpoch);
+                        this._trackOwnBlob(ep, sealed);
+                        const usedEpoch = ep.usedEpoch;
+                        const publishAnswer = async () => {
+                            if (ep.settled) return;
+                            try {
+                                await ep.carrier.publish(await RC.topicForDay(ep.topicKey, RC.dayString(Date.now())), sealed);
+                                this._diag(`pair ${pairId}: answer published (epoch ${usedEpoch})`);
+                            } catch (e) {
+                                this._diag(`pair ${pairId}: answer publish failed (${e && e.message})`, 'warn');
+                            }
+                        };
+                        await publishAnswer();
+                        [3000, 10000, 30000].forEach(ms => this._after(ep, ms, publishAnswer));
+                    } catch (e) {
+                        this._diag(`pair ${pairId}: could not commit the answer (${e && e.message})`, 'warn');
+                    }
+                    break;
+                }
+                case 'discardAnswer': {
+                    const built = this._builtAnswers.get(pairId);
+                    this._builtAnswers.delete(pairId);
+                    if (built) { try { built.pc.close(); } catch (e) {} }
+                    this._diag(`pair ${pairId}: link recovered while answering — discarding the answer, keeping the live link`);
+                    break;
+                }
+                case 'rememberNonce': {
+                    const ep = this.episodes.get(pairId);
+                    if (ep) this._rememberNonce(pairId, ep, eff.n);
+                    break;
+                }
+                case 'mapPeer': {
+                    this.pairsByPeerId.set(eff.peerId, pairId);
+                    const ep = this.episodes.get(pairId);
+                    if (ep) ep.peerId = eff.peerId;
                     break;
                 }
                 case 'emit':
@@ -1076,18 +1186,17 @@ export class RendezvousManager extends EventTarget {
             this._dispatch(pairId, { type: 'SETUP_FAILED', gen, why: 'internal: no staged record' });
             return;
         }
+        // The episode's RESOURCES — carriers, keys, shadow connections and
+        // publish closures. Decision state (phase, exchange flags, nonce
+        // dedup incl. the S-sec-4a cross-episode replay cache seeded at
+        // SETUP_READ) lives in the machine.
         const ep = {
-            peerId: m.peerId, rec, settled: false, exchanged: false, usedEpoch: null,
+            peerId: m.peerId, rec, settled: false, usedEpoch: null,
             carrier: null, shadow: null, timers: [], unsubs: [], topicSubs: new Map(),
-            phase: m.phase, standbyOnly: m.standbyOnly, announced: m.announced,
+            phase: m.phase, standbyOnly: m.standbyOnly,
             offerNonce: null, sealedOffer: null, ringNonce: null, sealedRing: null,
-            answeredNonce: null, deadNonces: new Set(), seenRings: new Set(),
-            // Persistent cross-episode replay defense (S-sec-4a): seed from
-            // the record's history so a replayed prior-episode offer/ring is
-            // rejected on sight. Grows as this episode processes new nonces.
-            seenNonceSet: new Set(Array.isArray(rec.seenNonces) ? rec.seenNonces : []),
-            lastShadowAt: 0, publishOnce: null, publishScheduled: false, answering: false,
-            ownBlobs: new Set(), undecryptable: 0, lastNudgeAt: 0, republishWindowLogged: false
+            lastShadowAt: 0, publishOnce: null, publishScheduled: false,
+            ownBlobs: new Set()
         };
         this.episodes.set(pairId, ep);
         // The key check names the ROOM this episode meets in: two devices
@@ -1296,8 +1405,26 @@ export class RendezvousManager extends EventTarget {
      * answer to a superseded offer dies at the nonce check, never at the
      * ICE layer. Safe to call again mid-episode (a ring after the network
      * moved under a long-quiet shadow).
+     *
+     * SINGLE-FLIGHT per pair: two arm requests racing (episode setup vs a
+     * ring landing mid-gathering) used to interleave — the second arm closed
+     * the first's shadow pc at its start, while the first then sealed and
+     * PUBLISHED that dead pc's SDP. The listener answered a connection that
+     * no longer existed and the exchange stalled 30s before a clean re-arm
+     * (field-visible as "adopted answer never connected"). An arm already in
+     * flight IS the fresh shadow both callers want, so they share it.
      */
-    async _armCallerOffer(pairId, ep) {
+    _armCallerOffer(pairId, ep) {
+        const inflight = this._armings.get(pairId);
+        if (inflight) return inflight;
+        const p = this._armCallerOfferInner(pairId, ep).finally(() => {
+            if (this._armings.get(pairId) === p) this._armings.delete(pairId);
+        });
+        this._armings.set(pairId, p);
+        return p;
+    }
+
+    async _armCallerOfferInner(pairId, ep) {
         ep.usedEpoch = sealEpoch(ep.rec);
         // Shadow connection: the live entry (possibly still self-repairing
         // in-band) is untouched until a sealed answer actually arrives.
@@ -1391,231 +1518,159 @@ export class RendezvousManager extends EventTarget {
         }
     }
 
-    /** Routes an incoming sealed blob by this side's role. */
+    /**
+     * Routes an incoming sealed blob. The shell owns the byte work — echo
+     * drop, decrypt rate limit, AEAD opens — and the machine owns every
+     * decision: which frame kinds are worth attempting (tryKinds), all
+     * dedup/supersede/liveness guards, and what happens next.
+     */
     async _onBlob(pairId, ep, blob) {
         if (ep.settled) return;
         if (ep.ownBlobs.has(blob)) return; // our own publish echoed back
+        const m = this._machine(pairId);
+        if (m.lifecycle !== 'live') return;
         // Rate-limit decrypt work: an untrusted broker streaming ≤16 KB junk
         // blobs could otherwise buy unbounded AES-GCM attempts (one per
-        // expected frame kind). Legitimate rendezvous is a few blobs/min, so a
-        // small token bucket never touches real traffic. (Date.now is fine
-        // here — browser code.)
-        const now = Date.now();
-        if (ep._dtAt === undefined) { ep._dtTokens = 20; ep._dtAt = now; }
-        ep._dtTokens = Math.min(20, ep._dtTokens + ((now - ep._dtAt) / 1000) * 10);
-        ep._dtAt = now;
-        if (ep._dtTokens < 1) {
-            if (!ep._dtWarned) {
-                ep._dtWarned = true;
+        // expected frame kind). Legitimate rendezvous is a few blobs/min, so
+        // a small token bucket never touches real traffic.
+        const tok = takeDecryptToken(m, Date.now());
+        if (!tok.allow) {
+            if (tok.warnOnce) {
                 this._diag(`pair ${pairId}: decrypt rate limit hit — dropping excess sealed blobs (possible hostile/noisy broker)`, 'warn');
             }
             return;
         }
-        ep._dtTokens -= 1;
-        let consumed;
-        if (ep.rec.role === 'caller') {
-            consumed = await this._onCallerAnswer(pairId, ep, blob)
-                || await this._onCallerRing(pairId, ep, blob);
-        } else {
-            consumed = await this._onListenerOffer(pairId, ep, blob);
+        const kinds = tryKinds(m);
+        if (!kinds.length) return; // e.g. mid-answer: one adoption at a time
+        let opened = false;
+        for (const kind of kinds) {
+            if (kind === 'answer') opened = await this._openAnswer(pairId, ep, m, blob);
+            else if (kind === 'ring') opened = await this._openRing(pairId, ep, m, blob);
+            else opened = await this._openOffer(pairId, ep, m, blob);
+            if (opened) break;
         }
-        if (!consumed && !ep.exchanged) {
+        if (!opened) {
             // A blob on OUR pair topic that opens under none of the expected
-            // AADs. (While an exchange is in flight some frame kinds are
-            // deliberately not tried — don't count those.)
-            // Occasional relay junk is possible, but a steady stream of
-            // these means the two sides' keys have diverged — the
-            // reconnect can never complete until the pair re-ceremonies.
-            ep.undecryptable++;
-            if (ep.undecryptable <= 5 || ep.undecryptable % 20 === 0) {
-                this._diag(`pair ${pairId}: sealed blob did not decrypt (#${ep.undecryptable}; tried epoch ${sealEpoch(ep.rec)}) — repeated failures indicate key desync with the peer`, 'warn');
+            // AADs. Occasional relay junk is possible, but a steady stream
+            // means the two sides' keys have diverged — the reconnect can
+            // never complete until the pair re-ceremonies. (The machine
+            // skips the count while an exchange is in flight.)
+            const r = this._dispatch(pairId, { type: 'BLOB_UNOPENED' });
+            const d = r.effects.find((e) => e.t === 'diagUndecryptable');
+            if (d) {
+                this._diag(`pair ${pairId}: sealed blob did not decrypt (#${d.count}; tried epoch ${sealEpoch(ep.rec)}) — repeated failures indicate key desync with the peer`, 'warn');
             }
         }
     }
 
-    /** Caller ← answer. Returns true when the blob WAS an answer for us. */
-    async _onCallerAnswer(pairId, ep, blob) {
-        if (!ep.usedEpoch || !ep.shadow) return false;
+    /** Caller ← answer: AEAD-open, then let the machine decide. */
+    async _openAnswer(pairId, ep, m, blob) {
         const packed = await RC.open(ep.aeadKey, blob, 'a', ep.usedEpoch);
         if (packed === null) return false;
-        let payload;
-        try { payload = await ConnectionUtils.decodePayload(packed); } catch (e) { return true; }
-        if (payload.peerId !== ep.peerId) return true;
+        let payload = null, decodeOk = true;
+        try { payload = await ConnectionUtils.decodePayload(packed); } catch (e) { decodeOk = false; }
         // The nonce binds this answer to OUR current offer: a delayed or
         // replayed answer to any earlier offer is silence. (An absent nonce
         // is a pre-nonce peer — accepted for compatibility.)
-        if (payload.n && ep.offerNonce && payload.n !== ep.offerNonce) {
-            this._diag(`pair ${pairId}: answer for a superseded offer ignored (nonce ${payload.n} ≠ ${ep.offerNonce})`);
-            return true;
+        if (decodeOk && payload.n && m.offerNonce && payload.n !== m.offerNonce) {
+            this._diag(`pair ${pairId}: answer for a superseded offer ignored (nonce ${payload.n} ≠ ${m.offerNonce})`);
         }
-        if (ep.exchanged) return true; // already applying an answer
-        if (ep.settled) return true;   // settled while the blob was decrypting
         const live = this.pm.peers.get(ep.peerId);
-        if (live && live.status === 'connected') {
-            // In-band repair won the race while the answer was in flight —
-            // keep the healed link, drop the shadow, no ratchet.
-            this._settleEpisode(pairId, ep);
-            return true;
-        }
-        this._diag(`pair ${pairId}: answer received (epoch ${ep.usedEpoch}) — adopting shadow connection, waiting for the channel to open`);
-        this._machine(pairId).exchanged = ep.exchanged = true; // mirror
-        this.pm.adoptConnection(ep.peerId, ep.shadow.pc, ep.shadow.dc, { fallbackType: 'client' });
-        ep.shadow.adopted = true;
-        await this.pm.acceptAnswer(payload);
-        // status 'connected' (channel open) settles the episode. If it never
-        // comes (the answer rode a dead path), retire this exchange and
-        // re-arm a fresh offer instead of staying deaf until timeout.
-        this._after(ep, this.options.answerStallMs, async () => {
-            if (ep.settled) return;
-            const p = this.pm.peers.get(ep.peerId);
-            if (p && p.status === 'connected') return;
-            this._diag(`pair ${pairId}: adopted answer never connected within ${this.options.answerStallMs / 1000}s (ICE could not find a path?) — re-arming a fresh offer`, 'warn');
-            this._machine(pairId).exchanged = ep.exchanged = false; // mirror
-            try {
-                await this._armCallerOffer(pairId, ep);
-                if (ep.publishOnce) await ep.publishOnce();
-            } catch (e) {}
+        const r = this._dispatch(pairId, {
+            type: 'ANSWER_OPENED', decodeOk,
+            peerIdMatch: decodeOk && payload.peerId === ep.peerId,
+            n: decodeOk ? payload.n : null,
+            liveConnected: !!(live && live.status === 'connected'),
+            payload,
         });
+        if (r.effects.some((e) => e.t === 'adoptShadow')) {
+            this._diag(`pair ${pairId}: answer received (epoch ${ep.usedEpoch}) — adopting shadow connection, waiting for the channel to open`);
+        }
         return true;
     }
 
-    /** Caller ← ring: the listener asks for a fresh offer, right now.
-     *  Returns true when the blob WAS a ring for this pair. */
-    async _onCallerRing(pairId, ep, blob) {
-        if (ep.exchanged) return false;
+    /** Caller ← ring: the listener asks for a fresh offer, right now. */
+    async _openRing(pairId, ep, m, blob) {
         const txt = await RC.open(ep.aeadKey, blob, 'r', sealEpoch(ep.rec));
         if (txt === null) return false;
-        let ring;
-        try { ring = JSON.parse(txt); } catch (e) { return true; }
-        if (ring.peerId !== ep.peerId) return true;
-        if (ring.n) {
-            // Replayed doorbell — this episode (seenRings) or any prior one
-            // (persistent seenNonceSet). A recorded ring must not re-provoke.
-            if (ep.seenRings.has(ring.n) || ep.seenNonceSet.has(ring.n)) return true;
-            ep.seenRings.add(ring.n);
-            this._rememberNonce(pairId, ep, ring.n);
-        }
+        let ring = null, parseOk = true;
+        try { ring = JSON.parse(txt); } catch (e) { parseOk = false; }
         const live = this.pm.peers.get(ep.peerId);
-        if (live && live.status === 'connected') return true;
-        this._diag(`pair ${pairId}: ring received — the listener side is asking for a fresh offer`);
-        this._machine(pairId).standbyOnly = ep.standbyOnly = false; // provoked: this standby now initiates
-        try {
-            // Fresh shadow if we have none or ours has aged (the network may
-            // have moved under it); otherwise just republish what we have.
-            if (!ep.sealedOffer || Date.now() - ep.lastShadowAt > 30000) {
-                await this._armCallerOffer(pairId, ep);
-            }
-            this._schedulePublishes(pairId, ep);
-            if (ep.publishOnce) await ep.publishOnce();
-        } catch (e) {
-            this._diag(`pair ${pairId}: could not arm/publish an offer after a ring (${e && e.message})`, 'warn');
+        const r = this._dispatch(pairId, {
+            type: 'RING_OPENED', parseOk,
+            peerIdMatch: parseOk && ring.peerId === ep.peerId,
+            n: parseOk ? ring.n : null,
+            liveConnected: !!(live && live.status === 'connected'),
+        });
+        if (r.effects.some((e) => e.t === 'publishNow')) {
+            this._diag(`pair ${pairId}: ring received — the listener side is asking for a fresh offer`);
         }
         return true;
     }
 
-    /** Listener ← offer: answer it and adopt.
-     *  Returns true when the blob WAS an offer for this pair. */
-    async _onListenerOffer(pairId, ep, blob) {
-        if (ep.answering) return true; // one adoption at a time; republishes retry
+    /** Listener ← offer: AEAD-open, then let the machine start the answer. */
+    async _openOffer(pairId, ep, m, blob) {
         const usedEpoch = sealEpoch(ep.rec);
         const packed = await RC.open(ep.aeadKey, blob, 'o', usedEpoch);
         if (packed === null) return false;
-        let payload;
-        try { payload = await ConnectionUtils.decodePayload(packed); } catch (e) { return true; }
-        if (typeof payload.peerId !== 'string') return true;
-        // Retired this episode (deadNonces) or seen in any prior one
-        // (persistent seenNonceSet) — a recorded offer replayed later is silence.
-        if (payload.n && (ep.deadNonces.has(payload.n) || ep.seenNonceSet.has(payload.n))) return true;
-        const live = this.pm.peers.get(payload.peerId);
-        if (live && live.status === 'connected') return true; // in-band won / already connected
-        if (ep.exchanged) {
-            // An answer is in flight. The SAME offer again is a republish —
-            // ignore it. A DIFFERENT nonce means the caller re-armed (fresh
-            // shadow); supersede our stale attempt.
-            if (!payload.n || payload.n === ep.answeredNonce) return true;
-            this._diag(`pair ${pairId}: caller re-armed (nonce ${payload.n}) — superseding our in-flight answer`);
-        }
-        this._diag(`pair ${pairId}: offer received (epoch ${usedEpoch}, nonce ${payload.n || 'none'}) — answering`);
-        const m = this._machine(pairId); // mirror: machine owns the lifecycle spine
-        m.answering = ep.answering = true;
-        // Persist this offer's nonce now (not at retirement): the winning offer
-        // never enters deadNonces, so recording here is what makes a replay of
-        // it in a future episode dead on arrival. A same-nonce republish this
-        // episode is caught by the seenNonceSet check above (ignored, correct).
-        this._rememberNonce(pairId, ep, payload.n);
-        try {
-            m.exchanged = ep.exchanged = true;
-            m.standbyOnly = ep.standbyOnly = false;
-            m.answeredNonce = ep.answeredNonce = payload.n || null;
+        let payload = null, decodeOk = true;
+        try { payload = await ConnectionUtils.decodePayload(packed); } catch (e) { decodeOk = false; }
+        const peerIdValid = decodeOk && typeof payload.peerId === 'string';
+        const live = peerIdValid ? this.pm.peers.get(payload.peerId) : null;
+        const wasExchanged = m.exchanged;
+        const r = this._dispatch(pairId, {
+            type: 'OFFER_OPENED', decodeOk, peerIdValid,
+            peerId: peerIdValid ? payload.peerId : null,
+            n: decodeOk ? payload.n : null,
+            liveConnected: !!(live && live.status === 'connected'),
+            payload,
+        });
+        if (r.effects.some((e) => e.t === 'buildAnswer')) {
+            if (wasExchanged) {
+                // An answer was in flight; a DIFFERENT nonce means the caller
+                // re-armed (fresh shadow) — our stale attempt is superseded.
+                this._diag(`pair ${pairId}: caller re-armed (nonce ${payload.n}) — superseding our in-flight answer`);
+            }
+            this._diag(`pair ${pairId}: offer received (epoch ${usedEpoch}, nonce ${payload.n || 'none'}) — answering`);
             ep.usedEpoch = usedEpoch;
-            m.peerId = ep.peerId = payload.peerId;
-            this.pairsByPeerId.set(payload.peerId, pairId);
+        }
+        return true;
+    }
 
+    /**
+     * The listener's slow answer build (legacy _onListenerOffer's tail):
+     * certificate, remote/local descriptions, ICE gathering — seconds of
+     * awaits, so the outcome re-enters the machine as a generation-stamped
+     * completion. The machine then commits (adopt + publish) or discards
+     * (in-band repair won while we gathered — adopting would CLOSE the
+     * healthy connection and replace it with an exchange whose other end is
+     * already gone, a documented field failure).
+     */
+    async _buildAnswer(pairId, gen, payload) {
+        const m = this._machine(pairId);
+        const ep = this.episodes.get(pairId);
+        if (!ep || m.gen !== gen || m.lifecycle !== 'live') return;
+        try {
+            this.pairsByPeerId.set(payload.peerId, pairId);
             await this.pm._ensureCertificate();
             const pc = new RTCPeerConnection(this.pm._buildRtcConfig());
             await pc.setRemoteDescription(new RTCSessionDescription(payload.sessionDesc));
             await pc.setLocalDescription(await pc.createAnswer());
             await waitGathering(pc);
-            // The gathering wait is long (up to 10s): the in-band repair may
-            // have healed the live link meanwhile — this offer then predates
-            // the recovery, and adopting would CLOSE the healthy connection
-            // and replace it with an exchange whose other end is already
-            // gone (seen in field logs: a link recovered in-band died seconds
-            // later when a stale-offer answer landed). Re-check before the
-            // point of no return; likewise if the episode settled under us.
-            const liveNow = this.pm.peers.get(payload.peerId);
-            if (ep.settled || (liveNow && liveNow.status === 'connected')) {
-                this._diag(`pair ${pairId}: link recovered while answering — discarding the answer, keeping the live link`);
-                try { pc.close(); } catch (err) {}
-                if (payload.n) ep.deadNonces.add(payload.n);
-                m.exchanged = ep.exchanged = false;
-                m.answeredNonce = ep.answeredNonce = null;
-                return true;
+            if (m.gen !== gen || m.lifecycle !== 'live') { // settled/cancelled under us
+                try { pc.close(); } catch (e) {}
+                return;
             }
-            // Adopt now so ondatachannel and the resilience handlers are wired
-            // before connectivity completes. The caller committed by
-            // publishing; any interrupted remnant (or a superseded earlier
-            // attempt) is replaced.
-            this.pm.adoptConnection(payload.peerId, pc, null, { fallbackType: 'host' });
-
-            const answerPayload = JSON.stringify({
-                peerId: payload.peerId,
-                n: payload.n || undefined,
-                sessionDesc: { type: pc.localDescription.type, sdp: ConnectionUtils.minifySDP(pc.localDescription.sdp, this.pm.options) }
-            });
-            const sealed = await RC.seal(ep.aeadKey, await ConnectionUtils.encodePayload(answerPayload), 'a', usedEpoch);
-            this._trackOwnBlob(ep, sealed);
-            const publishAnswer = async () => {
-                if (ep.settled) return;
-                try {
-                    await ep.carrier.publish(await RC.topicForDay(ep.topicKey, RC.dayString(Date.now())), sealed);
-                    this._diag(`pair ${pairId}: answer published (epoch ${usedEpoch})`);
-                } catch (e) {
-                    this._diag(`pair ${pairId}: answer publish failed (${e && e.message})`, 'warn');
-                }
-            };
-            await publishAnswer();
-            [3000, 10000, 30000].forEach(ms => this._after(ep, ms, publishAnswer));
-            // If this exchange never connects (stale offer, dead path), retire
-            // its nonce and unlatch so the next fresh offer gets answered.
-            const staleNonce = ep.answeredNonce;
-            this._after(ep, this.options.answerStallMs, () => {
-                if (ep.settled) return;
-                const p = this.pm.peers.get(ep.peerId);
-                if (p && p.status === 'connected') return;
-                this._diag(`pair ${pairId}: answered offer never connected within ${this.options.answerStallMs / 1000}s (ICE could not find a path?) — retiring it, will answer the caller's next fresh offer`, 'warn');
-                if (staleNonce) ep.deadNonces.add(staleNonce);
-                if (ep.answeredNonce === staleNonce) {
-                    this._machine(pairId).exchanged = ep.exchanged = false;
-                }
+            const liveNow = this.pm.peers.get(payload.peerId);
+            this._builtAnswers.set(pairId, { pc, payload });
+            this._dispatch(pairId, {
+                type: 'ANSWER_BUILD_READY', gen,
+                liveConnected: !!(liveNow && liveNow.status === 'connected'),
             });
         } catch (e) {
             this._diag(`pair ${pairId}: answering the offer failed (${e && e.message})`, 'warn');
-            m.exchanged = ep.exchanged = false;
-        } finally {
-            m.answering = ep.answering = false;
+            this._dispatch(pairId, { type: 'ANSWER_BUILD_FAILED', gen });
         }
-        return true;
     }
 
     /**
@@ -1656,9 +1711,6 @@ export class RendezvousManager extends EventTarget {
      * decision. The settle row's effect payload already carries
      * exchanged/peerId for it.
      */
-    _settleEpisode(pairId, ep) {
-        this._dispatch(pairId, { type: 'CONNECTED', peerId: ep.peerId });
-    }
 
     // The active-phase timeout is the machine's T_DEMOTE row: 'gave-up'
     // releases UI claims and wake locks, but the episode LIVES ON quietly —
