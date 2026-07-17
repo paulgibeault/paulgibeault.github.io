@@ -29,9 +29,10 @@
 
 import { chromium } from 'playwright';
 import { readFile } from 'node:fs/promises';
-import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { serveRepo } from './lib/static-server.mjs';
+import { createRecorder } from './lib/check-recorder.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -57,32 +58,13 @@ if (!url) {
 
 let server = null;
 if (serve) {
-    const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.json': 'application/json', '.css': 'text/css', '.png': 'image/png' };
-    server = http.createServer(async (req, res) => {
-        try {
-            let p = decodeURIComponent(req.url.split('?')[0]);
-            if (p.endsWith('/')) p += 'index.html';
-            // A --mount maps /<gameId>/* onto a repo-relative fixture dir, so a
-            // template game can be tested per-game under --serve without living
-            // at the repo root (segments[0] must be the gameId for the runner).
-            const seg = p.split('/').filter(Boolean);
-            let file = (seg.length && mounts[seg[0]])
-                ? path.resolve(ROOT, mounts[seg[0]], ...seg.slice(1))
-                : path.join(ROOT, p);
-            if (p === '/catalog.json' && catalogOverride) file = path.resolve(ROOT, catalogOverride);
-            if (!file.startsWith(ROOT)) { res.writeHead(403).end(); return; }
-            const body = await readFile(file);
-            res.writeHead(200, {
-                'content-type': MIME[path.extname(file)] || 'application/octet-stream',
-                // Opaque-origin game frames load their ES modules as CORS
-                // requests (Origin: null) — mirror dev.sh and GitHub Pages so
-                // module scripts aren't blocked inside a framed game.
-                'access-control-allow-origin': '*',
-            });
-            res.end(body);
-        } catch { res.writeHead(404).end('not found'); }
-    });
-    await new Promise((r) => server.listen(port, '127.0.0.1', r));
+    // A --mount maps /<gameId>/* onto a repo-relative fixture dir, so a
+    // template game can be tested per-game under --serve without living
+    // at the repo root (segments[0] must be the gameId for the runner).
+    // cors: opaque-origin game frames load their ES modules as CORS requests
+    // (Origin: null) — mirror dev.sh and GitHub Pages so module scripts
+    // aren't blocked inside a framed game.
+    server = await serveRepo({ root: ROOT, port, cors: true, catalogOverride, mounts });
 }
 
 let parsed;
@@ -97,8 +79,7 @@ if (!poolMode && !gameId) {
 const gameUrl = gameId ? `${origin}/${gameId}/` : null;
 const launcherUrl = `${origin}/`;
 
-const checks = [];
-const record = (n, name, ok, detail) => checks.push({ n, name, ok, detail: detail || '' });
+const { record, summarize } = createRecorder({ indent: ' ', detailStyle: 'paren', detailOnPass: true });
 
 const browser = await chromium.launch({ headless: true });
 
@@ -547,17 +528,9 @@ async function runPoolMode() {
 }
 
 async function printAndExit() {
-    checks.sort((a, b) => a.n - b.n);
-    let pass = 0, fail = 0;
     console.log('');
-    for (const c of checks) {
-        const mark = c.ok ? '✓' : '✗';
-        const detail = c.detail ? `   (${c.detail})` : '';
-        console.log(` ${mark} ${c.n}.  ${c.name}${detail}`);
-        c.ok ? pass++ : fail++;
-    }
-    console.log(`\n ${pass} passed, ${fail} failed`);
+    const code = summarize({ style: 'counts' });
     await browser.close().catch(() => {});
     if (server) server.close();
-    process.exit(fail === 0 ? 0 : 1);
+    process.exit(code);
 }

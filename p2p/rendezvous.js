@@ -5,8 +5,9 @@
  * connection through any carrier (public MQTT broker, BroadcastChannel, …)
  * without a human carrying the payloads: everything published is AEAD-sealed
  * with keys born on the original DTLS channel, topics are unlinkable daily
- * HMACs, epochs stop replays, and a ratchet retires the keys on every
- * successful reconnect.
+ * HMACs, and a persistent nonce cache stops replays. (A per-reconnect key
+ * ratchet was specified once but is REMOVED — see _settleEpisode; bringing
+ * it back requires a two-sided commit and a protocol version bump.)
  *
  * Lifecycle:
  *   PAIRING     enablePair(peerId, pairId) on BOTH sides while connected →
@@ -30,8 +31,8 @@
  *               publishes the sealed offer on the day topics with backoff;
  *               listener: publishes a sealed RING (a doorbell asking the
  *               caller role for a fresh offer) and answers valid offers.
- *               First side to see the new channel open settles: ratchet,
- *               persist epoch, close the carrier.
+ *               First side to see the new channel open settles: persist
+ *               last-seen bookkeeping, close the carrier.
  *   QUIET       after `episodeTimeoutMs` an episode DEMOTES instead of dying:
  *               it emits 'gave-up' (so UIs and wake locks release the active
  *               session claim) but stays subscribed and keeps a slow
@@ -68,17 +69,19 @@
  *
  * Security invariants:
  *   - decrypt-then-parse: blobs that fail AEAD are silence, not errors.
- *   - AAD binds direction ('o'/'a'/'r') + epoch: reflected or replayed blobs
- *     never authenticate as a different frame kind or epoch.
+ *   - AAD binds direction ('o'/'a'/'r') + the fixed wire epoch (see
+ *     sealEpoch): reflected blobs never authenticate as a different frame
+ *     kind.
  *   - Offers carry a random `n` (nonce) echoed by answers; rings carry their
- *     own. A blob replayed WITHIN its epoch window (the relay may delay or
- *     duplicate anything) can therefore never wedge an episode: stale
- *     answers fail the nonce check, duplicate offers/rings are dropped, and
- *     an answered offer that never connects is retired after
- *     `answerStallMs` instead of deafening the episode until timeout.
- *   - An episode ratchets ONLY when a sealed exchange actually completed
- *     (ep.exchanged) — an in-band recovery that wins the race must not
- *     advance the key on one side only.
+ *     own. A replayed blob (the relay may delay or duplicate anything) can
+ *     therefore never wedge an episode: stale answers fail the nonce check,
+ *     duplicate offers/rings are dropped, and an answered offer that never
+ *     connects is retired after `answerStallMs` instead of deafening the
+ *     episode until timeout.
+ *   - The pairing secret is NEVER advanced by an episode (the ratchet is
+ *     removed — _settleEpisode): both sides always hold the exact key minted
+ *     at the last manual ceremony. ep.exchanged only distinguishes "sealed
+ *     exchange reconnected us" from "in-band repair won" for events/logs.
  *   - Pairing randoms ride the DTLS-authenticated control channel of a
  *     manually-ceremonied link, and are held only until the exchange
  *     commits (or its confirmation window lapses).
@@ -193,11 +196,22 @@ function waitGathering(pc, timeoutMs = 10000) {
     });
 }
 
-// Epoch acceptance window above the completed epoch (crash-recovery skew).
-const EPOCH_WINDOW = 3;
+// The single epoch value sealed AND accepted on the wire. The per-reconnect
+// ratchet was removed (see _settleEpisode): `rec.epoch` is written as 0 at
+// pairing and never advances, so every deployed client seals offers, rings
+// and answers at completed+1 = 1 — nothing else is ever produced. Old builds
+// additionally ACCEPTED a +3 window (crash-recovery skew for the ratchet
+// design), but a peer whose epoch skewed had necessarily ratcheted its base
+// too — its blobs fail AEAD at any epoch — so the extra window slots were
+// unreachable and accepting exactly this value changes nothing on the wire.
+// `rec.epoch` is still read tolerantly (legacy records may store a non-zero
+// value) and still written as 0 (legacy code reads the field). Changing the
+// sealed epoch breaks interop with every deployed client: re-introducing a
+// ratchet requires a protocol version bump (PROTOCOL.md §7.2/§7.4).
+function sealEpoch(rec) { return ((rec && rec.epoch) || 0) + 1; }
 
 // Persistent cross-episode replay cache (S-sec-4a). The signaling ratchet is
-// frozen (see _settleEpisode), so `rec.epoch` never advances and the AEAD key
+// removed (see _settleEpisode), so `rec.epoch` never advances and the AEAD key
 // lives for the pairing's life; per-episode deadNonces/seenRings reset each
 // episode, so without this a broker could replay a recorded offer/ring in a
 // LATER episode to provoke presence disclosure + publish spam. Each processed
@@ -211,6 +225,25 @@ const SEEN_NONCE_CAP = 512;
 // a new UTC-day HMAC topic at midnight; re-subscribing well within a day keeps a
 // long-quiet/standby episode reachable across the rollover (B-rdv day-deafness).
 const RENDEZVOUS_TOPIC_REFRESH_MS = 6 * 3600 * 1000;
+
+/**
+ * Detached per-pair key for callers OUTSIDE the signaling protocol — the
+ * pair-base accessor #31's encrypt-at-rest deferred on. Derives a
+ * non-extractable AES-256-GCM key from the stored pair base under the
+ * caller's own HKDF info label (see RendezvousCrypto.deriveDetachedKey for
+ * the domain-separation rules). Module-level on purpose: reading the pair
+ * record needs no manager instance, no episode machinery, and must work
+ * even when auto-reconnect was never initialized this session. Read-only —
+ * never touches the record. Resolves null when no pair secret exists for
+ * this pairId (never paired, or forgotten via disablePair).
+ */
+export async function pairDetachedKey(pairId, infoLabel) {
+    if (typeof pairId !== 'string' || !pairId) return null;
+    const rec = await dbGet(pairId).catch(() => null);
+    if (!rec || !rec.base) return null;
+    try { return await RC.deriveDetachedKey(rec.base, infoLabel); }
+    catch (e) { return null; }
+}
 
 export class RendezvousManager extends EventTarget {
     /**
@@ -1141,7 +1174,7 @@ export class RendezvousManager extends EventTarget {
      * moved under a long-quiet shadow).
      */
     async _armCallerOffer(pairId, ep) {
-        ep.usedEpoch = (ep.rec.epoch || 0) + 1;
+        ep.usedEpoch = sealEpoch(ep.rec);
         // Shadow connection: the live entry (possibly still self-repairing
         // in-band) is untouched until a sealed answer actually arrives.
         await this.pm._ensureCertificate();
@@ -1170,9 +1203,9 @@ export class RendezvousManager extends EventTarget {
         ep.sealedRing = await RC.seal(
             ep.aeadKey,
             JSON.stringify({ peerId: ep.peerId, n: ep.ringNonce }),
-            'r', (ep.rec.epoch || 0) + 1
+            'r', sealEpoch(ep.rec)
         );
-        this._diag(`pair ${pairId}: listener ring armed (epoch ${(ep.rec.epoch || 0) + 1}, nonce ${ep.ringNonce})`);
+        this._diag(`pair ${pairId}: listener ring armed (epoch ${sealEpoch(ep.rec)}, nonce ${ep.ringNonce})`);
     }
 
     /**
@@ -1231,9 +1264,10 @@ export class RendezvousManager extends EventTarget {
         if (ep.settled) return;
         if (ep.ownBlobs.has(blob)) return; // our own publish echoed back
         // Rate-limit decrypt work: an untrusted broker streaming ≤16 KB junk
-        // blobs could otherwise buy unbounded AES-GCM attempts (up to EPOCH_WINDOW
-        // per blob). Legitimate rendezvous is a few blobs/min, so a small token
-        // bucket never touches real traffic. (Date.now is fine here — browser code.)
+        // blobs could otherwise buy unbounded AES-GCM attempts (one per
+        // expected frame kind). Legitimate rendezvous is a few blobs/min, so a
+        // small token bucket never touches real traffic. (Date.now is fine
+        // here — browser code.)
         const now = Date.now();
         if (ep._dtAt === undefined) { ep._dtTokens = 20; ep._dtAt = now; }
         ep._dtTokens = Math.min(20, ep._dtTokens + ((now - ep._dtAt) / 1000) * 10);
@@ -1255,15 +1289,14 @@ export class RendezvousManager extends EventTarget {
         }
         if (!consumed && !ep.exchanged) {
             // A blob on OUR pair topic that opens under none of the expected
-            // AAD/epoch combinations. (While an exchange is in flight some
-            // frame kinds are deliberately not tried — don't count those.)
+            // AADs. (While an exchange is in flight some frame kinds are
+            // deliberately not tried — don't count those.)
             // Occasional relay junk is possible, but a steady stream of
-            // these means the two sides' keys or epochs have diverged — the
+            // these means the two sides' keys have diverged — the
             // reconnect can never complete until the pair re-ceremonies.
             ep.undecryptable++;
             if (ep.undecryptable <= 5 || ep.undecryptable % 20 === 0) {
-                const base = ep.rec.epoch || 0;
-                this._diag(`pair ${pairId}: sealed blob did not decrypt (#${ep.undecryptable}; tried epochs ${base + 1}–${base + EPOCH_WINDOW}) — repeated failures indicate key/epoch desync with the peer`, 'warn');
+                this._diag(`pair ${pairId}: sealed blob did not decrypt (#${ep.undecryptable}; tried epoch ${sealEpoch(ep.rec)}) — repeated failures indicate key desync with the peer`, 'warn');
             }
         }
     }
@@ -1297,7 +1330,7 @@ export class RendezvousManager extends EventTarget {
         this.pm.adoptConnection(ep.peerId, ep.shadow.pc, ep.shadow.dc, { fallbackType: 'client' });
         ep.shadow.adopted = true;
         await this.pm.acceptAnswer(payload);
-        // status 'connected' (channel open) settles + ratchets. If it never
+        // status 'connected' (channel open) settles the episode. If it never
         // comes (the answer rode a dead path), retire this exchange and
         // re-arm a fresh offer instead of staying deaf until timeout.
         this._after(ep, this.options.answerStallMs, async () => {
@@ -1318,12 +1351,7 @@ export class RendezvousManager extends EventTarget {
      *  Returns true when the blob WAS a ring for this pair. */
     async _onCallerRing(pairId, ep, blob) {
         if (ep.exchanged) return false;
-        const base = ep.rec.epoch || 0;
-        let txt = null;
-        for (let e = base + 1; e <= base + EPOCH_WINDOW; e++) {
-            txt = await RC.open(ep.aeadKey, blob, 'r', e);
-            if (txt !== null) break;
-        }
+        const txt = await RC.open(ep.aeadKey, blob, 'r', sealEpoch(ep.rec));
         if (txt === null) return false;
         let ring;
         try { ring = JSON.parse(txt); } catch (e) { return true; }
@@ -1357,12 +1385,8 @@ export class RendezvousManager extends EventTarget {
      *  Returns true when the blob WAS an offer for this pair. */
     async _onListenerOffer(pairId, ep, blob) {
         if (ep.answering) return true; // one adoption at a time; republishes retry
-        const base = ep.rec.epoch || 0;
-        let packed = null, usedEpoch = null;
-        for (let e = base + 1; e <= base + EPOCH_WINDOW; e++) {
-            packed = await RC.open(ep.aeadKey, blob, 'o', e);
-            if (packed !== null) { usedEpoch = e; break; }
-        }
+        const usedEpoch = sealEpoch(ep.rec);
+        const packed = await RC.open(ep.aeadKey, blob, 'o', usedEpoch);
         if (packed === null) return false;
         let payload;
         try { payload = await ConnectionUtils.decodePayload(packed); } catch (e) { return true; }
@@ -1462,7 +1486,11 @@ export class RendezvousManager extends EventTarget {
     async _settleEpisode(pairId, ep) {
         if (ep.settled) return;
         ep.settled = true;
-        // NOTE: the per-reconnect key ratchet is intentionally DISABLED.
+        // NOTE: the per-reconnect key ratchet is intentionally ABSENT — the
+        // machinery (RendezvousCrypto.ratchet/transcriptHash, the epoch
+        // try-window) has been deleted, not merely switched off. Re-introducing
+        // it is a wire-breaking change: it requires a protocol version bump on
+        // top of the two-sided commit described below.
         //
         // The old design advanced `rec.base` (and `rec.epoch`) on every sealed
         // reconnect. But each side decided to ratchet independently, from a
@@ -1484,12 +1512,14 @@ export class RendezvousManager extends EventTarget {
         // trade is forward secrecy on the rendezvous *signaling* keys between
         // manual pairings: those keys now rotate only on an in-person re-pair,
         // not on every auto-heal. Game traffic is unaffected (separately DTLS-
-        // protected) and topics still rotate daily. Re-enabling a CORRECT
+        // protected) and topics still rotate daily. Re-introducing a CORRECT
         // ratchet requires a two-sided commit over the live channel so both
-        // ends advance together or neither does — tracked in the security-
-        // hardening issue, deferred past the current "test what we have" phase.
+        // ends advance together or neither does, plus a protocol version bump
+        // (deployed clients seal and accept only the fixed epoch) — tracked in
+        // the security-hardening issue, deferred past the current "test what
+        // we have" phase.
         this._diag(ep.exchanged
-            ? `pair ${pairId}: reconnected via sealed exchange — secret held stable (ratchet disabled)`
+            ? `pair ${pairId}: reconnected via sealed exchange — secret held stable (no ratchet)`
             : `pair ${pairId}: link recovered in-band — episode closed without touching the key`);
         ep.rec.lastPeerId = ep.peerId;
         ep.rec.lastSeenAt = Date.now();

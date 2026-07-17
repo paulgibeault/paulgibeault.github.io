@@ -68,7 +68,7 @@ IndexedDB RMW races (#7, `_updateRec` + `_serial`), `atob`/unpack try-catch (#16
 
 ### Phase A2 — rendezvous episode-race cluster (HIGH + 2×MED) · `p2p/rendezvous.js`
 - **#2 TOCTOU double-adopt:** `_onListenerOffer`/`_onCallerAnswer` check `ep.answering`/`ep.exchanged` before several `await`s, set after (1211/1233, 1141/1151). Add `_epLocks` (new Map keyed by pairId) and route the blob-dispatch chokepoint (~980) through `_serial(this._epLocks, pairId, …)`.
-- **#8 unbounded decrypt (CPU DoS):** `EPOCH_WINDOW=3` (197) AES-GCM attempts run unconditionally. With A2's serialization in place, add a per-episode attempt counter (reset ~60 s, cap ~60/min) at the top of `_onBlob`.
+- **#8 unbounded decrypt (CPU DoS):** ~~`EPOCH_WINDOW=3` AES-GCM attempts run unconditionally~~ — RESOLVED: the epoch window was deleted with the frozen-ratchet machinery (decrypts are single-attempt at the fixed epoch now) and a per-episode decrypt token bucket already rate-limits hostile blobs.
 - **#6 day-topics never refresh:** `_topics(ep)` (917-922) subscribes a 3-day window once (978); a long-quiet episode drifts past UTC midnight and goes deaf. Change `ep.unsubs` → `Map<topic,unsub>`, add hourly `_refreshTopics(pairId, ep)`.
 **Verify:** extend `tools/p2p-reconnect-acceptance.mjs` (uses `window.__arcade.p2p._rdv()`; `FAST_RDV` at line 106 is the time-control template) — duplicate-distinct-offer → single adoption; simulated day-rollover → resubscribe; garbage-flood → attempt cap holds.
 

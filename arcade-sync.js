@@ -48,7 +48,6 @@
 
 import {
     SYNC_DB,
-    SYNC_TOMBSTONE_TTL_MS,
     SYNC_TOMBSTONE_CAP_PER_APP,
     hlcNext,
     hlcRecv,
@@ -136,6 +135,7 @@ export function initSyncEngine(host) {
                                        // until every req'd diff has arrived (see reconcileDigest)
     const inFlightExchange = new Map(); // deviceId -> ms timestamp of last exchange start
     const oversizeLogged = new Set();   // keys already logged as "too big to sync" (log once)
+    const digestOverflowLogged = new Set(); // deviceIds already warned about over-cap digests (log once)
     let tombstoneHashPromise = null;    // cached sha256Hex of the tombstone sentinel
 
     function tombstoneHash() {
@@ -192,8 +192,14 @@ export function initSyncEngine(host) {
         }
     }
 
+    // Cap-only GC — deliberately no TTL. A time-based GC re-opens the
+    // deletion-resurrection hole: a device offline past the TTL still holds
+    // the pre-deletion value, and with the tombstone gone planFromDigest
+    // treats the stale key as brand-new and pulls it back. Tombstone records
+    // are ~150 bytes; the per-app cap is the memory bound, and eviction
+    // beyond it (oldest first) is the documented residual window (see
+    // arcade-sync-core.js).
     async function gcTombstones() {
-        const now = Date.now();
         const byApp = new Map();
         for (const [k, rec] of records) {
             if (!rec || rec.del !== 1) continue;
@@ -203,14 +209,9 @@ export function initSyncEngine(host) {
         }
         const toDelete = [];
         for (const list of byApp.values()) {
-            const kept = [];
-            for (const [k, rec] of list) {
-                if (now - (rec.t || 0) > SYNC_TOMBSTONE_TTL_MS) toDelete.push(k);
-                else kept.push([k, rec]);
-            }
-            if (kept.length > SYNC_TOMBSTONE_CAP_PER_APP) {
-                kept.sort((a, b) => (a[1].t || 0) - (b[1].t || 0));
-                for (let i = 0; i < kept.length - SYNC_TOMBSTONE_CAP_PER_APP; i++) toDelete.push(kept[i][0]);
+            if (list.length > SYNC_TOMBSTONE_CAP_PER_APP) {
+                list.sort((a, b) => (a[1].t || 0) - (b[1].t || 0));
+                for (let i = 0; i < list.length - SYNC_TOMBSTONE_CAP_PER_APP; i++) toDelete.push(list[i][0]);
             }
         }
         for (const k of toDelete) {
@@ -307,6 +308,19 @@ export function initSyncEngine(host) {
         for (const [k, rec] of records) entries.push([k, rec.h, rec.x]);
         const chunks = chunkEntries(entries, SYNC_MAX_ENTRIES, SYNC_FRAME_BUDGET);
         const parts = chunks.length;
+        if (parts > MAX_DIGEST_PARTS) {
+            // The receiver would reject every part of an over-cap digest, so
+            // sending it is a silent total sync failure. Refuse loudly
+            // instead: this state has outgrown the digest protocol
+            // (> ~MAX_DIGEST_PARTS × SYNC_MAX_ENTRIES synced keys) and needs
+            // a bucketed/Merkle digest, not a bigger cap.
+            if (!digestOverflowLogged.has(deviceId)) {
+                digestOverflowLogged.add(deviceId);
+                ArcadeDiag.log('sync', `digest too large for ${deviceId}: ${parts} parts > ${MAX_DIGEST_PARTS} cap (${entries.length} records) — sync exchange skipped`);
+                try { console.warn(`[arcade-sync] synced state too large to exchange (${entries.length} records) — sync is inactive until the synced key count shrinks`); } catch (e) {}
+            }
+            return;
+        }
         for (let i = 0; i < chunks.length; i++) {
             p2p.sendSyncEnvelope(deviceId, { v: 1, op: 'digest', part: i, parts, entries: chunks[i] });
         }
@@ -408,7 +422,17 @@ export function initSyncEngine(host) {
     async function handleInboundDigest(fromDeviceId, env) {
         const part = env.part, parts = env.parts;
         if (!Number.isInteger(part) || !Number.isInteger(parts) || part < 0 || part >= parts || parts > MAX_DIGEST_PARTS) {
-            ArcadeDiag.log('sync', `rejected malformed digest part/parts from ${fromDeviceId}`);
+            // Over-cap parts means the PEER's synced state has outgrown the
+            // digest protocol — name that plainly (once per device) instead
+            // of spamming an opaque "malformed" line per rejected part.
+            if (Number.isInteger(parts) && parts > MAX_DIGEST_PARTS) {
+                if (!digestOverflowLogged.has(fromDeviceId)) {
+                    digestOverflowLogged.add(fromDeviceId);
+                    ArcadeDiag.log('sync', `digest from ${fromDeviceId} exceeds the ${MAX_DIGEST_PARTS}-part cap (${parts} parts) — its synced state is too large; exchange rejected`);
+                }
+            } else {
+                ArcadeDiag.log('sync', `rejected malformed digest part/parts from ${fromDeviceId}`);
+            }
             return;
         }
         let buf = digestBuffers.get(fromDeviceId);

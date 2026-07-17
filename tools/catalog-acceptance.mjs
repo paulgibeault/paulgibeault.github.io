@@ -14,38 +14,25 @@
 // Exit code: 0 if all checks pass, 1 otherwise.
 
 import { chromium } from 'playwright';
-import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { serveRepo } from './lib/static-server.mjs';
+import { createRecorder } from './lib/check-recorder.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = 4798;
 const BASE = `http://127.0.0.1:${PORT}`;
 const CATALOG_OVERRIDE = process.env.CATALOG_OVERRIDE || null;
 
-const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.json': 'application/json', '.css': 'text/css', '.png': 'image/png' };
-const server = http.createServer(async (req, res) => {
-    try {
-        let p = decodeURIComponent(req.url.split('?')[0]);
-        if (p.endsWith('/')) p += 'index.html';
-        let file = path.join(ROOT, p);
-        if (p === '/catalog.json' && CATALOG_OVERRIDE) file = path.resolve(ROOT, CATALOG_OVERRIDE);
-        if (!file.startsWith(ROOT)) { res.writeHead(403).end(); return; }
-        const body = await readFile(file);
-        res.writeHead(200, { 'content-type': MIME[path.extname(file)] || 'application/octet-stream' });
-        res.end(body);
-    } catch { res.writeHead(404).end('not found'); }
-});
-await new Promise(r => server.listen(PORT, '127.0.0.1', r));
+const server = await serveRepo({ root: ROOT, port: PORT, catalogOverride: CATALOG_OVERRIDE });
 
 const expected = JSON.parse(await readFile(
     CATALOG_OVERRIDE ? path.resolve(ROOT, CATALOG_OVERRIDE) : path.join(ROOT, 'catalog.json'), 'utf8'));
 const expectedGames = expected.games;
 const N = expectedGames.length;
 
-const checks = [];
-const check = (name, ok, detail) => { checks.push({ name, ok, detail: detail || '' }); };
+const { check, summarize } = createRecorder({ detailStyle: 'dash' });
 
 const browser = await chromium.launch({ headless: true });
 try {
@@ -183,10 +170,4 @@ try {
     server.close();
 }
 
-let failed = 0;
-for (const c of checks) {
-    console.log(`  ${c.ok ? '✓' : '✗'} ${c.name}${c.detail && !c.ok ? ` — ${c.detail}` : ''}`);
-    if (!c.ok) failed++;
-}
-console.log(failed === 0 ? '\nAll catalog acceptance checks passed.' : `\n${failed} check(s) FAILED.`);
-process.exit(failed === 0 ? 0 : 1);
+process.exit(summarize({ label: 'catalog acceptance' }));

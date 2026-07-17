@@ -6,6 +6,8 @@
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
+    "test": "node tools/run-units.mjs",
+    "check-sw-bump": "node tools/check-sw-bump.mjs",
     "acceptance": "node tools/acceptance.mjs",
     "p2p-acceptance": "node tools/p2p-acceptance.mjs",
     "p2p-multiseat": "node tools/p2p-multiseat-acceptance.mjs",

@@ -8,24 +8,28 @@
  * Key schedule:
  *   ikm          = lowRand || highRand      (the two 32-byte pairing randoms,
  *                                            bytewise-sorted → order-independent)
- *   pairBase_0   = HKDF(ikm, salt=0^32, info="qrp2p/rdv/v1/base")
- *   topicKey_n   = HKDF(pairBase_n, salt=0^32, info="qrp2p/rdv/v1/topic")   [HMAC-SHA256]
- *   aeadKey_n    = HKDF(pairBase_n, salt=0^32, info="qrp2p/rdv/v1/aead")    [AES-256-GCM]
- *   topic(day)   = hex( HMAC(topicKey_n, "topic/" + day)[0..15] )           [day = UTC YYYY-MM-DD]
- *   pairBase_n+1 = HKDF(pairBase_n, salt=transcriptHash, info="qrp2p/rdv/v1/ratchet")
- *   transcriptHash = SHA-256( sort(fpA, fpB).join("|") )                    [DTLS fingerprints
- *                                                                            of the NEW connection]
- *   confirmMac   = hex( HKDF(pairBase_0, salt=0^32, info="qrp2p/rdv/v1/confirm|" + role)[0..15] )
+ *   pairBase     = HKDF(ikm, salt=0^32, info="qrp2p/rdv/v1/base")           [fixed for the pair's
+ *                                                                            life — no ratchet]
+ *   topicKey     = HKDF(pairBase, salt=0^32, info="qrp2p/rdv/v1/topic")     [HMAC-SHA256]
+ *   aeadKey      = HKDF(pairBase, salt=0^32, info="qrp2p/rdv/v1/aead")      [AES-256-GCM]
+ *   topic(day)   = hex( HMAC(topicKey, "topic/" + day)[0..15] )             [day = UTC YYYY-MM-DD]
+ *   confirmMac   = hex( HKDF(pairBase, salt=0^32, info="qrp2p/rdv/v1/confirm|" + role)[0..15] )
  *                  (pairing key confirmation — proves the peer derived the
  *                   SAME base before either side persists it; role-bound so
  *                   a reflected confirmation never verifies)
- *   keyCheck     = hex( HKDF(pairBase_n, salt=0^32, info="qrp2p/rdv/v1/check")[0..3] )
+ *   keyCheck     = hex( HKDF(pairBase, salt=0^32, info="qrp2p/rdv/v1/check")[0..3] )
  *                  (short NON-SECRET fingerprint for connection logs)
  * Sealing:
  *   blob = base64url( nonce(12) || AES-256-GCM(aeadKey, plaintext, aad) )
  *   aad  = utf8("qrp2p/rdv/v1|" + direction + "|" + epoch)   direction ∈ {"o","a","r"}
  *          ("o" offer, "a" answer, "r" ring — a listener-role doorbell asking
  *           the caller role to publish a fresh offer, PROTOCOL.md §7.5)
+ *          epoch is a fixed literal 1 on the wire (PROTOCOL.md §7.4): the
+ *          per-reconnect ratchet was removed until a two-sided commit exists,
+ *          so the pair base — and with it the sealed epoch — never advances.
+ *          The retired "qrp2p/rdv/v1/ratchet" info label is reserved and MUST
+ *          NOT be reused; re-introducing a ratchet requires a protocol
+ *          version bump.
  *
  * open() returns null on ANY failure — decrypt-then-parse: unauthenticated
  * bytes never reach a parser.
@@ -34,7 +38,7 @@
 const INFO_BASE = 'qrp2p/rdv/v1/base';
 const INFO_TOPIC = 'qrp2p/rdv/v1/topic';
 const INFO_AEAD = 'qrp2p/rdv/v1/aead';
-const INFO_RATCHET = 'qrp2p/rdv/v1/ratchet';
+// 'qrp2p/rdv/v1/ratchet' is RETIRED (removed ratchet) — reserved, never reuse.
 const INFO_CONFIRM = 'qrp2p/rdv/v1/confirm|'; // + role
 const INFO_CHECK = 'qrp2p/rdv/v1/check';
 const AAD_PREFIX = 'qrp2p/rdv/v1|';
@@ -113,6 +117,25 @@ export class RendezvousCrypto {
     static async deriveAeadKey(pairBase) {
         return crypto.subtle.deriveKey(
             { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: te.encode(INFO_AEAD) },
+            pairBase, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']
+        );
+    }
+
+    /**
+     * Detached, non-extractable AES-256-GCM key derived from the pair base
+     * under a CALLER-supplied info label — for features outside this wire
+     * protocol (e.g. the launcher's backup-at-rest encryption) that want a
+     * per-pair key without touching the signaling key schedule. HKDF info
+     * labels give cryptographic domain separation, so a detached key can
+     * never collide with the topic/AEAD/confirm keys above; callers own
+     * their label ('qrp2p/rdv/v1/*' stays reserved for this protocol).
+     */
+    static async deriveDetachedKey(pairBase, infoLabel) {
+        if (typeof infoLabel !== 'string' || !infoLabel || infoLabel.startsWith('qrp2p/rdv/v1/')) {
+            throw new Error('deriveDetachedKey: caller must supply its own non-reserved info label');
+        }
+        return crypto.subtle.deriveKey(
+            { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: te.encode(infoLabel) },
             pairBase, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']
         );
     }
@@ -208,26 +231,6 @@ export class RendezvousCrypto {
     static async tag(bytes) {
         const d = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
         return bytesToHex(d.slice(0, 4));
-    }
-
-    /**
-     * Hash binding a ratchet step to the connection it rode in on: the two
-     * DTLS fingerprints of the NEW connection, sorted so both sides agree.
-     */
-    static async transcriptHash(fpA, fpB) {
-        const joined = [fpA, fpB].sort().join('|');
-        return new Uint8Array(await crypto.subtle.digest('SHA-256', te.encode(joined)));
-    }
-
-    /**
-     * Post-reconnect ratchet: pairBase_{n+1} = HKDF(pairBase_n,
-     * salt=transcriptHash, info=ratchet). Old relay recordings never decrypt
-     * under future keys; a stolen key snapshot goes stale at the pair's next
-     * successful reconnect.
-     */
-    static async ratchet(pairBase, transcriptHashBytes) {
-        const bits = await hkdfBits(pairBase, transcriptHashBytes, INFO_RATCHET, 256);
-        return importHkdfBase(bits);
     }
 }
 
