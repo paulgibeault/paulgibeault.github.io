@@ -87,6 +87,7 @@
  */
 
 import { RendezvousManager, RDV_BUILD } from './p2p/rendezvous.js';
+import { DEFAULT_ICE_SERVERS } from './p2p/p2p-core.js';
 import { MqttCarrier, MultiCarrier } from './p2p/rendezvous-carriers.js';
 import { readKnownPeers, writeKnownPeers, setKnownPeerPaused } from './arcade-known-peers.js';
 import { ArcadeDiag } from './arcade-diag.js';
@@ -1021,6 +1022,14 @@ export const ArcadeP2P = {
      */
     validateBrokerUrls,
     validateIceServers,
+
+    /**
+     * The built-in defaults, for prepopulating that panel — the user edits
+     * the real default lists instead of divining them. Copies: mutating the
+     * return value must never reach the live config.
+     */
+    defaultBrokerUrls() { return RDV_BROKER_URLS.slice(); },
+    defaultIceServers() { return DEFAULT_ICE_SERVERS.map((s) => ({ ...s })); },
 
     /**
      * Sync-gate support (arcade-sync.js): read-only passthrough to the

@@ -384,15 +384,18 @@
         <details class="connections-dialog__advanced" id="connections-dialog-advanced">
             <summary>⚙️ Advanced: self-hosted broker &amp; TURN server</summary>
             <div class="connections-dialog__advanced-body">
-                <label for="connections-dialog-brokers">Rendezvous brokers — one <code>wss://</code> URL per line (blank = built-in)</label>
-                <textarea id="connections-dialog-brokers" class="connections-dialog__advanced-input" rows="3" spellcheck="false" placeholder="wss://my-broker.example.com:8081/mqtt"></textarea>
-                <label for="connections-dialog-ice">ICE servers — STUN/TURN, JSON array (blank = built-in public STUN)</label>
-                <textarea id="connections-dialog-ice" class="connections-dialog__advanced-input" rows="4" spellcheck="false" placeholder='[{"urls":"turn:turn.example.com:3478","username":"u","credential":"p"}]'></textarea>
+                <label for="connections-dialog-brokers">Rendezvous brokers — one <code>wss://</code> URL per line</label>
+                <textarea id="connections-dialog-brokers" class="connections-dialog__advanced-input" rows="4" spellcheck="false" placeholder="wss://my-broker.example.com:8081/mqtt"></textarea>
+                <label for="connections-dialog-ice">ICE servers — STUN/TURN, JSON array</label>
+                <textarea id="connections-dialog-ice" class="connections-dialog__advanced-input" rows="6" spellcheck="false" placeholder='[{"urls":"turn:turn.example.com:3478","username":"u","credential":"p"}]'></textarea>
                 <p class="connections-dialog__advanced-hint">
-                    Stored in this browser and included in save-file exports/backups —
-                    use a short-lived TURN credential, not your server's admin secret,
-                    if you export or share saves. Changes take effect on the next
-                    connection. <a href="./SELF_HOSTING.md" target="_blank" rel="noopener">Self-hosting guide</a>
+                    These are the built-in defaults — add, remove, or replace entries
+                    to override them (restoring or blanking a field returns to the
+                    built-ins). Stored in this browser and included in save-file
+                    exports/backups — use a short-lived TURN credential, not your
+                    server's admin secret, if you export or share saves. Changes take
+                    effect on the next connection.
+                    <a href="./SELF_HOSTING.md" target="_blank" rel="noopener">Self-hosting guide</a>
                 </p>
                 <div class="connections-dialog__advanced-actions">
                     <button type="button" class="connections-dialog__advanced-save" id="connections-dialog-advanced-save">Save</button>
@@ -2428,15 +2431,28 @@
         const advSave = document.getElementById('connections-dialog-advanced-save');
         const advStatus = document.getElementById('connections-dialog-advanced-status');
 
-        function populateAdvanced() {
+        async function populateAdvanced() {
+            // Stored overrides win; otherwise show the REAL built-in defaults
+            // so the default path is visible and individual entries can be
+            // removed/replaced rather than divined.
+            let brokersVal = '', iceVal = '';
             try {
                 const arr = JSON.parse(localStorage.getItem(RDV_BROKERS_KEY));
-                advBrokers.value = Array.isArray(arr) ? arr.join('\n') : '';
-            } catch (e) { advBrokers.value = ''; }
+                if (Array.isArray(arr) && arr.length) brokersVal = arr.join('\n');
+            } catch (e) {}
             try {
                 const raw = localStorage.getItem(ICE_SERVERS_KEY);
-                advIce.value = raw ? JSON.stringify(JSON.parse(raw), null, 2) : '';
-            } catch (e) { advIce.value = ''; }
+                if (raw) iceVal = JSON.stringify(JSON.parse(raw), null, 2);
+            } catch (e) {}
+            if (!brokersVal || !iceVal) {
+                try {
+                    const b = await window.__arcade.loadP2P();
+                    if (!brokersVal) brokersVal = b.defaultBrokerUrls().join('\n');
+                    if (!iceVal) iceVal = JSON.stringify(b.defaultIceServers(), null, 2);
+                } catch (e) {} // bridge unavailable — leave the field blank
+            }
+            advBrokers.value = brokersVal;
+            advIce.value = iceVal;
             setAdvStatus('', false);
         }
         function setAdvStatus(msg, isError) {
@@ -2475,16 +2491,27 @@
                     return;
                 }
             }
+            // A value equal to the built-in defaults (or blank) is NOT an
+            // override — drop the key so future default changes still reach
+            // this device instead of freezing today's list into storage.
+            const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+            const brokersAreDefault = !brokerLines.length || sameJson(brokerLines, bridge.defaultBrokerUrls());
+            const iceIsDefault = !iceParsed || sameJson(iceParsed, bridge.defaultIceServers());
             try {
-                if (brokerLines.length) localStorage.setItem(RDV_BROKERS_KEY, JSON.stringify(brokerLines));
-                else localStorage.removeItem(RDV_BROKERS_KEY);
-                if (iceParsed) localStorage.setItem(ICE_SERVERS_KEY, JSON.stringify(iceParsed));
-                else localStorage.removeItem(ICE_SERVERS_KEY);
+                if (brokersAreDefault) localStorage.removeItem(RDV_BROKERS_KEY);
+                else localStorage.setItem(RDV_BROKERS_KEY, JSON.stringify(brokerLines));
+                if (iceIsDefault) localStorage.removeItem(ICE_SERVERS_KEY);
+                else localStorage.setItem(ICE_SERVERS_KEY, JSON.stringify(iceParsed));
             } catch (e) {
                 setAdvStatus('Could not save — storage unavailable.', true);
                 return;
             }
-            setAdvStatus('Saved — takes effect on the next connection.', false);
+            setAdvStatus(
+                brokersAreDefault && iceIsDefault
+                    ? 'Saved — using the built-in defaults.'
+                    : 'Saved — takes effect on the next connection.',
+                false
+            );
         }
         if (advBrokers && advIce && advSave && advStatus) {
             advSave.addEventListener('click', () => { saveAdvanced(); });

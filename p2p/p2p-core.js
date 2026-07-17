@@ -1,13 +1,14 @@
 import { SDPCodec } from './sdp-codec.js';
 
-const STUN_SERVERS = {
-    iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' },
-        { urls: 'stun:stun.services.mozilla.com' }
-    ]
-};
+// Exported so the launcher can prepopulate its Advanced panel with the real
+// default list — the user edits the actual defaults rather than divining them.
+export const DEFAULT_ICE_SERVERS = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun.services.mozilla.com' }
+];
+const STUN_SERVERS = { iceServers: DEFAULT_ICE_SERVERS };
 
 // ==========================================
 // UTILS: Compression & QR

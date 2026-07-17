@@ -11,7 +11,10 @@ still involved by default, and both are replaceable with servers you run:
 | **ICE servers** — STUN reflects your public address so peers can find a direct path; TURN relays traffic when no direct path exists (symmetric NAT on both ends) | Public STUN only, **no TURN** | `arcade.v1._meta.iceServers` |
 
 Both overrides live in the **Multiplayer dialog → ⚙️ Advanced** panel — no
-devtools needed. Blank fields mean the built-in defaults.
+devtools needed. The fields come prepopulated with the built-in defaults, so
+the default path is always visible and any entry can be removed or replaced
+directly. A field left equal to the defaults (or blanked) stores no override
+at all — the device keeps tracking the built-ins as they evolve.
 
 Why bother:
 
@@ -59,7 +62,9 @@ That's the whole job. Topics are tiny (`qrp2p/r/v1/<32 hex chars>`), QoS 0,
 payloads are a few hundred bytes, and traffic only flows while a pair is
 actively repairing a dead connection — a Raspberry Pi is overkill.
 
-Then in **Multiplayer → Advanced → Rendezvous brokers**, one URL per line:
+Then in **Multiplayer → Advanced → Rendezvous brokers**, add your URL on its
+own line (the built-in brokers are already listed — keep or delete them per
+the overlap rule below):
 
 ```
 wss://broker.example.com:8081/mqtt
@@ -72,11 +77,11 @@ broker — so two devices find each other **as long as at least one broker
 appears in both of their lists**. The launcher publishes to and subscribes on
 *every* broker in its list simultaneously.
 
-Consequence: if you *replace* the list with only your private broker, only
-devices configured with that same broker can rendezvous with you. If you
-*append* your broker to the defaults (list your broker AND keep using the
-built-ins' URLs), you gain resilience without losing reachability to
-unconfigured devices. Choose per device, deliberately.
+Consequence: if you *delete the prepopulated defaults* and keep only your
+private broker, only devices configured with that same broker can rendezvous
+with you. If you *add* your broker below the defaults, you gain resilience
+without losing reachability to unconfigured devices. Choose per device,
+deliberately.
 
 ## Self-hosting TURN (coturn)
 
@@ -100,9 +105,9 @@ total-quota=12
 max-bps=1000000
 ```
 
-Then in **Multiplayer → Advanced → ICE servers**, a JSON `RTCIceServer`
-array. Keep the `stun:` entries so direct connections are still preferred —
-TURN is the fallback, not the first choice:
+Then in **Multiplayer → Advanced → ICE servers**, add a TURN entry to the
+prepopulated JSON array. Keep the `stun:` entries so direct connections are
+still preferred — TURN is the fallback, not the first choice:
 
 ```json
 [
