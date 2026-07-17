@@ -367,6 +367,7 @@
             <h2 id="connections-dialog-title">Multiplayer</h2>
             <button type="button" class="connections-dialog__close" id="connections-dialog-close" aria-label="Close">✕</button>
         </header>
+        <div class="connections-dialog__scroll">
         <div class="connections-dialog__name-row">
             <label for="menu-device-name-input">Your device name</label>
             <input type="text" id="menu-device-name-input" class="connections-dialog__name-input" maxlength="60" placeholder="My device" />
@@ -377,6 +378,33 @@
         </button>
         <div class="launcher-menu__heading connections-dialog__list-heading" id="connections-dialog-list-heading" hidden>Saved connections</div>
         <div class="connections-dialog__list" id="connections-dialog-list"></div>
+        <!-- Self-hosted infrastructure overrides (see SELF_HOSTING.md). Writes
+             arcade.v1._meta.rdvBrokers / .iceServers; validation is borrowed
+             from arcade-p2p.js's exported validators so the parse/filter rules
+             live in exactly one place. Blank field = built-in defaults. -->
+        <details class="connections-dialog__advanced" id="connections-dialog-advanced">
+            <summary>⚙️ Advanced: self-hosted broker &amp; TURN server</summary>
+            <div class="connections-dialog__advanced-body">
+                <label for="connections-dialog-brokers">Rendezvous brokers — one <code>wss://</code> URL per line</label>
+                <textarea id="connections-dialog-brokers" class="connections-dialog__advanced-input" rows="4" spellcheck="false" placeholder="wss://my-broker.example.com:8081/mqtt"></textarea>
+                <label for="connections-dialog-ice">ICE servers — one <code>stun:</code>/<code>turn:</code>/<code>turns:</code> URL per line (TURN: append username and password)</label>
+                <textarea id="connections-dialog-ice" class="connections-dialog__advanced-input" rows="6" spellcheck="false" placeholder="turn:turn.example.com:3478 username password"></textarea>
+                <p class="connections-dialog__advanced-hint">
+                    These are the built-in defaults — add, remove, or replace entries
+                    to override them (restoring or blanking a field returns to the
+                    built-ins). Stored in this browser and included in save-file
+                    exports/backups — use a short-lived TURN credential, not your
+                    server's admin secret, if you export or share saves. Changes take
+                    effect on the next connection.
+                    <a href="./SELF_HOSTING.md" target="_blank" rel="noopener">Self-hosting guide</a>
+                </p>
+                <div class="connections-dialog__advanced-actions">
+                    <button type="button" class="connections-dialog__advanced-save" id="connections-dialog-advanced-save">Save</button>
+                    <span class="connections-dialog__advanced-status" id="connections-dialog-advanced-status" aria-live="polite"></span>
+                </div>
+            </div>
+        </details>
+        </div>
         <footer class="connections-dialog__footer">
             <button type="button" class="connections-dialog__log-link" id="connections-dialog-log-open">🔧 Connection log</button>
         </footer>
@@ -2282,6 +2310,7 @@
             if (window.__arcade.closeLauncherMenu) window.__arcade.closeLauncherMenu();
             dialog.hidden = false;
             render();
+            populateAdvanced();
             // Live status needs the bridge — load it the same way "Multiplayer"
             // does, then keep the list live for as long as the dialog is open.
             if (window.__arcade.loadP2P) {
@@ -2384,13 +2413,148 @@
         if (dialogPanel) {
             dialogPanel.addEventListener('keydown', (e) => {
                 if (e.key !== 'Tab') return;
-                const focusable = Array.from(dialogPanel.querySelectorAll('button, input, [tabindex]:not([tabindex="-1"])'))
+                const focusable = Array.from(dialogPanel.querySelectorAll('button, input, textarea, summary, a[href], [tabindex]:not([tabindex="-1"])'))
                     .filter((el) => el.offsetWidth > 0 || el.offsetHeight > 0);
                 if (!focusable.length) return;
                 const first = focusable[0], last = focusable[focusable.length - 1];
                 if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
                 else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
             });
+        }
+
+        // ---- advanced: self-hosted broker & TURN overrides ----
+        // Same commit-on-Save/localStorage pattern as the device name above,
+        // but validated through the bridge's exported validators so the accept
+        // rules can't drift from what the read side (arcade-p2p.js) enforces.
+        const RDV_BROKERS_KEY = 'arcade.v1._meta.rdvBrokers';
+        const ICE_SERVERS_KEY = 'arcade.v1._meta.iceServers';
+        const advBrokers = document.getElementById('connections-dialog-brokers');
+        const advIce = document.getElementById('connections-dialog-ice');
+        const advSave = document.getElementById('connections-dialog-advanced-save');
+        const advStatus = document.getElementById('connections-dialog-advanced-status');
+
+        // The panel speaks a line format — `url` for STUN, `url user password`
+        // for TURN — but the stored key stays a canonical RTCIceServer[] (what
+        // the transport consumes, and what PROTOCOL.md documents).
+        function iceServersToLines(arr) {
+            const lines = [];
+            for (const s of arr) {
+                for (const u of [].concat(s.urls)) {
+                    lines.push(s.username !== undefined ? `${u} ${s.username} ${s.credential}` : u);
+                }
+            }
+            return lines.join('\n');
+        }
+        function parseIceLines(text) {
+            const servers = [];
+            for (const rawLine of text.split('\n')) {
+                const line = rawLine.trim();
+                if (!line) continue;
+                const url = line.split(/\s+/, 1)[0];
+                if (!/^(stun|turn|turns):/i.test(url)) {
+                    return { error: 'each line must start with a stun:, turn:, or turns: URL.' };
+                }
+                if (/^turns?:/i.test(url)) {
+                    // Credential may contain spaces; everything after the
+                    // username token is taken verbatim.
+                    const m = line.match(/^\S+\s+(\S+)\s+(.+)$/);
+                    if (!m) return { error: 'TURN lines are “url username password” — the browser rejects TURN without credentials.' };
+                    servers.push({ urls: url, username: m[1], credential: m[2] });
+                } else {
+                    if (/\s/.test(line)) return { error: 'STUN lines take no username/password.' };
+                    servers.push({ urls: url });
+                }
+            }
+            return { servers };
+        }
+
+        async function populateAdvanced() {
+            // Stored overrides win; otherwise show the REAL built-in defaults
+            // so the default path is visible and individual entries can be
+            // removed/replaced rather than divined.
+            let brokersVal = '', iceVal = '';
+            try {
+                const arr = JSON.parse(localStorage.getItem(RDV_BROKERS_KEY));
+                if (Array.isArray(arr) && arr.length) brokersVal = arr.join('\n');
+            } catch (e) {}
+            try {
+                const raw = localStorage.getItem(ICE_SERVERS_KEY);
+                if (raw) iceVal = iceServersToLines(JSON.parse(raw));
+            } catch (e) {}
+            if (!brokersVal || !iceVal) {
+                try {
+                    const b = await window.__arcade.loadP2P();
+                    if (!brokersVal) brokersVal = b.defaultBrokerUrls().join('\n');
+                    if (!iceVal) iceVal = iceServersToLines(b.defaultIceServers());
+                } catch (e) {} // bridge unavailable — leave the field blank
+            }
+            advBrokers.value = brokersVal;
+            advIce.value = iceVal;
+            setAdvStatus('', false);
+        }
+        function setAdvStatus(msg, isError) {
+            advStatus.textContent = msg;
+            advStatus.classList.toggle('connections-dialog__advanced-status--error', !!isError);
+        }
+        async function saveAdvanced() {
+            // Stricter than the read side on purpose: reads silently fall back
+            // to defaults, but a save that would drop entries must say so.
+            const brokerLines = advBrokers.value.split('\n').map((l) => l.trim()).filter(Boolean);
+            const iceText = advIce.value.trim();
+            let bridge;
+            try {
+                bridge = await window.__arcade.loadP2P();
+            } catch (e) {
+                setAdvStatus('Could not load the connection module — try again.', true);
+                return;
+            }
+            let iceParsed = null;
+            if (iceText) {
+                const res = parseIceLines(iceText);
+                if (res.error) {
+                    setAdvStatus('ICE servers: ' + res.error, true);
+                    return;
+                }
+                if (res.servers.length) {
+                    const valid = bridge.validateIceServers(res.servers);
+                    if (!valid || valid.length !== res.servers.length) {
+                        setAdvStatus('ICE servers: each line needs a valid stun:/turn:/turns: URL.', true);
+                        return;
+                    }
+                    iceParsed = valid;
+                }
+            }
+            if (brokerLines.length) {
+                const valid = bridge.validateBrokerUrls(brokerLines);
+                if (!valid || valid.length !== brokerLines.length) {
+                    setAdvStatus('Brokers: every line must be a wss:// URL.', true);
+                    return;
+                }
+            }
+            // A value equal to the built-in defaults (or blank) is NOT an
+            // override — drop the key so future default changes still reach
+            // this device instead of freezing today's list into storage.
+            const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+            const brokersAreDefault = !brokerLines.length || sameJson(brokerLines, bridge.defaultBrokerUrls());
+            const iceIsDefault = !iceParsed || sameJson(iceParsed, bridge.defaultIceServers());
+            try {
+                if (brokersAreDefault) localStorage.removeItem(RDV_BROKERS_KEY);
+                else localStorage.setItem(RDV_BROKERS_KEY, JSON.stringify(brokerLines));
+                if (iceIsDefault) localStorage.removeItem(ICE_SERVERS_KEY);
+                else localStorage.setItem(ICE_SERVERS_KEY, JSON.stringify(iceParsed));
+            } catch (e) {
+                setAdvStatus('Could not save — storage unavailable.', true);
+                return;
+            }
+            setAdvStatus(
+                brokersAreDefault && iceIsDefault
+                    ? 'Saved — using the built-in defaults.'
+                    : 'Saved — takes effect on the next connection.',
+                false
+            );
+        }
+        if (advBrokers && advIce && advSave && advStatus) {
+            advSave.addEventListener('click', () => { saveAdvanced(); });
         }
 
         try { nameInput.value = localStorage.getItem(DEVICE_NAME_KEY) || ''; } catch (e) {}

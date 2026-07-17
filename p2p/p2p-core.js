@@ -1,13 +1,14 @@
 import { SDPCodec } from './sdp-codec.js';
 
-const STUN_SERVERS = {
-    iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' },
-        { urls: 'stun:stun.services.mozilla.com' }
-    ]
-};
+// Exported so the launcher can prepopulate its Advanced panel with the real
+// default list — the user edits the actual defaults rather than divining them.
+export const DEFAULT_ICE_SERVERS = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun.services.mozilla.com' }
+];
+const STUN_SERVERS = { iceServers: DEFAULT_ICE_SERVERS };
 
 // ==========================================
 // UTILS: Compression & QR
@@ -250,6 +251,11 @@ export class PeerManager extends EventTarget {
             // 'local'    = zero ICE servers; nothing external is ever contacted;
             //              connections work on the same LAN only.
             iceMode: options.iceMode === 'local' ? 'local' : 'anywhere',
+            // Custom ICE servers (RTCIceServer[]: {urls, username?, credential?}).
+            // Replaces the built-in public STUN list when non-empty — the only
+            // way to get TURN. Ignored entirely in 'local' mode. Validation is
+            // the caller's job (see arcade-p2p.js's iceServersConfig).
+            iceServers: Array.isArray(options.iceServers) ? options.iceServers : null,
             // Resilience tuning (v1.7) — see the class comment.
             heartbeatIntervalMs: options.heartbeatIntervalMs || 5000,
             heartbeatTimeoutMs: options.heartbeatTimeoutMs || 12000,
@@ -362,7 +368,10 @@ export class PeerManager extends EventTarget {
     }
 
     _buildRtcConfig() {
-        const rtcConfig = this.options.iceMode === 'local' ? { iceServers: [] } : { ...STUN_SERVERS };
+        const custom = this.options.iceServers;
+        const rtcConfig = this.options.iceMode === 'local'
+            ? { iceServers: [] }
+            : { iceServers: (custom && custom.length) ? custom : STUN_SERVERS.iceServers };
         if (this._certificate) rtcConfig.certificates = [this._certificate];
         return rtcConfig;
     }
