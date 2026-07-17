@@ -93,7 +93,7 @@
 
 import { RendezvousCrypto as RC } from './rendezvous-crypto.js';
 import { ConnectionUtils } from './p2p-core.js';
-import { initialMachine, transition } from './rendezvous-episode-core.js';
+import { initialMachine, transition, canPublish } from './rendezvous-episode-core.js';
 
 // Bumped on every rendezvous protocol/behaviour change. The bridge prints
 // this at boot: the FIRST question a connection log must answer is "which
@@ -543,11 +543,14 @@ export class RendezvousManager extends EventTarget {
                 // exchange, so repeated Call presses used to chase each other
                 // in circles (seen in field logs: three Calls in 8s, each
                 // rotating the offer nonce the other side was answering).
-                // Promote/republish the existing episode in place instead.
+                // PROMOTE the existing episode in place instead: the machine
+                // escalates quiet/standby to fully-active, re-arms only a
+                // stale offer (a fresh nonce would invalidate the offer the
+                // listener may currently be answering), and republishes.
                 this._diag(`pair ${pairId}: resumePair (call) — episode already running, promoting it in place`);
                 ep.rec.enabled = true;
                 delete ep.rec.byeAt;
-                await this._promoteEpisode(pairId, ep);
+                this._dispatch(pairId, { type: 'PROMOTE' });
             } else {
                 this._diag(`pair ${pairId}: resumePair (call) — arming an active episode`);
                 this._dispatch(pairId, { type: 'RESUME', peerId: rec.lastPeerId });
@@ -556,49 +559,11 @@ export class RendezvousManager extends EventTarget {
         return true;
     }
 
-    /**
-     * Escalates an existing episode to fully-active on a user Call: quiet and
-     * standby episodes start initiating, an active one just republishes now.
-     * The carrier, subscriptions, dedup state and any in-flight exchange all
-     * survive — a Call must never destroy the handshake it's asking for.
-     */
-    async _promoteEpisode(pairId, ep) {
-        const m = this._machine(pairId); // mirror: machine owns the lifecycle spine
-        m.standbyOnly = ep.standbyOnly = false;
-        if (ep.phase !== 'active') {
-            m.phase = ep.phase = 'active';
-            // A promoted episode earns a fresh active window before demoting
-            // (replaces the machine's demote timer slot, never doubles it).
-            this._setPairTimer(pairId, 'demote', this.options.episodeTimeoutMs, () => {
-                if (this._destroyed) return;
-                const cur = this.episodes.get(pairId);
-                if (cur) this._demoteEpisode(pairId, cur);
-            });
-        }
-        if (!ep.announced) {
-            m.announced = ep.announced = true;
-            this._emit('reconnecting', { pairId, peerId: ep.peerId, role: ep.rec.role });
-        }
-        // An answer/adoption is in flight — let it finish; its stall timer
-        // re-arms if it never connects.
-        if (ep.exchanged) return;
-        try {
-            if (ep.rec.role === 'caller') {
-                // Fresh shadow only if we have none or ours has aged (same
-                // rule as a received ring) — a fresh nonce invalidates the
-                // offer the listener may currently be answering.
-                if (!ep.sealedOffer || Date.now() - ep.lastShadowAt > 30000) {
-                    await this._armCallerOffer(pairId, ep);
-                }
-            } else if (!ep.sealedRing) {
-                await this._armRing(pairId, ep);
-            }
-            this._schedulePublishes(pairId, ep);
-            if (ep.publishOnce) await ep.publishOnce();
-        } catch (e) {
-            this._diag(`pair ${pairId}: could not arm/publish on promote (${e && e.message})`, 'warn');
-        }
-    }
+    // Escalation to fully-active on a user Call is the machine's PROMOTE row:
+    // quiet and standby episodes start initiating, an active one just
+    // republishes now; the carrier, subscriptions, dedup state and any
+    // in-flight exchange all survive — a Call must never destroy the
+    // handshake it's asking for.
 
     /**
      * Kicks every live episode RIGHT NOW: verifies the carrier socket is
@@ -614,9 +579,12 @@ export class RendezvousManager extends EventTarget {
      * still initiate nothing.
      */
     nudgeAll(why = 'nudge') {
-        for (const [pairId, ep] of this.episodes) {
-            if (ep.settled) continue;
-            this._nudgeEpisode(pairId, ep, why).catch(() => {});
+        for (const [pairId, m] of this.machines) {
+            if (m.lifecycle !== 'live') continue;
+            const r = this._dispatch(pairId, { type: 'NUDGE', why });
+            if (r.effects.some((e) => e.t === 'publishNow')) {
+                this._diag(`pair ${pairId}: nudged (${why}) — checking the carrier and republishing now`);
+            }
         }
     }
 
@@ -634,28 +602,10 @@ export class RendezvousManager extends EventTarget {
         return n;
     }
 
-    async _nudgeEpisode(pairId, ep, why) {
-        try {
-            if (ep.carrier && typeof ep.carrier.ensureAlive === 'function') ep.carrier.ensureAlive();
-        } catch (e) {}
-        // An answer/adoption in flight — let it finish (its stall timer
-        // re-arms if it never connects); a standby stays passive.
-        if (ep.standbyOnly || ep.exchanged || !ep.publishOnce) return;
-        const now = Date.now();
-        if (now - (ep.lastNudgeAt || 0) < 5000) return;
-        ep.lastNudgeAt = now;
-        this._diag(`pair ${pairId}: nudged (${why}) — checking the carrier and republishing now`);
-        try {
-            // Same freshness rule as a received ring: a suspend usually means
-            // the network moved under the shadow's gathered candidates.
-            if (ep.rec.role === 'caller' && (!ep.sealedOffer || now - ep.lastShadowAt > 30000)) {
-                await this._armCallerOffer(pairId, ep);
-            }
-            await ep.publishOnce();
-        } catch (e) {
-            this._diag(`pair ${pairId}: nudge could not republish (${e && e.message})`, 'warn');
-        }
-    }
+    // Per-episode nudge decisions (socket check always; arm-if-stale +
+    // republish only for an active, unexchanged initiator, 5s rate-limited)
+    // are the machine's NUDGE row; ensureAlive/armOffer/publishNow effects
+    // carry them out.
 
     /**
      * Tells the device on `peerId` that this link is being closed ON PURPOSE
@@ -958,10 +908,12 @@ export class RendezvousManager extends EventTarget {
                         if (eff.id === 'delay') {
                             this._dispatch(pairId, { type: 'T_DELAY', connectedNow: !!this._connectedPeerIdFor(pairId) });
                         } else if (eff.id === 'demote') {
-                            // TRANSITIONAL: presence still runs on the legacy
-                            // handler (mirrors keep the machine in sync).
-                            const ep = this.episodes.get(pairId);
-                            if (ep) this._demoteEpisode(pairId, ep);
+                            const mm = this.machines.get(pairId);
+                            const wasActive = mm && mm.lifecycle === 'live' && mm.phase === 'active';
+                            this._dispatch(pairId, { type: 'T_DEMOTE' });
+                            if (wasActive && mm.phase === 'quiet') {
+                                this._diag(`pair ${pairId}: active phase timed out after ${this.options.episodeTimeoutMs / 60000}min — going quiet (still subscribed and reachable)`);
+                            }
                         }
                         // 'stall'/'lstall:*' arm once the exchange family
                         // runs on the machine (later migration step).
@@ -1401,11 +1353,12 @@ export class RendezvousManager extends EventTarget {
         const currentBlob = ep.rec.role === 'caller' ? () => ep.sealedOffer : () => ep.sealedRing;
         const publishOnce = async () => {
             if (ep.settled || !currentBlob()) return;
-            if (Date.now() - (ep.rec.lastSeenAt || 0) > this.options.resumeWindowMs) {
-                // The only silent way out of the republish cadence — say so
-                // ONCE, or a log reader sees "armed" and then nothing.
-                if (!ep.republishWindowLogged) {
-                    ep.republishWindowLogged = true;
+            // The gate is the core's canPublish — the only silent way out of
+            // the republish cadence, said ONCE (or a log reader sees "armed"
+            // and then nothing).
+            const gate = canPublish(this._machine(pairId), ep.rec.lastSeenAt, Date.now(), this.options);
+            if (!gate.ok) {
+                if (gate.logStop) {
                     this._diag(`pair ${pairId}: ${kind} republishing stopped — pair last seen over ${Math.round(this.options.resumeWindowMs / 3600000)}h ago (staying subscribe-only)`, 'warn');
                 }
                 return;
@@ -1707,20 +1660,11 @@ export class RendezvousManager extends EventTarget {
         this._dispatch(pairId, { type: 'CONNECTED', peerId: ep.peerId });
     }
 
-    /**
-     * The active phase is over — 'gave-up' releases UI claims and wake locks
-     * — but the episode LIVES ON quietly: still subscribed, still slowly
-     * republishing (until the resumeWindowMs bound in _schedulePublishes).
-     * The pair stays reachable for as long as the app is open.
-     */
-    _demoteEpisode(pairId, ep) {
-        if (ep.settled || ep.phase === 'quiet') return;
-        this._machine(pairId).phase = ep.phase = 'quiet';
-        this._diag(`pair ${pairId}: active phase timed out after ${this.options.episodeTimeoutMs / 60000}min — going quiet (still subscribed and reachable)`);
-        if (ep.announced) {
-            this._emit('gave-up', { pairId, peerId: ep.peerId, why: 'timeout', standby: true });
-        }
-    }
+    // The active-phase timeout is the machine's T_DEMOTE row: 'gave-up'
+    // releases UI claims and wake locks, but the episode LIVES ON quietly —
+    // still subscribed, still slowly republishing (until the resumeWindowMs
+    // bound in the publish gate). The pair stays reachable for as long as
+    // the app is open.
 
     /**
      * Hard error path (carrier factory threw, RTC failure). Unlike the old
