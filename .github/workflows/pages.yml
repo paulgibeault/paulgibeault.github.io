@@ -38,32 +38,16 @@ jobs:
             node --check "$f"
           done
 
-      - name: Rendezvous unit tests (crypto AAD/tamper + MQTT codec resync — no browser)
-        run: node tools/rendezvous-unit.mjs
+      - name: Unit tier (every tools/*-unit.mjs, discovered — no browser)
+        # Discovery, not enumeration: a new tools/<thing>-unit.mjs runs here
+        # with zero workflow edits. Includes repo-gates-unit.mjs (sw.js
+        # precache completeness + catalog.json schema).
+        run: node tools/run-units.mjs
 
-      - name: MQTT codec unit tests (varint edges + malformed-input rejection — no browser)
-        run: node tools/mqtt-codec-unit.mjs
-
-      - name: Save-validation unit tests (import gates + key allowlists — no browser)
-        run: node tools/save-validation-unit.mjs
-
-      - name: Sync unit tests (HLC clock, digest planning, apply/validate — no browser)
-        run: node tools/sync-unit.mjs
-
-      - name: Envelope unit tests (wire-envelope validators + deviceId pattern — no browser)
-        run: node tools/envelope-unit.mjs
-
-      - name: User-identity unit tests (seed/recovery-code codec + cert/revocation gates — no browser)
-        run: node tools/user-identity-unit.mjs
-
-      - name: Backup unit tests (backup envelope validator, chunking, retention — no browser)
-        run: node tools/backup-unit.mjs
-
-      - name: Local backup unit tests (staleness/retention/key-format — no browser)
-        run: node tools/local-backup-unit.mjs
-
-      - name: P2P-core unit tests (id entropy, ack/resync bounds, resume binding, frame cap — no browser)
-        run: node tools/p2p-core-unit.mjs
+      - name: SW cache-version gate (precached asset changed ⇒ CACHE_NAME must bump)
+        run: |
+          git fetch --depth=1 origin main
+          node tools/check-sw-bump.mjs origin/main
 
       - name: Install deps + browsers
         run: |
