@@ -1,6 +1,6 @@
 # QRP2P Protocol Specification
 
-**Version:** 1.11 · **Status:** Implemented · **Date:** 2026-07-17
+**Version:** 1.12 · **Status:** Implemented · **Date:** 2026-07-17
 
 > Maintained in this repo alongside the implementation (`p2p/`, see
 > `p2p/README.md`). The protocol originated in the now-archived
@@ -72,8 +72,9 @@ state machine in the stack. Implementation: `p2p-core.js`, `sdp-codec.js`,
 
 ### 3.1 Signaling payload codec
 
-A signaling payload is logically `{ peerId, sessionDesc: { type, sdp } }`.
-On the wire (QR, link fragment, or sealed rendezvous blob) it is packed:
+A signaling payload is logically `{ peerId, sessionDesc: { type, sdp } }`,
+plus an exchange nonce `n` when it rides the rendezvous (§7.4). On the wire
+(QR, link fragment, or sealed rendezvous blob) it is packed:
 
 ```
 payload := "1." b64url(bytes)
@@ -90,6 +91,8 @@ bytes   := version_flags(1)      high nibble: codec version (1)
                                  bits2-3 cand type: host|srflx|prflx|relay
                         addr    (4 | 16 | 16-uuid | len-prefixed ASCII)
                         port    (2)
+           extras    := ( tag(1) value(len-prefixed ASCII) )*   [may be empty]
+                        tag 1 = n, the §7.4 exchange nonce
 ```
 
 The receiver reconstructs a full SDP from a template — only entropy travels.
@@ -97,6 +100,14 @@ The legacy format (deflate-raw + b64url, no `"1."` prefix) MUST still be
 accepted for decode. Payloads failing shape validation
 (`ConnectionUtils.validatePayload`) MUST be rejected before touching any
 RTC API.
+
+The **extras trailer** is a format-1-compatible superset, not a version
+bump: decoders shipped before it existed stop after the candidate list and
+ignore trailing bytes, so an old device reads a new payload as one without
+extras (and the absent-`n` compatibility rule in §7.4 covers it), while a
+new device reads an old payload the same way. Every extra value is
+len-prefixed, so unknown tags from a future sender skip cleanly. A decoder
+MUST reject a truncated trailer entry like any other corruption.
 
 ## 4. Ceremonies (first contact)
 
@@ -389,8 +400,12 @@ asking the caller role to publish a fresh offer (§7.5). Rules:
   random `n`; an answer echoes its offer's `n` and is rejected on mismatch,
   duplicate offers/rings are dropped by `n`, and an answered offer that
   never produces a connection is retired after `answerStallMs` (30 s) so a
-  stale blob can never wedge an episode. An absent `n` (pre-1.10 peer) is
-  accepted for compatibility.
+  stale blob can never wedge an episode. In packed offers/answers `n`
+  travels in the §3.1 extras trailer (rings are plain JSON and always
+  carried it). An absent `n` is accepted for compatibility — this covers
+  both pre-1.10 peers and every pre-1.12 build, whose packer silently
+  dropped `n` from packed payloads (leaving this binding inert on that
+  path; the trailer restores it between current builds).
 
 ### 7.5 Episode state machine
 
@@ -596,4 +611,5 @@ resume window 6 h.
 | 1.9 | rendezvous: pairing, key schedule, sealed dead-drop re-signaling, session adoption, carriers |
 | 1.10 | reconnect-lifecycle hardening: self-healing carriers, standby/ring/bye, exchange nonces, quiet-phase episodes |
 | 1.11 | targeted sends: public `sendTo`, `noRelay` app-frame flag, hub strips forged inbound `relayed` |
+| 1.12 | §3.1 extras trailer on packed payloads (format-1-compatible): exchange nonce `n` now survives the packed wire path — pre-1.12 packers dropped it, leaving the §7.4 offer↔answer replay binding inert there |
 | 2.x (`RDV_BUILD` `v2.4`) | `pair-confirm` key-confirmation before persisting; serialized per-pair record writes; `MultiCarrier` fan-out across several public brokers; flap-resend. **Ratchet frozen, then removed** (see §7.5) — the sealed epoch is the fixed literal `1` and the never-reachable `+3` acceptance window was deleted (wire-identical); a per-episode decrypt rate-limit + day-topic-rollover resubscribe added |
