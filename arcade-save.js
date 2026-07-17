@@ -129,13 +129,20 @@ export async function validateSaveBundle(parsed, opts) {
 export const ENC_FORMAT = 'pauls-arcade-save-enc';
 export const ENC_VERSION = 1;
 // PBKDF2-SHA256 iteration count — sub-second on modern hardware for a
-// one-shot interactive export/import, well above legacy minimums.
-const ENC_ITERATIONS = 250000;
+// one-shot interactive export/import, at the current OWASP floor (600k for
+// PBKDF2-SHA256). Decrypt honors the envelope's own `iterations`, so bundles
+// minted at the old 250k count still import unchanged.
+const ENC_ITERATIONS = 600000;
+// Decrypt-side ceiling on envelope-supplied iterations: a hostile envelope
+// could otherwise pin the importing device in PBKDF2 for minutes. Generous
+// headroom above anything we ever minted or plan to mint.
+const ENC_MAX_ITERATIONS = 10000000;
 
 // Chunked to avoid a call-stack blowout: String.fromCharCode(...bytes) on a
 // large typed array (a bundle can be tens of MB with blobs) can exceed the
-// engine's argument-spread limit.
-function bytesToB64(bytes) {
+// engine's argument-spread limit. Exported for arcade-backup.js's at-rest
+// sealing — one codec implementation on the launcher side, not three.
+export function bytesToB64(bytes) {
     let binary = '';
     const chunkSize = 0x8000;
     for (let i = 0; i < bytes.length; i += chunkSize) {
@@ -143,7 +150,7 @@ function bytesToB64(bytes) {
     }
     return btoa(binary);
 }
-function b64ToBytes(b64) {
+export function b64ToBytes(b64) {
     const binary = atob(b64);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
@@ -182,6 +189,7 @@ export async function decryptBundleJson(envelope, passphrase) {
         const salt = b64ToBytes(envelope.salt);
         const iv = b64ToBytes(envelope.iv);
         const iterations = Number.isInteger(envelope.iterations) ? envelope.iterations : ENC_ITERATIONS;
+        if (iterations < 1 || iterations > ENC_MAX_ITERATIONS) return null;
         const key = await deriveAesKey(passphrase, salt, iterations, 'decrypt');
         const aad = new TextEncoder().encode(envelope.format + '/v' + envelope.v);
         const plaintextBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv, additionalData: aad }, key, b64ToBytes(envelope.ciphertext));
