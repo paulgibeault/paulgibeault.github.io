@@ -27,6 +27,15 @@
 
 export const KNOWN_PEERS_KEY = 'arcade.v1._meta.knownPeers';
 
+// Every lookup below goes through an OWN-property check: a bare `map[id]`
+// resolves through the prototype chain, so an id like '__proto__' or
+// 'constructor' would read (and then write onto) Object.prototype. Wire
+// boundaries already reject dunder device ids (DEVICE_ID_RE), but this
+// module must not rely on its callers for that.
+function ownEntry(map, id) {
+    return Object.prototype.hasOwnProperty.call(map, id) ? map[id] : undefined;
+}
+
 export function readKnownPeers() {
     try {
         const raw = localStorage.getItem(KNOWN_PEERS_KEY);
@@ -58,7 +67,7 @@ export function renameKnownPeer(id, name) {
     const trimmed = String(name || '').trim().slice(0, 60);
     if (!trimmed) return false;
     return mutateKnownPeers((map) => {
-        if (!map[id]) return null;
+        if (!ownEntry(map, id)) return null;
         map[id].name = trimmed;
         return map;
     });
@@ -67,7 +76,7 @@ export function renameKnownPeer(id, name) {
 /** Set the paused display flag for a known peer. */
 export function setKnownPeerPaused(id, paused) {
     return mutateKnownPeers((map) => {
-        if (!map[id]) return null;
+        if (!ownEntry(map, id)) return null;
         map[id].paused = !!paused;
         return map;
     });
@@ -76,7 +85,7 @@ export function setKnownPeerPaused(id, paused) {
 /** Per-pair opt-in for Arcade.sync state replication. */
 export function setKnownPeerSyncEnabled(id, on) {
     return mutateKnownPeers((map) => {
-        if (!map[id]) return null;
+        if (!ownEntry(map, id)) return null;
         map[id].syncEnabled = !!on;
         return map;
     });
@@ -90,7 +99,7 @@ export function setKnownPeerSyncEnabled(id, on) {
  */
 export function setKnownPeerBackupTarget(id, on) {
     return mutateKnownPeers((map) => {
-        if (!map[id]) return null;
+        if (!ownEntry(map, id)) return null;
         map[id].backupTarget = !!on;
         return map;
     });
@@ -107,7 +116,7 @@ export function setKnownPeerBackupTarget(id, on) {
 export function markKnownPeerRevoked(id, entry) {
     if (!entry || typeof entry.revokedAt !== 'number' || typeof entry.sig !== 'string') return false;
     return mutateKnownPeers((map) => {
-        if (!map[id] || map[id].revoked) return null;
+        if (!ownEntry(map, id) || map[id].revoked) return null;
         map[id].revoked = { revokedAt: entry.revokedAt, sig: entry.sig };
         return map;
     });
@@ -120,7 +129,7 @@ export function markKnownPeerRevoked(id, entry) {
  */
 export function clearKnownPeerRevoked(id) {
     return mutateKnownPeers((map) => {
-        if (!map[id] || !map[id].revoked) return null;
+        if (!ownEntry(map, id) || !map[id].revoked) return null;
         delete map[id].revoked;
         return map;
     });
@@ -129,7 +138,7 @@ export function clearKnownPeerRevoked(id) {
 /** Forget a known peer entirely. */
 export function deleteKnownPeer(id) {
     return mutateKnownPeers((map) => {
-        if (!map[id]) return null;
+        if (!ownEntry(map, id)) return null;
         delete map[id];
         return map;
     });
