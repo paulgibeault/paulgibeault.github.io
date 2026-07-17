@@ -394,6 +394,17 @@ asking the caller role to publish a fresh offer (§7.5). Rules:
 
 ### 7.5 Episode state machine
 
+*Implementation note (v2.5):* the lifecycle below is implemented as a
+modeled transition table — one machine per pair in
+`rendezvous-episode-core.js` (pure, Node-tested exhaustively by
+`tools/rendezvous-machine-unit.mjs`), with `rendezvous.js` executing its
+effects (timers, carrier, crypto, adoption). States: `idle` →
+`scheduled(listener-wait | checking | caller-extra | rearm)` → `starting`
+→ `live` (presence `active|quiet|standby` × exchange
+`none|answering|adopting`) → settle/cancel/fail. In-flight async work is
+generation-stamped so a completion landing after its episode was
+superseded is ignored by construction. Nothing wire-visible changed.
+
 Triggers (per enabled pair):
 - link `interrupted` continuously for `listenerDelayMs` (15 s, listener) /
   `callerDelayMs` (30 s, caller) — the in-band repair gets first claim;

@@ -6,8 +6,15 @@
  * without a human carrying the payloads: everything published is AEAD-sealed
  * with keys born on the original DTLS channel, topics are unlinkable daily
  * HMACs, and a persistent nonce cache stops replays. (A per-reconnect key
- * ratchet was specified once but is REMOVED — see _settleEpisode; bringing
- * it back requires a two-sided commit and a protocol version bump.)
+ * ratchet was specified once but is REMOVED — see the ratchet note above
+ * the machine plumbing; bringing it back requires a two-sided commit and a
+ * protocol version bump.)
+ *
+ * The episode lifecycle is a modeled state machine: the pure transition
+ * table lives in rendezvous-episode-core.js (PROTOCOL.md §7.5); this file
+ * is its effect executor — timers, carriers, crypto, WebRTC adoption,
+ * record persistence — plus the pairing exchange, which is deliberately
+ * NOT machine-modeled (peerId-keyed, mutex-serialized, field-hardened).
  *
  * Lifecycle:
  *   PAIRING     enablePair(peerId, pairId) on BOTH sides while connected →
@@ -79,9 +86,10 @@
  *     connects is retired after `answerStallMs` instead of deafening the
  *     episode until timeout.
  *   - The pairing secret is NEVER advanced by an episode (the ratchet is
- *     removed — _settleEpisode): both sides always hold the exact key minted
- *     at the last manual ceremony. ep.exchanged only distinguishes "sealed
- *     exchange reconnected us" from "in-band repair won" for events/logs.
+ *     removed — see the ratchet note above the machine plumbing): both sides
+ *     always hold the exact key minted at the last manual ceremony. The
+ *     machine's `exchanged` flag only distinguishes "sealed exchange
+ *     reconnected us" from "in-band repair won" for events/logs.
  *   - Pairing randoms ride the DTLS-authenticated control channel of a
  *     manually-ceremonied link, and are held only until the exchange
  *     commits (or its confirmation window lapses).
@@ -99,7 +107,7 @@ import { initialMachine, transition, canPublish, tryKinds, takeDecryptToken } fr
 // this at boot: the FIRST question a connection log must answer is "which
 // build produced this?" — field sessions have been burned diagnosing bugs
 // that were already fixed but not actually loaded (stale caches).
-export const RDV_BUILD = 'v2.4 pair-confirm/serialized/flap-resend/multi-broker';
+export const RDV_BUILD = 'v2.5 episode-machine';
 
 const DB_NAME = 'qrp2p-rendezvous';
 const DB_STORE = 'pairs';
@@ -198,7 +206,7 @@ function waitGathering(pc, timeoutMs = 10000) {
 }
 
 // The single epoch value sealed AND accepted on the wire. The per-reconnect
-// ratchet was removed (see _settleEpisode): `rec.epoch` is written as 0 at
+// ratchet was removed — see the ratchet note above the machine plumbing: `rec.epoch` is written as 0 at
 // pairing and never advances, so every deployed client seals offers, rings
 // and answers at completed+1 = 1 — nothing else is ever produced. Old builds
 // additionally ACCEPTED a +3 window (crash-recovery skew for the ratchet
@@ -212,7 +220,7 @@ function waitGathering(pc, timeoutMs = 10000) {
 function sealEpoch(rec) { return ((rec && rec.epoch) || 0) + 1; }
 
 // Persistent cross-episode replay cache (S-sec-4a). The signaling ratchet is
-// removed (see _settleEpisode), so `rec.epoch` never advances and the AEAD key
+// removed (see the ratchet note above the machine plumbing), so `rec.epoch` never advances and the AEAD key
 // lives for the pairing's life; per-episode deadNonces/seenRings reset each
 // episode, so without this a broker could replay a recorded offer/ring in a
 // LATER episode to provoke presence disclosure + publish spam. Each processed
@@ -284,10 +292,10 @@ export class RendezvousManager extends EventTarget {
         this.episodes = new Map();      // pairId → episode RESOURCES (carrier, keys, shadow, publish closures)
         this._tombstoned = new Set();   // pairIds forgotten via disablePair — refuse stale re-persists
         // Episode state machines (rendezvous-episode-core.js): one per pair.
-        // The machine owns scheduling AND the live lifecycle spine (claim/
-        // settle/cancel/fail); the `episodes` map keeps only the runtime
-        // resources an episode holds. Exchange/presence decision flags are
-        // mid-migration: legacy mutations mirror into the machine context.
+        // The machine owns EVERY episode decision — scheduling, the live
+        // lifecycle (claim/settle/cancel/fail), presence, and the exchange —
+        // while the `episodes` map keeps only the runtime resources an
+        // episode holds.
         this.machines = new Map();      // pairId → machine
         this._pairTimers = new Map();   // pairId → Map<timerId, clearFn>
         this._setupRecs = new Map();    // pairId → rec staged between SETUP_READ and buildEpisode
@@ -603,8 +611,8 @@ export class RendezvousManager extends EventTarget {
      */
     episodesActive() {
         let n = 0;
-        for (const ep of this.episodes.values()) {
-            if (!ep.settled) n++;
+        for (const m of this.machines.values()) {
+            if (m.lifecycle === 'live') n++;
         }
         return n;
     }
@@ -1001,16 +1009,24 @@ export class RendezvousManager extends EventTarget {
                     break;
                 case 'armOffer': {
                     const ep = this.episodes.get(pairId);
-                    if (ep && !ep.settled) await this._armCallerOffer(pairId, ep).catch((e) => {
+                    if (!ep || ep.settled) break;
+                    try {
+                        await this._armCallerOffer(pairId, ep);
+                        this._dispatch(pairId, { type: 'OFFER_ARMED', gen: eff.gen, n: ep.offerNonce });
+                    } catch (e) {
                         this._diag(`pair ${pairId}: could not arm an offer (${e && e.message})`, 'warn');
-                    });
+                    }
                     break;
                 }
                 case 'armRing': {
                     const ep = this.episodes.get(pairId);
-                    if (ep && !ep.settled) await this._armRing(pairId, ep).catch((e) => {
+                    if (!ep || ep.settled) break;
+                    try {
+                        await this._armRing(pairId, ep);
+                        this._dispatch(pairId, { type: 'RING_ARMED', gen: eff.gen });
+                    } catch (e) {
                         this._diag(`pair ${pairId}: could not arm a ring (${e && e.message})`, 'warn');
-                    });
+                    }
                     break;
                 }
                 case 'schedulePublishes': {
@@ -1445,11 +1461,6 @@ export class RendezvousManager extends EventTarget {
             sessionDesc: { type: pc.localDescription.type, sdp: ConnectionUtils.minifySDP(pc.localDescription.sdp, this.pm.options) }
         });
         ep.sealedOffer = await RC.seal(ep.aeadKey, await ConnectionUtils.encodePayload(payload), 'o', ep.usedEpoch);
-        // Mirror: machine context tracks arming for its freshness decisions.
-        const m = this._machine(pairId);
-        m.offerArmed = true;
-        m.offerNonce = ep.offerNonce;
-        m.lastShadowAt = ep.lastShadowAt;
         this._diag(`pair ${pairId}: caller offer armed (epoch ${ep.usedEpoch}, nonce ${ep.offerNonce})`);
     }
 
@@ -1461,7 +1472,6 @@ export class RendezvousManager extends EventTarget {
             JSON.stringify({ peerId: ep.peerId, n: ep.ringNonce }),
             'r', sealEpoch(ep.rec)
         );
-        this._machine(pairId).ringArmed = true; // mirror
         this._diag(`pair ${pairId}: listener ring armed (epoch ${sealEpoch(ep.rec)}, nonce ${ep.ringNonce})`);
     }
 
@@ -1475,7 +1485,6 @@ export class RendezvousManager extends EventTarget {
     _schedulePublishes(pairId, ep) {
         if (ep.publishScheduled) return;
         ep.publishScheduled = true;
-        this._machine(pairId).publishScheduled = true; // mirror
         const kind = ep.rec.role === 'caller' ? 'offer' : 'ring';
         const currentBlob = ep.rec.role === 'caller' ? () => ep.sealedOffer : () => ep.sealedRing;
         const publishOnce = async () => {
