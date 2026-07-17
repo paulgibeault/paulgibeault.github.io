@@ -572,7 +572,8 @@ links, no signaling server. Games never touch any of that; the whole surface is:
 Arcade.peer.status();              // 'unavailable' | 'idle' | 'connecting' | 'connected' | 'interrupted'
 Arcade.peer.onStatus(s => ...);    // gate multiplayer UI on this (AGGREGATE across all links)
 Arcade.peer.caps();                // launcher capability flags: feature-detect additive features
-                                   // ('peer.sendTo', 'peer.roster', 'peer.meta'); [] standalone
+                                   // ('peer.sendTo', 'peer.roster', 'peer.meta', 'storage.bridge',
+                                   // 'ui.bridge'); [] standalone or on an older launcher
 Arcade.peer.send({ move: 'e4' });  // broadcast; JSON-safe payload; false unless connected/interrupted
 Arcade.peer.send(hand, { to });    // targeted: only deviceId `to` receives it (cap 'peer.sendTo')
 Arcade.peer.onMessage((payload, fromPeer, meta) => ...);  // fromPeer = sender's stable deviceId;
@@ -884,6 +885,8 @@ A game is considered integrated when all of the following pass:
 - [ ] If the game uses `Arcade.store` / `Arcade.files`, a Launcher Save → Load round-trip restores that data too (it rides the schema-v2 bundle).
 - [ ] Standalone URL (`https://paulgibeault.github.io/<gameId>/`) still works exactly as before.
 - [ ] Service worker (if any) does not intercept requests for `/arcade-sdk.js` or other launcher assets (no `[Arcade SDK]` warning in console).
+- [ ] `Arcade.peer.caps()` inside the launcher frame reports the full documented capability list (§14) — the caps contract arrived intact.
+- [ ] The game keeps working when a cap is absent (older launcher): gate every capability-backed feature on `Arcade.peer.caps()`, never assume the full list.
 
 ### Automated check
 

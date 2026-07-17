@@ -33,17 +33,23 @@
 
 import { KEY_PREFIX } from './arcade-storage-core.js';
 
+// Capability flags shipped in arcade:welcome — THE launcher↔SDK compat
+// contract (there is deliberately no version number on the wire). Games
+// feature-detect via Arcade.peer.caps() instead of version checks —
+// additive launcher features never bump a protocol version, and an SDK
+// missing a cap degrades gracefully. storage.bridge: this launcher hosts
+// the opaque-frame storage bridge (state.write / store.op / files.op /
+// storage.op + welcome.state snapshot). ui.bridge: this launcher services
+// arcade:ui.op (confirm/prompt/setTitle/quitHook/openFile/share — see
+// arcade-ui-bridge.js). Exported so the contract tests
+// (tools/caps-contract-unit.mjs, tools/acceptance.mjs check 11) pin the
+// list — editing it is a contract change: update GAME_INTEGRATION.md §14
+// and the pinned test literal deliberately, never casually.
+export const ARCADE_PEER_CAPS = Object.freeze(
+    ['peer.sendTo', 'peer.roster', 'peer.meta', 'storage.bridge', 'ui.bridge']);
+
 export function initMessageRouter(host) {
     const pool = host.pool;
-
-    // Capability flags shipped in arcade:welcome. Games feature-detect
-    // via Arcade.peer.caps() instead of version checks — additive
-    // launcher features never bump the protocol version. storage.bridge:
-    // this launcher hosts the opaque-frame storage bridge (state.write /
-    // store.op / files.op / storage.op + welcome.state snapshot).
-    // ui.bridge: this launcher services arcade:ui.op (confirm/prompt/
-    // setTitle/quitHook/openFile/share — see arcade-ui-bridge.js).
-    const ARCADE_PEER_CAPS = ['peer.sendTo', 'peer.roster', 'peer.meta', 'storage.bridge', 'ui.bridge'];
 
     // The storage bridge (opaque-frame custodian: ls-proxy, state.write,
     // store.op, files.op, storage.op) lives in arcade-storage-bridge.js;
