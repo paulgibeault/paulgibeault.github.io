@@ -1105,6 +1105,13 @@ export class PeerManager extends EventTarget {
         this._teardownPeer(peerId, 'disconnected');
     }
 
+    // ==========================================
+    // READ MODEL (v1.12) — the supported way for the layers above (launcher
+    // glue, ceremony UI) to observe transport state. `isHost` and the public
+    // methods are API; `peers`, `sessionStash` and `options` are internal —
+    // never reach into them from outside this file.
+    // ==========================================
+
     /**
      * Connection-liveness snapshot for UI, so callers don't reach into the
      * internal `peers`/`sessionStash`/`isHost` state to derive it themselves.
@@ -1123,6 +1130,105 @@ export class PeerManager extends EventTarget {
             established: this.peers.size > 0 || stashed > 0,
             isHost: this.isHost,
         };
+    }
+
+    /** True while this peerId holds a live entry (any status, pre- or post-connect). */
+    hasLink(peerId) {
+        return this.peers.has(peerId);
+    }
+
+    /**
+     * One link's transport status ('connected' | 'interrupted' | 'finalizing'
+     * | 'connecting' | ...), or null when the peerId holds no live entry.
+     */
+    linkStatus(peerId) {
+        const p = this.peers.get(peerId);
+        return p ? p.status : null;
+    }
+
+    /** True while a terminally-dead link's session is stashed for resumption. */
+    hasStashedSession(peerId) {
+        return this.sessionStash.has(peerId);
+    }
+
+    /**
+     * A joiner's single direct link is by definition the host. Prefers the
+     * live entry typed 'host'; during a stash-repair window (entry torn down,
+     * outbox stashed) the stash preserves the link type, so it is checked
+     * next. Null on a host node (its links are all joiners) or when no host
+     * link exists in either place.
+     */
+    hostLinkId() {
+        if (this.isHost) return null;
+        for (const [pid, p] of this.peers) {
+            if (p.type === 'host') return pid;
+        }
+        for (const [pid, s] of this.sessionStash) {
+            if (s.type === 'host') return pid;
+        }
+        return null;
+    }
+
+    /**
+     * Abandons every unfinished ceremony — drops each link that never reached
+     * 'connected'. An 'interrupted' peer is an established session mid-repair,
+     * not a failed attempt, so it survives. Routes through disconnectPeer so a
+     * terminal 'status' event reaches every listener (a bare peers.delete()
+     * would wedge the layers above).
+     */
+    abandonPending() {
+        this.peers.forEach((p, id) => {
+            if (p.status !== 'connected' && p.status !== 'interrupted') {
+                this.disconnectPeer(id);
+            }
+        });
+    }
+
+    /**
+     * Replay-queue visibility across live links and stashed sessions:
+     * { depth, limit, overflowed }. depth is the deepest per-link outbox;
+     * overflowed means the oldest unacked frames were already dropped and the
+     * layers above should resync state after recovery.
+     */
+    outboxSnapshot() {
+        let depth = 0, overflowed = false;
+        this.peers.forEach((p) => {
+            depth = Math.max(depth, (p.outbox || []).length);
+            if (p.outboxOverflowed) overflowed = true;
+        });
+        this.sessionStash.forEach((s) => {
+            depth = Math.max(depth, (s.outbox || []).length);
+            if (s.outboxOverflowed) overflowed = true;
+        });
+        return { depth, limit: this.options.outboxLimit, overflowed };
+    }
+
+    /** Read-only copy of the tuning knobs (mutating it changes nothing). */
+    getConfig() {
+        return { ...this.options };
+    }
+
+    // The only externally-tunable knobs (the ceremony UI's settings panel).
+    // Everything else in `options` is fixed at construction.
+    static get TUNABLE_OPTIONS() {
+        return ['allowLocalCandidates', 'allowIPv6Candidates', 'connectionTimeoutMs', 'iceMode'];
+    }
+
+    /**
+     * Applies a partial update of the tunable knobs; unknown keys are ignored.
+     * Returns the resulting config snapshot. New values apply to future
+     * connections/timers; established links keep the values they started with.
+     */
+    setConfig(partial = {}) {
+        for (const key of PeerManager.TUNABLE_OPTIONS) {
+            if (!(key in partial)) continue;
+            if (key === 'iceMode') {
+                this.options.iceMode = partial.iceMode === 'local' ? 'local' : 'anywhere';
+            } else {
+                this.options[key] = partial[key];
+            }
+        }
+        return this.getConfig();
     }
 
     /** Drops one peer's stashed session, if any — a deliberate "start over". */

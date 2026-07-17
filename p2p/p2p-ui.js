@@ -73,7 +73,7 @@ export class P2PUIManager {
             this.logDiag('warn', `Ignoring malformed answer from ${source}: ${e.message}`);
             return;
         }
-        if (this.peerNode.peers.has(data.peerId)) {
+        if (this.peerNode.hasLink(data.peerId)) {
             this.logDiag('info', `Applying Answer from ${source}.`);
             this._setStage(1, 'done'); // their reply arrived (link path)
             this.peerNode.acceptAnswer(data);
@@ -243,7 +243,7 @@ export class P2PUIManager {
                 // this tab acts as a RELAY: forward the answer over every
                 // same-origin channel and wait for the host tab to ack.
                 // -------------------------------------------------------
-                if (this.peerNode.peers.has(data.peerId)) {
+                if (this.peerNode.hasLink(data.peerId)) {
                     // Rare: this very tab holds the pending offer.
                     this._tryApplyAnswer(data, 'URL fragment');
                     this.ui.workArea.style.display = 'block';
@@ -402,8 +402,8 @@ export class P2PUIManager {
     _restoreUIState() {
         // Resume a still-valid pending ceremony FIRST — even while another link
         // is live (a host mid-"invite another") the QR on screen is real work.
-        const pending = Array.from(this.peerNode.peers.values())
-            .some(p => p.status !== 'connected' && p.status !== 'interrupted');
+        const summary = this._connectionState();
+        const pending = summary.finalizing + summary.pending > 0;
         if (pending && this.rawSDPPayload) {
             this.ui.choice.style.display = 'none';
             this.ui.workArea.style.display = 'block';
@@ -428,15 +428,10 @@ export class P2PUIManager {
     /** Abandon any unfinished attempt and return to the first screen. */
     _startOver(log = true) {
         this._ceremonyPeerId = null;
-        this.peerNode.peers.forEach((p, id) => {
-            // Abandon unfinished ceremonies only — an 'interrupted' peer is an
-            // established session mid-repair, not a failed attempt. Route through
-            // the transport so a terminal 'status' event reaches the bridge
-            // (a direct peers.delete() would wedge the launcher's status).
-            if (p.status !== 'connected' && p.status !== 'interrupted') {
-                this.peerNode.disconnectPeer(id);
-            }
-        });
+        // Abandon unfinished ceremonies only — the transport keeps established
+        // sessions (connected or mid-repair) and routes each drop through a
+        // terminal 'status' event so the bridge never wedges.
+        this.peerNode.abandonPending();
         this.rawSDPPayload = '';
         this._stageLabels = null;
         this._stageStates = null;
@@ -638,11 +633,12 @@ export class P2PUIManager {
             btnRestart: document.getElementById('p2p-btn-restart')
         };
 
-        // Initialize UI values from PeerManager options
-        this.ui.optLocal.checked = this.peerNode.options.allowLocalCandidates;
-        this.ui.optIPv6.checked = this.peerNode.options.allowIPv6Candidates;
-        this.ui.optTimeout.value = Math.round(this.peerNode.options.connectionTimeoutMs / 60000);
-        this.ui.optIceMode.value = this.peerNode.options.iceMode;
+        // Initialize UI values from the transport's tuning knobs
+        const cfg = this.peerNode.getConfig();
+        this.ui.optLocal.checked = cfg.allowLocalCandidates;
+        this.ui.optIPv6.checked = cfg.allowIPv6Candidates;
+        this.ui.optTimeout.value = Math.round(cfg.connectionTimeoutMs / 60000);
+        this.ui.optIceMode.value = cfg.iceMode;
     }
 
     logDiag(type, msg) {
@@ -658,11 +654,13 @@ export class P2PUIManager {
         
         // Configurable options binders
         const updatePeerNodeOptions = () => {
-            this.peerNode.options.allowLocalCandidates = this.ui.optLocal.checked;
-            this.peerNode.options.allowIPv6Candidates = this.ui.optIPv6.checked;
-            this.peerNode.options.connectionTimeoutMs = (parseInt(this.ui.optTimeout.value, 10) || 5) * 60 * 1000;
-            this.peerNode.options.iceMode = this.ui.optIceMode.value === 'local' ? 'local' : 'anywhere';
-            this.logDiag('info', `Settings updated: Mode=${this.peerNode.options.iceMode}, Local Candidates=${this.peerNode.options.allowLocalCandidates}, IPv6=${this.peerNode.options.allowIPv6Candidates}, Timeout=${this.ui.optTimeout.value}m`);
+            const cfg = this.peerNode.setConfig({
+                allowLocalCandidates: this.ui.optLocal.checked,
+                allowIPv6Candidates: this.ui.optIPv6.checked,
+                connectionTimeoutMs: (parseInt(this.ui.optTimeout.value, 10) || 5) * 60 * 1000,
+                iceMode: this.ui.optIceMode.value === 'local' ? 'local' : 'anywhere'
+            });
+            this.logDiag('info', `Settings updated: Mode=${cfg.iceMode}, Local Candidates=${cfg.allowLocalCandidates}, IPv6=${cfg.allowIPv6Candidates}, Timeout=${this.ui.optTimeout.value}m`);
         };
 
         this.ui.optLocal.addEventListener('change', updatePeerNodeOptions);
@@ -676,7 +674,7 @@ export class P2PUIManager {
             const transcript = [
                 `# P2P transcript ${new Date().toISOString()}`,
                 `# UA: ${navigator.userAgent}`,
-                `# Mode: ${this.peerNode.options.iceMode}, role: ${this.peerNode.isHost ? 'host' : 'joiner'}`,
+                `# Mode: ${this.peerNode.getConfig().iceMode}, role: ${this.peerNode.isHost ? 'host' : 'joiner'}`,
                 ...lines
             ].join('\n');
             try {
@@ -828,8 +826,9 @@ export class P2PUIManager {
         this.ui.btnCancelScan.addEventListener('click', () => {
             this.cleanupUI();
 
-            const hasPendingOffer = this.peerNode.isHost &&
-                Array.from(this.peerNode.peers.values()).some(p => p.status !== 'connected');
+            const s = this._connectionState();
+            const hasPendingOffer = s.isHost &&
+                (s.interrupted + s.finalizing + s.pending) > 0;
 
             if (hasPendingOffer) {
                 // Inviter backing out of "scan theirs" — return to their own

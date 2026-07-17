@@ -6,12 +6,16 @@
  *   • _clampSeq()         — ack/resync bounds (no MAX_SAFE_INTEGER outbox wipe)
  *   • _sessionResumable() — stash TTL + DTLS-fingerprint binding on resume
  *   • _onChannelMessage() — oversized app-frame drop (relay amplification cap)
+ * plus the v1.12 read model — the accessor contract arcade-p2p.js/p2p-ui.js
+ * (and the rendezvous side's episodesActive()) depend on instead of reaching
+ * into `peers`/`sessionStash`/`options`.
  *
  * PeerManager instantiates headless: it only touches RTCPeerConnection inside
  * connection methods, and its visibilitychange listener is `typeof document`
  * guarded. No browser, no network. Run: `npm run p2p-core-unit`.
  */
 import { PeerManager } from '../p2p/p2p-core.js';
+import { RendezvousManager } from '../p2p/rendezvous.js';
 
 let pass = 0, fail = 0;
 function ok(cond, label) {
@@ -112,12 +116,100 @@ function frameSizeTests() {
     ok(pm.options.maxAppFrameBytes === 256 * 1024, 'default cap is 256 KB');
 }
 
+// A minimal live-peer entry that survives _teardownPeer (fake connection).
+const fakePeer = (status, extra = {}) => ({
+    status,
+    connection: { close() {}, onicecandidate: null },
+    dataChannel: null,
+    outbox: [],
+    ...extra,
+});
+
+function readModelTests() {
+    console.log('\nread model — the accessor contract consumers use instead of peers/sessionStash/options');
+
+    // hasLink / linkStatus
+    const pm = new PeerManager();
+    pm.peers.set('C', fakePeer('connected'));
+    pm.peers.set('I', fakePeer('interrupted'));
+    pm.peers.set('F', fakePeer('finalizing'));
+    ok(pm.hasLink('C') === true && pm.hasLink('nope') === false, 'hasLink: live entry true, unknown false');
+    ok(pm.linkStatus('C') === 'connected' && pm.linkStatus('I') === 'interrupted', 'linkStatus reports the raw transport status');
+    ok(pm.linkStatus('nope') === null, 'linkStatus: no live entry → null');
+
+    // hasStashedSession
+    pm.sessionStash.set('S', { type: 'client', outbox: [] });
+    ok(pm.hasStashedSession('S') === true && pm.hasStashedSession('C') === false, 'hasStashedSession tracks the stash only');
+
+    // hostLinkId — joiner resolves live first, then stash; a host gets null
+    const joiner = new PeerManager();
+    joiner.peers.set('h1', fakePeer('connected', { type: 'host' }));
+    joiner.sessionStash.set('h2', { type: 'host', outbox: [] });
+    ok(joiner.hostLinkId() === 'h1', 'hostLinkId prefers the live host-typed entry');
+    joiner.peers.delete('h1');
+    ok(joiner.hostLinkId() === 'h2', 'hostLinkId falls back to a stashed host session (repair window)');
+    joiner.sessionStash.delete('h2');
+    ok(joiner.hostLinkId() === null, 'hostLinkId: nothing host-typed anywhere → null');
+    const host = new PeerManager();
+    host.isHost = true;
+    host.peers.set('j1', fakePeer('connected', { type: 'client' }));
+    ok(host.hostLinkId() === null, 'hostLinkId on a host node → null (its links are joiners)');
+
+    // abandonPending — ceremony leftovers dropped via disconnectPeer,
+    // established sessions (connected AND interrupted) untouched.
+    const pm2 = new PeerManager();
+    pm2.peers.set('C', fakePeer('connected'));
+    pm2.peers.set('I', fakePeer('interrupted'));
+    pm2.peers.set('F', fakePeer('finalizing'));
+    pm2.peers.set('N', fakePeer('new'));
+    const terminal = [];
+    pm2.addEventListener('status', (e) => { if (e.detail.status === 'disconnected') terminal.push(e.detail.peerId); });
+    pm2.abandonPending();
+    ok(pm2.hasLink('C') && pm2.hasLink('I'), 'abandonPending keeps connected and interrupted (mid-repair) links');
+    ok(!pm2.hasLink('F') && !pm2.hasLink('N'), 'abandonPending drops every unfinished ceremony');
+    ok(terminal.sort().join(',') === 'F,N', 'each drop routes through disconnectPeer (terminal status event fired)');
+
+    // outboxSnapshot — deepest outbox across live links AND stashed sessions
+    const pm3 = new PeerManager();
+    pm3.peers.set('A', fakePeer('connected', { outbox: [1, 2, 3] }));
+    pm3.peers.set('B', fakePeer('connected', { outbox: [1], outboxOverflowed: true }));
+    pm3.sessionStash.set('Z', { outbox: [1, 2, 3, 4, 5] });
+    const snap = pm3.outboxSnapshot();
+    ok(snap.depth === 5, `outboxSnapshot.depth is the deepest queue incl. the stash (${snap.depth})`);
+    ok(snap.overflowed === true, 'outboxSnapshot.overflowed surfaces any per-link overflow');
+    ok(snap.limit === pm3.options.outboxLimit, 'outboxSnapshot.limit mirrors the configured cap');
+
+    // getConfig / setConfig — snapshot is a copy; only tunable knobs apply
+    const pm4 = new PeerManager();
+    const cfg = pm4.getConfig();
+    cfg.connectionTimeoutMs = 1;
+    ok(pm4.options.connectionTimeoutMs !== 1, 'getConfig returns a copy (mutating it changes nothing)');
+    const applied = pm4.setConfig({ connectionTimeoutMs: 120000, iceMode: 'local', allowIPv6Candidates: false });
+    ok(applied.connectionTimeoutMs === 120000 && applied.iceMode === 'local' && applied.allowIPv6Candidates === false,
+        'setConfig applies the tunable knobs and returns the resulting snapshot');
+    ok(pm4.setConfig({ iceMode: 'weird' }).iceMode === 'anywhere', 'setConfig normalizes an unknown iceMode to anywhere');
+    pm4.setConfig({ outboxLimit: 1, maxAppFrameBytes: 1, nonsense: true });
+    ok(pm4.options.outboxLimit !== 1 && pm4.options.maxAppFrameBytes !== 1,
+        'setConfig ignores non-tunable and unknown keys (construction-fixed knobs stay put)');
+
+    // episodesActive — the rendezvous side of the read model
+    const rdv = new RendezvousManager(new PeerManager(), {});
+    rdv.episodes.set('p1', { settled: false });
+    rdv.episodes.set('p2', { settled: true });
+    rdv.episodes.set('p3', { settled: false });
+    ok(rdv.episodesActive() === 2, 'episodesActive counts only unsettled episodes');
+    rdv.episodes.clear();
+    ok(rdv.episodesActive() === 0, 'episodesActive: no episodes → 0');
+    rdv.destroy();
+}
+
 (async () => {
     console.log('p2p-core unit tests — transport hardening (issue #21 residuals)');
     idTests();
     clampTests();
     resumeTests();
     frameSizeTests();
+    readModelTests();
     console.log('');
     if (fail) { console.log(fail + ' check(s) FAILED.'); process.exit(1); }
     console.log('All ' + pass + ' p2p-core unit checks passed.');

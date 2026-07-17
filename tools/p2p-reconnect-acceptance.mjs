@@ -188,7 +188,7 @@ try {
             `window.__rdvEv.includes('gave-up')`, null, { timeout: 60000 }
         ).then(() => true).catch(() => false);
         check("survivor's episode gave up (active phase over)", gaveUp);
-        const stillArmed = await s.J.evaluate(() => window.__arcade.p2p._rdv().episodes.size);
+        const stillArmed = await s.J.evaluate(() => window.__arcade.p2p._rdv().episodesActive());
         check('…but its subscription is still armed (quiet, reachable)', stillArmed === 1, `episodes=${stillArmed}`);
 
         const tried = await s.H.evaluate((d) => window.__arcade.p2p.callKnownPeer(d), devOnH);
@@ -222,7 +222,7 @@ try {
         if (booted) {
             await s.J.evaluate(FAST_RDV);
             const quiet = await s.J.evaluate(() => ({
-                episodes: window.__arcade.p2p._rdv().episodes.size,
+                episodes: window.__arcade.p2p._rdv().episodesActive(),
                 status: window.__arcade.p2p.status()
             }));
             check('standby is quiet (no session claimed)', quiet.status === 'idle', quiet.status);
@@ -254,7 +254,7 @@ try {
         await s.J.evaluate(async (d) => { await window.__arcade.p2p._rdv().pausePair(d); }, await peerDev(s.J));
         await killLinks(s.H);
         const armed = await s.H.waitForFunction(
-            `window.__arcade.p2p._rdv().episodes.size === 1`, null, { timeout: 30000 }
+            `window.__arcade.p2p._rdv().episodesActive() === 1`, null, { timeout: 30000 }
         ).then(() => true).catch(() => false);
         check('stale episode armed while the peer is unreachable', armed);
 
@@ -263,7 +263,7 @@ try {
         // autoReconnect on — and the fresh secret must supersede.
         await ceremony(s.H, s.J);
         const staleCancelled = await s.H.waitForFunction(
-            `window.__arcade.p2p._rdv().episodes.size === 0`, null, { timeout: 15000 }
+            `window.__arcade.p2p._rdv().episodesActive() === 0`, null, { timeout: 15000 }
         ).then(() => true).catch(() => false);
         check('fresh pairing cancelled the stale episode', staleCancelled);
 
@@ -325,7 +325,7 @@ try {
         check('first call reports an attempt', triedH === true, String(triedH));
         await new Promise(r => setTimeout(r, 3000));
         const jDeaf = await s.J.evaluate(() => ({
-            episodes: window.__arcade.p2p._rdv().episodes.size,
+            episodes: window.__arcade.p2p._rdv().episodesActive(),
             status: window.__arcade.p2p.status()
         }));
         check('peer that also hung up stays deaf to a one-sided call',
@@ -363,7 +363,7 @@ try {
             await new Promise(r => setTimeout(r, 2500)); // resume-on-launch settle time
             const stateH = await s.H.evaluate((d) => window.__arcade.p2p.connectionState(d), devOnH);
             check("hang-up persisted across the restart ('paused')", stateH === 'paused', stateH);
-            const armed = await s.H.evaluate(() => window.__arcade.p2p._rdv().episodes.size);
+            const armed = await s.H.evaluate(() => window.__arcade.p2p._rdv().episodesActive());
             check('…and no episode armed for the hung-up pair (still deaf)', armed === 0, `episodes=${armed}`);
 
             const tried = await s.H.evaluate((d) => window.__arcade.p2p.callKnownPeer(d), devOnH);
@@ -504,7 +504,7 @@ try {
             const pm = window.__arcade.p2p._addon().peerNode;
             Array.from(pm.peers.values()).forEach(p => { try { p.dataChannel.close(); } catch (e) {} });
         });
-        const armed = await s.J.waitForFunction(`window.__arcade.p2p._rdv().episodes.size >= 1`, null, { timeout: 15000 })
+        const armed = await s.J.waitForFunction(`window.__arcade.p2p._rdv().episodesActive() >= 1`, null, { timeout: 15000 })
             .then(() => true).catch(() => false);
         check('repair episode armed + subscribed to day-topics', armed);
         const shift = await s.J.evaluate(async () => {
@@ -546,7 +546,7 @@ try {
             const pm = window.__arcade.p2p._addon().peerNode;
             Array.from(pm.peers.values()).forEach(p => { try { p.dataChannel.close(); } catch (e) {} });
         });
-        const armed = await s.J.waitForFunction(`window.__arcade.p2p._rdv().episodes.size >= 1`, null, { timeout: 15000 })
+        const armed = await s.J.waitForFunction(`window.__arcade.p2p._rdv().episodesActive() >= 1`, null, { timeout: 15000 })
             .then(() => true).catch(() => false);
         check('episode armed to exercise the nonce cache on', armed);
         const NONCE = 'test_deadbeefcafe';
