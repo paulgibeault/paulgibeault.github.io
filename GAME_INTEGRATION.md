@@ -857,9 +857,9 @@ the launcher or the game URL once. The flag persists in
 SDK log every message they send or receive via `console.debug`:
 
 ```
-[Arcade launcher → si-syn] {type: "arcade:welcome", version: 2, ...}
-[Arcade si-syn ←]          {type: "arcade:welcome", version: 2, ...}
-[Arcade si-syn →]          {type: "arcade:hello", gameId: "si-syn", ...}
+[Arcade launcher → si-syn] {type: "arcade:welcome", caps: [...], ...}
+[Arcade si-syn ←]          {type: "arcade:welcome", caps: [...], ...}
+[Arcade si-syn →]          {type: "arcade:hello", gameId: "si-syn"}
 ```
 
 Useful when "did the welcome arrive yet?" is a real question — e.g. when a
@@ -915,7 +915,13 @@ pre-deploy script if you want regression coverage.
 - SDK source: [arcade-sdk.js](arcade-sdk.js)
 - Launcher iframe pool & message routing: [index.html](index.html) (search for `PLATFORM CONTROLLER`)
 
-### Wire protocol summary (v2)
+### Wire protocol summary
+
+There is deliberately no protocol version number on the wire. The
+launcher↔SDK compatibility contract is `welcome.caps`: the launcher
+announces every optional capability it offers, and the SDK degrades
+gracefully when a cap is absent. New features add a cap; they never
+change the meaning of an existing message.
 
 All messages namespaced `arcade:`. Origin guard: launcher frames are
 opaque-origin, so the SDK pins the origin of the first `welcome` from
@@ -925,8 +931,8 @@ launcher only acts on messages from iframes it mounted via the pool, and
 requires their origin to be the sandboxed literal `'null'`.
 
 ```
-child  → parent: arcade:hello              { gameId, version }
-parent → child:  arcade:welcome            { version, caps, peerStatus, peers, settings, state }
+child  → parent: arcade:hello              { gameId }
+parent → child:  arcade:welcome            { caps, peerStatus, peers, settings, state }
                                            // caps: capability flags (absent ⇒ []); peers
                                            // entries: { deviceId, name, status, direct };
                                            // state: storage-bridge snapshot (own keys +

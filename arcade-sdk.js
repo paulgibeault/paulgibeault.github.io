@@ -1461,10 +1461,11 @@
         try {
             // Opaque-origin frames can't name themselves as a targetOrigin
             // ('null' is not a valid target) — and the hello carries nothing
-            // sensitive (gameId + version), so '*' is fine there. Direct mode
-            // keeps the same-origin guarantee.
+            // sensitive (just the gameId), so '*' is fine there. Direct mode
+            // keeps the same-origin guarantee. No version field: launcher↔SDK
+            // feature negotiation is welcome.caps, the only compat contract.
             window.parent.postMessage(
-                { type: 'arcade:hello', gameId: gameId, version: VERSION },
+                { type: 'arcade:hello', gameId: gameId },
                 storageMode === 'bridged' ? '*' : window.location.origin
             );
         } catch (e) {}
@@ -1697,9 +1698,10 @@
     // ─── Sync (Arcade.sync, #28) ────────────────────────────────────
     // Multi-device state replication over P2P (LWW). The SDK only writes the
     // per-app _sync opt-in list and exposes the conflict listener here — the
-    // launcher-side sync engine (not yet present) does the actual replication,
-    // so until that lands this is inert: writing the sidecar list has no
-    // other effect.
+    // launcher-side engine (arcade-sync.js, wired in index.html) does the
+    // actual replication. Standalone (unframed) visits have no engine, so
+    // there the sidecar list is recorded but nothing replicates until the
+    // game next runs inside the launcher.
     var syncApi = {
         // enable() → sync every current & future own key ('*'); enable(['k1','k2']) → those keys.
         enable: function (keys) {
