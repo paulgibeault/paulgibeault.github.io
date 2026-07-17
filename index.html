@@ -566,24 +566,40 @@
         // gameViewController
         viewGame: null,
         viewLauncher: null,
-        // platformController
+        // poolHost / routerHost: launcher-owned glue platformController hands
+        // to the extracted iframe pool (arcade-pool.js) and postMessage
+        // router (arcade-router.js); pool / router: their APIs, wired by the
+        // POOL + ROUTER module block — deliberately the FIRST module block,
+        // so showGame exists before the catalog block's deep-link path runs.
+        poolHost: null,
+        routerHost: null,
+        pool: null,
+        router: null,
+        // filled by the POOL + ROUTER module block from the pool/router APIs
+        // (previously platformController's own closures — same names, same
+        // semantics, still null-checked by their classic-script consumers)
         hideGameView: null,
         applyPoolCap: null,
         showGame: null,
+        // platformController
         openMultiplayerPanel: null,
         loadP2P: null,
         broadcastSettings: null,
         p2p: null,
         // storageHost: launcher-owned glue handed to the extracted storage
-        // modules; storage: the bridge dispatch handles the router delegates to
-        // (see arcade-storage-bridge.js / arcade-save.js, wired in the module
-        // block after this IIFE runs — null until then, router queues meanwhile).
+        // modules (built by the POOL + ROUTER block, which owns the pool
+        // capabilities it carries); storage: the bridge dispatch handles the
+        // router delegates to (see arcade-storage-bridge.js / arcade-save.js,
+        // wired in the STORAGE MODULES block — null until then, router
+        // queues meanwhile).
         storageHost: null,
         storage: null,
         // uiHost: launcher-owned glue for the UI chrome bridge (#35); ui: its
         // dispatch handles (arcade-ui-bridge.js, same module-block wiring and
         // router-queue story as storage). requestQuit: the quit button's
-        // veto round-trip — null-checked by the gameViewController handler.
+        // veto round-trip (lives in arcade-router.js with the rest of the
+        // beforeQuit round-trip) — null-checked by the gameViewController
+        // handler.
         uiHost: null,
         ui: null,
         requestQuit: null,
@@ -818,15 +834,18 @@
     })();
 
     // ==========================================
-    // PLATFORM CONTROLLER — iframe pool, postMessage protocol, save/load
+    // PLATFORM CONTROLLER — P2P bridge glue, settings, toast/dialog/watermark.
+    // The iframe pool + eviction now live in arcade-pool.js and the
+    // postMessage router (trust boundary, per-type dispatch, quit veto,
+    // stateSnapshotFor) in arcade-router.js — both wired by the POOL +
+    // ROUTER module block right below this script, via the poolHost /
+    // routerHost glue built at the bottom of this IIFE. Everything here
+    // that needs a pool function reads it lazily through window.__arcade
+    // (null-checked): those paths only run on user interaction or P2P
+    // events, long after the deferred module block has wired the slots —
+    // and before then there are no frames to reach anyway.
     // ==========================================
     (function platformController() {
-        // KEY_PREFIX stays here for stateSnapshotFor (below); the key
-        // predicates, size caps, save/import constants, and all the storage
-        // allowlists now live in arcade-storage-core.js — the single audit
-        // surface shared by the storage bridge and save/import modules.
-        const KEY_PREFIX = 'arcade.v1.';
-
         // Dev-mode tracing — when arcade.v1._meta.dev === 'true' (set by ?dev=1
         // on either launcher or game), log every postMessage in/out. Same flag
         // honored by the SDK, so toggling on either side lights up both.
@@ -844,225 +863,30 @@
         };
 
         const launcherGrid = document.getElementById('launcher-grid-container');
-        const iframeHost = document.getElementById('iframe-host');
-        const topbarTitle = document.getElementById('game-topbar-title');
         const btnSave = document.getElementById('btn-save');
         const btnLoad = document.getElementById('btn-load');
         const fileLoad = document.getElementById('file-load');
         const toast = document.getElementById('launcher-toast');
-        const viewGame = window.__arcade.viewGame;
         const viewLauncher = window.__arcade.viewLauncher;
 
-        // ---- iframe pool ----
-        // Map insertion order = recency; re-inserting on showGame promotes to MRU.
-        // Pool is bounded by readPoolCap(): user-tunable 1..gameCount via the
-        // launcher menu (gameCount = launcher buttons; cap=gameCount disables
-        // eviction since pool size can't exceed it). Eviction zeroes the iframe
-        // (about:blank) and removes it from the DOM, freeing the JS heap, audio
-        // context, and WebGL context. Persistent state lives in
-        // arcade.v1.<gameId>.* localStorage and survives.
-        const pool = new Map(); // gameId -> { iframe, name }
-        // Games that completed the arcade:hello handshake — i.e. games whose
-        // SDK is actually listening. Presence announcements to the remote
-        // launcher are made only for these.
-        const helloedGames = new Set();
-        let activeGameId = null;
-        const POOL_CAP_DEFAULT = 2;
-
-        function readPoolCap() {
-            const n = Math.floor(Number(readGlobal('poolCap', POOL_CAP_DEFAULT)));
-            return isFinite(n) && n >= 1 ? n : POOL_CAP_DEFAULT;
+        // ---- iframe pool (extracted) ----
+        // The pool itself — mount/evict/retire-grace/overlay/fragment — lives
+        // in arcade-pool.js, wired by the POOL + ROUTER module block below,
+        // which also fills window.__arcade.{showGame,hideGameView,
+        // applyPoolCap,onGameHelloed}. The P2P glue in this closure reaches
+        // frames through these lazy, null-checked reads: they only ever run
+        // on P2P events or user clicks, after the module block has wired the
+        // slot — and before then there are no mounted frames to reach.
+        const framePool = () => window.__arcade.pool;
+        function postToIframe(gameId, msg) {
+            const fp = framePool();
+            if (fp) fp.postToIframe(gameId, msg);
+        }
+        function broadcast(msg) {
+            const fp = framePool();
+            if (fp) fp.broadcast(msg);
         }
 
-        function evictLRU(opts) {
-            const cap = readPoolCap();
-            // makingRoom = caller is about to add a new entry, so target size
-            // is cap - 1. On a settings change with no insert pending, target
-            // is the cap itself.
-            const target = (opts && opts.makingRoom) ? cap - 1 : cap;
-            // The currently-active game is protected — except when launching
-            // a NEW game that is about to take over as active. In that case
-            // the caller passes newActiveId so the *outgoing* active is
-            // evictable (otherwise cap=1 launches would leak a stale entry).
-            const protectedId = (opts && opts.newActiveId) || activeGameId;
-            while (pool.size > target) {
-                let lruId = null;
-                for (const gid of pool.keys()) {
-                    if (gid !== protectedId) { lruId = gid; break; }
-                }
-                if (!lruId) return;  // only the protected entry remains — never evict it
-                const entry = pool.get(lruId);
-                // Flush hint, then a GRACE before the destructive teardown
-                // (#41): postMessage is async, so navigating to about:blank
-                // in the same tick used to guarantee the suspend hint was
-                // never processed. The frame gets RETIRE_GRACE_MS to run its
-                // suspend handler and flush through the storage bridge —
-                // `retiring` keeps it addressable to the message router
-                // (pool membership is the router's trust test) while the
-                // pool slot itself frees synchronously, so cap math and an
-                // instant same-game relaunch behave exactly as before.
-                postToIframe(lruId, { type: 'arcade:lifecycle.suspend' });
-                const retiree = { gameId: lruId, entry };
-                retiring.add(retiree);
-                setTimeout(() => {
-                    retiring.delete(retiree);
-                    try { entry.iframe.src = 'about:blank'; } catch (e) {}
-                    entry.iframe.remove();
-                }, RETIRE_GRACE_MS);
-                pool.delete(lruId);
-                helloedGames.delete(lruId);
-                // UI bridge state (quit hook) dies with the frame — a fresh
-                // mount re-registers after its handshake.
-                if (window.__arcade.ui) window.__arcade.ui.clearGame(lruId);
-            }
-        }
-        // Evicted-but-flushing frames: still routable for the grace window.
-        const RETIRE_GRACE_MS = 250;
-        const retiring = new Set(); // { gameId, entry }
-
-        function ensureIframe(gameId, src, name) {
-            let entry = pool.get(gameId);
-            if (entry) return entry;
-            evictLRU({ makingRoom: true, newActiveId: gameId });
-            const iframe = document.createElement('iframe');
-            iframe.src = src;
-            iframe.dataset.gameId = gameId;
-            // No allow-same-origin: games run with an OPAQUE origin, so they
-            // cannot open ANY of this origin's storage — other apps' state,
-            // and above all the P2P key stores (qrp2p-identity /
-            // qrp2p-rendezvous, non-extractable but usable). This is the
-            // first-party trust boundary made real (issue #43); their own
-            // persistence rides the storage bridge below instead.
-            iframe.setAttribute('sandbox', 'allow-scripts allow-downloads');
-            // Opaque origin no longer matches the default 'self' permissions-
-            // policy allowlists — grant the game-relevant features explicitly.
-            // clipboard-write lets Arcade.ui.copy() work IN-frame (#35): the
-            // launcher-side route fails Chrome's document-focus rule, since
-            // during a game click it's the iframe that holds focus.
-            iframe.setAttribute('allow', 'autoplay; fullscreen; gamepad; screen-wake-lock; clipboard-write');
-            iframe.setAttribute('allowfullscreen', '');
-            iframe.setAttribute('title', name);
-            iframe.hidden = true;
-            iframeHost.appendChild(iframe);
-            entry = { iframe, name, src };
-            pool.set(gameId, entry);
-            return entry;
-        }
-
-        // Deep links (#36): keep the URL fragment mirroring the active game so
-        // a copied/bookmarked URL reopens straight into it. replaceState, not
-        // location.hash — no history spam, no hashchange feedback loop. The
-        // boot-time parse lives in the catalog module block (it needs the
-        // id → url map, and only ids from the catalog are ever honored).
-        function setAppFragment(gameId) {
-            try {
-                const base = location.pathname + location.search;
-                history.replaceState(null, '', gameId ? base + '#app=' + encodeURIComponent(gameId) : base);
-            } catch (e) {}
-        }
-
-        function showGame(gameId, src, name) {
-            const entry = ensureIframe(gameId, src, name);
-            // Promote to MRU by re-inserting at the end of the Map's order.
-            if (pool.has(gameId) && [...pool.keys()].pop() !== gameId) {
-                pool.delete(gameId);
-                pool.set(gameId, entry);
-            }
-            const previousGameId = activeGameId;
-            for (const [gid, e] of pool) {
-                e.iframe.hidden = (gid !== gameId);
-            }
-            activeGameId = gameId;
-            // A pooled frame keeps its Arcade.ui.setTitle title across
-            // launcher round-trips; eviction (fresh entry) naturally resets.
-            topbarTitle.textContent = entry.customTitle || name || "Paul's Arcade";
-
-            document.body.classList.add('app-in-game');
-            viewGame.classList.remove('hidden');
-            // Show a loading veil until this game's SDK handshake lands (or a
-            // timeout flips to an error card) — a 404 or offline launch is
-            // otherwise just a black frame with a quit button.
-            beginGameLoad(gameId, name);
-
-            // Lifecycle: suspend prior game (if any) and resume the new one.
-            if (previousGameId && previousGameId !== gameId) {
-                postToIframe(previousGameId, { type: 'arcade:lifecycle.suspend' });
-            }
-            postToIframe(gameId, { type: 'arcade:lifecycle.resume' });
-
-            // Defer focus so the iframe receives keyboard input.
-            setTimeout(() => { try { entry.iframe.focus(); } catch (e) {} }, 0);
-            setAppFragment(gameId);
-        }
-
-        function hideGameView() {
-            viewGame.classList.add('hidden');
-            document.body.classList.remove('app-in-game');
-            hideGameOverlays();
-            // Iframes stay mounted (hidden) — instant relaunch + state preserved.
-            const previousGameId = activeGameId;
-            for (const e of pool.values()) e.iframe.hidden = true;
-            activeGameId = null;
-            if (previousGameId) {
-                postToIframe(previousGameId, { type: 'arcade:lifecycle.suspend' });
-            }
-            setAppFragment(null);
-        }
-
-        // ---- game loading / error overlay (G-ux-1) ----
-        const gameLoading = document.getElementById('game-loading');
-        const gameLoadingMsg = document.getElementById('game-loading-msg');
-        const gameError = document.getElementById('game-error');
-        const gameErrorMsg = document.getElementById('game-error-msg');
-        let gameLoadTimer = null;
-        const GAME_LOAD_TIMEOUT_MS = 12000;
-        function showGameOverlay(which) {
-            gameLoading.classList.toggle('hidden', which !== 'loading');
-            gameError.classList.toggle('hidden', which !== 'error');
-        }
-        function hideGameOverlays() {
-            showGameOverlay(null);
-            if (gameLoadTimer) { clearTimeout(gameLoadTimer); gameLoadTimer = null; }
-        }
-        function beginGameLoad(gameId, name) {
-            // A warm, already-handshaken pooled frame needs no veil (instant relaunch).
-            if (helloedGames.has(gameId)) { hideGameOverlays(); return; }
-            gameLoadingMsg.textContent = 'Loading ' + (name || 'game') + '…';
-            showGameOverlay('loading');
-            if (gameLoadTimer) clearTimeout(gameLoadTimer);
-            gameLoadTimer = setTimeout(() => {
-                gameLoadTimer = null;
-                if (activeGameId === gameId && !helloedGames.has(gameId)) {
-                    gameErrorMsg.textContent = (name || 'This game') + " didn't load.";
-                    showGameOverlay('error');
-                }
-            }, GAME_LOAD_TIMEOUT_MS);
-        }
-        // Called from the arcade:hello handler once a game's SDK checks in.
-        function onGameHelloed(gameId) {
-            if (gameId === activeGameId) hideGameOverlays();
-        }
-        window.__arcade.onGameHelloed = onGameHelloed;
-        document.getElementById('game-error-retry').addEventListener('click', () => {
-            const gid = activeGameId;
-            const entry = gid && pool.get(gid);
-            if (!entry) return;
-            helloedGames.delete(gid);
-            // The reloaded document starts from scratch — stale quit hook and
-            // custom title must not survive it.
-            if (window.__arcade.ui) window.__arcade.ui.clearGame(gid);
-            entry.customTitle = '';
-            beginGameLoad(gid, entry.name);
-            try { entry.iframe.src = entry.src || entry.iframe.src; } catch (e) {}
-        });
-        document.getElementById('game-error-back').addEventListener('click', () => {
-            if (window.__arcade.closeLauncherMenu) window.__arcade.closeLauncherMenu();
-            hideGameView();
-        });
-
-        window.__arcade.hideGameView = hideGameView;
-        window.__arcade.applyPoolCap = evictLRU;
-        window.__arcade.showGame = showGame; // deep links + acceptance tests
 
         // ---- multiplayer bridge (lazy) ----
         // The P2P transport (in-repo, see p2p/README.md) loads on
@@ -1071,14 +895,8 @@
         // talk only to the SDK; this is the launcher end of arcade:peer.*.
         let p2pBridge = null;
         let p2pLoadPromise = null;
-        // Capability flags shipped in arcade:welcome. Games feature-detect
-        // via Arcade.peer.caps() instead of version checks — additive
-        // launcher features never bump the protocol version. storage.bridge:
-        // this launcher hosts the opaque-frame storage bridge (state.write /
-        // store.op / files.op / storage.op + welcome.state snapshot).
-        // ui.bridge: this launcher services arcade:ui.op (confirm/prompt/
-        // setTitle/quitHook/openFile/share — see arcade-ui-bridge.js).
-        const ARCADE_PEER_CAPS = ['peer.sendTo', 'peer.roster', 'peer.meta', 'storage.bridge', 'ui.bridge'];
+        // The arcade:welcome capability flags (ARCADE_PEER_CAPS) ship from
+        // the hello handler, which now lives in arcade-router.js.
         function loadP2P() {
             if (p2pBridge) return Promise.resolve(p2pBridge);
             if (p2pLoadPromise) return p2pLoadPromise;
@@ -1124,8 +942,11 @@
                         }
                         // Tell the other launcher which handshaken games are
                         // mounted here, so its games get a ready signal.
-                        for (const gid of pool.keys()) {
-                            if (helloedGames.has(gid)) ArcadeP2P.announceGame(gid);
+                        const fp = framePool();
+                        if (fp) {
+                            for (const gid of fp.mountedGameIds()) {
+                                if (fp.isHelloed(gid)) ArcadeP2P.announceGame(gid);
+                            }
                         }
                     }
                     // 'interrupted' intentionally shows no toast — the watermark
@@ -1142,7 +963,8 @@
                     // If we do too, hand that game a ready event — and answer
                     // a first announcement with an ack so the remote's game
                     // learns about us without another round.
-                    if (!pool.has(gameId) || !helloedGames.has(gameId)) return;
+                    const fp = framePool();
+                    if (!fp || !fp.has(gameId) || !fp.isHelloed(gameId)) return;
                     postToIframe(gameId, { type: 'arcade:peer.ready', deviceId, name });
                     if (kind === 'presence') ArcadeP2P.announceGame(gameId, true);
                 });
@@ -1254,10 +1076,11 @@
                     // promise something the user can't go see. Reading the title
                     // from the pool entry (never a wire-built selector) also closes
                     // the querySelector-injection / toast-spoof surface.
-                    const entry = pool.get(targetGameId);
-                    if (!entry || !helloedGames.has(targetGameId)) return;
+                    const fp = framePool();
+                    const entry = fp && fp.getGameInfo(targetGameId);
+                    if (!entry || !fp.isHelloed(targetGameId)) return;
                     // Suppress when you're already looking at that game.
-                    if (targetGameId === activeGameId) return;
+                    if (targetGameId === fp.getActiveGameId()) return;
                     const key = (fromDeviceId || 'peer') + '|' + targetGameId;
                     const now = Date.now();
                     const last = msgToastThrottle.get(key) || 0;
@@ -1388,266 +1211,17 @@
             const nameEl = btn.querySelector('.launcher-btn__name');
             const name = nameEl ? nameEl.textContent.trim() : '';
             if (!href) return;
-            showGame(btn.dataset.gameId, href, name);
+            // Grid buttons only exist once the catalog module renders them,
+            // which happens after the POOL + ROUTER block wires showGame —
+            // the null-check is belt and braces.
+            if (window.__arcade.showGame) window.__arcade.showGame(btn.dataset.gameId, href, name);
         });
 
-        // ---- postMessage protocol ----
-        function findPoolEntryForSource(src) {
-            for (const [gid, entry] of pool) {
-                if (entry.iframe.contentWindow === src) return [gid, entry];
-            }
-            // Evicted frames stay routable during their retire grace so a
-            // suspend-time flush lands (matched by contentWindow identity —
-            // a relaunched same-gameId frame is a different window).
-            for (const r of retiring) {
-                if (r.entry.iframe.contentWindow === src) return [r.gameId, r.entry];
-            }
-            return [null, null];
-        }
-
-        function postToIframe(gameId, msg) {
-            const entry = pool.get(gameId);
-            if (!entry || !entry.iframe.contentWindow) return;
-            if (devModeOn()) console.debug('[Arcade launcher → ' + gameId + ']', msg);
-            // '*' because an opaque origin can't be named as a targetOrigin.
-            // The recipient is a frame WE created and sandboxed; the residual
-            // (a frame that self-navigated away receiving game-scoped
-            // messages) requires code execution inside the frame — the same
-            // capability the bridge already grants that gameId.
-            entry.iframe.contentWindow.postMessage(msg, '*');
-        }
-
-        function broadcast(msg) {
-            for (const [gid] of pool) postToIframe(gid, msg);
-        }
-
-        // The storage bridge (opaque-frame custodian: ls-proxy, state.write,
-        // store.op, files.op, storage.op) now lives in arcade-storage-bridge.js;
-        // the router below delegates authenticated messages to it via
-        // window.__arcade.storage. stateSnapshotFor stays here because the
-        // arcade:hello → arcade:welcome path needs it synchronously.
-        function stateSnapshotFor(gameId) {
-            const out = {};
-            const own = KEY_PREFIX + gameId + '.';
-            const glob = KEY_PREFIX + 'global.';
-            // Shared read-only literals: the device identity meta the SDK's
-            // peer.self() reports, and the dev-tracing flag.
-            const literals = [
-                KEY_PREFIX + '_meta.deviceId',
-                KEY_PREFIX + '_meta.deviceName',
-                KEY_PREFIX + '_meta.dev'
-            ];
-            try {
-                for (let i = 0; i < localStorage.length; i++) {
-                    const k = localStorage.key(i);
-                    if (!k) continue;
-                    if (k.startsWith(own) || k.startsWith(glob) || literals.includes(k)) {
-                        const v = localStorage.getItem(k);
-                        if (typeof v === 'string') out[k] = v;
-                    }
-                }
-            } catch (e) {}
-            return out;
-        }
-
-        // Storage-bridge delegation. The router owns the trust boundary and
-        // hands each already-authenticated storage message to the bridge module
-        // (window.__arcade.storage, wired after this IIFE runs). A message that
-        // arrives before the module loads is queued and replayed on init —
-        // dropping one would hang a game whose ls-proxy shim blocks boot on the
-        // 'dump' reply. In practice no game auto-mounts at parse time, so the
-        // queue is defence-in-depth, not a hot path.
-        const pendingStorageMsgs = [];
-        function dispatchStorageMessage(gameId, data, source, origin) {
-            const S = window.__arcade.storage;
-            if (!S) { pendingStorageMsgs.push([gameId, data, source, origin]); return; }
-            switch (data.type) {
-                case 'ls-proxy-request': S.lsProxy(gameId, data, source, origin); break;
-                case 'arcade:state.write': S.stateWrite(gameId, data); break;
-                case 'arcade:store.op': S.storeOp(gameId, data); break;
-                case 'arcade:files.op': S.filesOp(gameId, data); break;
-                case 'arcade:storage.op': S.storageOp(gameId, data); break;
-            }
-        }
-        function replayPendingStorageMessages() {
-            while (pendingStorageMsgs.length) dispatchStorageMessage(...pendingStorageMsgs.shift());
-        }
-
-        // UI-bridge delegation — same trust-boundary/queue story as storage
-        // above: the router authenticates, arcade-ui-bridge.js services. A
-        // dropped pre-module message would strand a game's dialog promise
-        // (its RPC ids only resolve on reply), hence the replay queue.
-        const pendingUiMsgs = [];
-        function dispatchUiMessage(gameId, data) {
-            const U = window.__arcade.ui;
-            if (!U) { pendingUiMsgs.push([gameId, data]); return; }
-            U.uiOp(gameId, data);
-        }
-        function replayPendingUiMessages() {
-            while (pendingUiMsgs.length) dispatchUiMessage(...pendingUiMsgs.shift());
-        }
-
-        // Quit veto round-trip (#35). Only ever asked of the ACTIVE game, and
-        // only when its SDK registered a hook — everyone else resolves true
-        // synchronously so the quit button stays instant. The timeout is the
-        // no-trap guarantee: a hung/crashed frame forfeits its veto.
-        const BEFORE_QUIT_TIMEOUT_MS = 1500;
-        let beforeQuitSeq = 0;
-        let beforeQuitPending = null; // { id, done }
-        function requestQuit() {
-            const gid = activeGameId;
-            const ui = window.__arcade.ui;
-            if (!gid || !ui || !ui.hasQuitHook(gid) || !helloedGames.has(gid)) {
-                return Promise.resolve(true);
-            }
-            // A second click while a round-trip is in flight is swallowed —
-            // the pending one resolves within the timeout either way.
-            if (beforeQuitPending) return Promise.resolve(false);
-            return new Promise((resolve) => {
-                const id = 'q' + (++beforeQuitSeq);
-                const timer = setTimeout(() => done(true), BEFORE_QUIT_TIMEOUT_MS);
-                function done(allow) {
-                    if (!beforeQuitPending || beforeQuitPending.id !== id) return;
-                    beforeQuitPending = null;
-                    clearTimeout(timer);
-                    resolve(allow);
-                }
-                beforeQuitPending = { id: id, done: done };
-                postToIframe(gid, { type: 'arcade:ui.beforeQuit', id: id });
-            });
-        }
-        window.__arcade.requestQuit = requestQuit;
-
-        window.addEventListener('message', (e) => {
-            // Two guards (launcher-specific postMessage boundary — the WIRE
-            // envelope shapes live in arcade-envelope.js, see #59).
-            // Source: only iframes we mounted via ensureIframe
-            // can match. Origin: sandboxed-without-allow-same-origin frames
-            // always report the literal string 'null' — anything else means
-            // a non-sandboxed document somehow speaks from a pooled frame
-            // (should be impossible; reject on principle). Note 'null' no
-            // longer discriminates a frame that navigated ITSELF elsewhere
-            // (both are opaque) — that needs code exec inside the frame,
-            // which already carries exactly the bridge powers of that
-            // gameId, nothing more.
-            const [gameId, entry] = findPoolEntryForSource(e.source);
-            if (!gameId) return;
-            if (e.origin !== 'null') return;
-            const data = e.data;
-            if (!data || typeof data !== 'object') return;
-            const t = data.type;
-            if (typeof t !== 'string') return;
-            if (devModeOn()) console.debug('[Arcade launcher ← ' + gameId + ']', data);
-
-            if (t === 'ls-proxy-request') {
-                dispatchStorageMessage(gameId, data, e.source, e.origin);
-                return;
-            }
-
-            if (t.indexOf('arcade:') !== 0) return;
-            switch (t) {
-                case 'arcade:hello':
-                    // Announce ourselves. peerStatus reflects the live bridge
-                    // when loaded (a game mounted mid-session must see
-                    // 'connected' immediately). Settings ride along so the
-                    // game can apply them before first paint; `peers` seeds
-                    // the game's roster with already-connected devices.
-                    helloedGames.add(gameId);
-                    // The game's SDK is alive — clear any loading veil/error card.
-                    if (window.__arcade.onGameHelloed) window.__arcade.onGameHelloed(gameId);
-                    postToIframe(gameId, {
-                        type: 'arcade:welcome',
-                        version: 2,
-                        caps: ARCADE_PEER_CAPS,
-                        peerStatus: p2pBridge ? p2pBridge.status() : 'idle',
-                        peers: p2pBridge ? p2pBridge.connectedPeers() : [],
-                        settings: currentSettings(),
-                        // Opaque frames can't read localStorage — this seeds
-                        // the SDK's state cache (its keys, global.*, and the
-                        // shared _meta identity/dev literals).
-                        state: stateSnapshotFor(gameId)
-                    });
-                    // If this game is the active one, also send a resume hint
-                    // (the game's SDK may have missed the showGame() resume if
-                    // it handshook after the iframe was already visible).
-                    if (gameId === activeGameId) {
-                        postToIframe(gameId, { type: 'arcade:lifecycle.resume' });
-                    }
-                    // Presence: tell the remote launcher this game is now
-                    // listening (no-op unless a session is live).
-                    if (p2pBridge) p2pBridge.announceGame(gameId);
-                    break;
-                case 'arcade:peer.send':
-                    // Wrap in the launcher envelope and ship over the data
-                    // channel. The SDK already gates on status==='connected',
-                    // so a null bridge here just means a stray message — drop.
-                    if (p2pBridge) {
-                        // A frame that carries a `to` is targeted. If the
-                        // value is malformed, refuse outright — coercing to
-                        // undefined would silently promote a PRIVATE frame
-                        // to a broadcast at the iframe trust boundary (the
-                        // SDK validates too, but the launcher cannot assume
-                        // the iframe runs our SDK).
-                        if ('to' in data && typeof data.to !== 'string') break;
-                        p2pBridge.send(gameId, data.payload, data.to);
-                        // While a repair episode runs, every queued send comes
-                        // back with a fresh queue-depth reading so the game
-                        // can see how close it is to the replay cap.
-                        if (p2pBridge.status() === 'interrupted') {
-                            postToIframe(gameId, { type: 'arcade:peer.queue', ...p2pBridge.queueSnapshot() });
-                        }
-                    }
-                    break;
-                case 'arcade:state.write':
-                    // Bridged localStorage write-through. The KEY names the
-                    // whole permission: this frame's own namespace, the
-                    // shared global.* namespace, or the _meta.dev literal —
-                    // never another app's namespace, never other _meta.*
-                    // (device identity stays read-only), and structurally
-                    // never the qrp2p-* key stores.
-                    dispatchStorageMessage(gameId, data, e.source, e.origin);
-                    break;
-                case 'arcade:store.op':
-                    // Async — replies with arcade:bridge.result when done.
-                    dispatchStorageMessage(gameId, data, e.source, e.origin);
-                    break;
-                case 'arcade:files.op':
-                    dispatchStorageMessage(gameId, data, e.source, e.origin);
-                    break;
-                case 'arcade:storage.op':
-                    dispatchStorageMessage(gameId, data, e.source, e.origin);
-                    break;
-                case 'arcade:ui.op':
-                    // Launcher-mediated UI chrome (#35). Shape rules live in
-                    // arcade-envelope.js (validateUiOp); the bridge module
-                    // answers RPC ops via arcade:bridge.result.
-                    dispatchUiMessage(gameId, data);
-                    break;
-                case 'arcade:ui.beforeQuit.result':
-                    // Only the active game's in-flight veto counts — a
-                    // background frame echoing ids must not release (or
-                    // deny) someone else's quit.
-                    if (beforeQuitPending && gameId === activeGameId
-                            && data.id === beforeQuitPending.id) {
-                        beforeQuitPending.done(data.allow !== false);
-                    }
-                    break;
-                case 'arcade:ui.toast': {
-                    // Game asked the launcher to display a toast. Shape rules
-                    // live in arcade-envelope.js (validateToast), published on
-                    // window.__arcade.envelope by the STORAGE MODULES block.
-                    const envelope = window.__arcade.envelope;
-                    const toast = envelope && envelope.validateToast(data);
-                    if (toast) {
-                        showToast(toast.message, {
-                            error: toast.kind === 'error',
-                            duration: toast.duration
-                        });
-                    }
-                    break;
-                }
-            }
-        });
+        // ---- postMessage protocol (extracted) ----
+        // The single authenticated 'message' listener — source-identity +
+        // opaque-origin trust test, per-type dispatch, storage/ui replay
+        // queues, the quit-veto round-trip, and stateSnapshotFor — lives in
+        // arcade-router.js, wired with the routerHost glue built below.
 
         // Read a JSON-encoded global setting; coerce / default sensibly.
         function readGlobal(key, fallback) {
@@ -1822,47 +1396,36 @@
         }
         window.__arcade.setNetworkActivity = setNetworkActivity;
 
-        // Launcher-owned glue handed to the extracted storage modules. They
-        // receive exactly these capabilities — nothing reaches into the pool or
-        // the p2p bridge directly. stateSnapshotFor stays local (the hello path
-        // needs it synchronously); the modules only call it to reseed frames
-        // after an import.
-        window.__arcade.storageHost = {
-            postToIframe: postToIframe,
-            listMountedGameIds: () => [...pool.keys()],
-            stateSnapshotFor: stateSnapshotFor,
-            showToast: showToast,
-            dialog: (opts) => window.__arcade.dialog(opts),
-            broadcastSettings: () => window.__arcade.broadcastSettings(),
-            replayPendingStorageMessages: replayPendingStorageMessages,
-            // Sync engine hooks (arcade-sync.js) — no-ops until module block D
-            // wires window.__arcade.sync.
-            onStateWritten: (gameId, key, value) => { if (window.__arcade.sync) window.__arcade.sync.noteLocalWrite(key, value); },
-            onImportCommitted: (keys) => { if (window.__arcade.sync) window.__arcade.sync.noteImportCommitted(keys); }
+        // Launcher-owned glue handed to the extracted iframe pool
+        // (arcade-pool.js). The pool receives exactly these capabilities —
+        // nothing reaches back into this closure's p2p bridge. Consumed by
+        // the POOL + ROUTER module block right after this script, which also
+        // builds storageHost/uiHost there (their pool-touching members need
+        // the pool API in hand).
+        window.__arcade.poolHost = {
+            devModeOn: devModeOn,
+            readGlobal: readGlobal,
+            // UI bridge state (quit hook, custom title) dies with a frame —
+            // a fresh mount re-registers after its handshake. Lazy read: the
+            // ui bridge module loads after the pool.
+            clearGameUi: (gid) => { if (window.__arcade.ui) window.__arcade.ui.clearGame(gid); },
+            closeLauncherMenu: () => { if (window.__arcade.closeLauncherMenu) window.__arcade.closeLauncherMenu(); }
         };
 
-        // An app-set topbar title (Arcade.ui.setTitle). Stored on the pool
-        // entry so it survives launcher round-trips while the frame is warm;
-        // empty string means "back to the catalog name".
-        function setGameTitle(gameId, title) {
-            const entry = pool.get(gameId);
-            if (!entry) return;
-            entry.customTitle = title || '';
-            if (gameId === activeGameId) {
-                topbarTitle.textContent = entry.customTitle || entry.name || "Paul's Arcade";
-            }
-        }
-
-        // Launcher-owned glue handed to the UI chrome bridge (#35) — same
-        // capability-injection contract as storageHost above.
-        window.__arcade.uiHost = {
-            postToIframe: postToIframe,
-            dialog: (opts) => window.__arcade.dialog(opts),
+        // Launcher-owned glue handed to the extracted message router
+        // (arcade-router.js) — same capability-injection contract as
+        // poolHost above. The get* handles read live so the router sees the
+        // bridge/storage/ui modules the moment they load (null until then:
+        // the router queues storage/ui messages and drops peer/toast ones,
+        // exactly as the old inline switch did).
+        window.__arcade.routerHost = {
+            devModeOn: devModeOn,
+            currentSettings: currentSettings,
             showToast: showToast,
-            getGameName: (gid) => { const e = pool.get(gid); return e ? (e.name || '') : ''; },
-            getActiveGameId: () => activeGameId,
-            setGameTitle: setGameTitle,
-            replayPendingUiMessages: replayPendingUiMessages
+            getP2P: () => p2pBridge,
+            getStorage: () => window.__arcade.storage,
+            getUi: () => window.__arcade.ui,
+            getEnvelope: () => window.__arcade.envelope
         };
     })();
 
@@ -1926,6 +1489,70 @@
             hideInstallUI();
         });
     })();
+</script>
+
+<script type="module">
+    // ==========================================
+    // POOL + ROUTER — wire the extracted iframe pool (arcade-pool.js) and the
+    // postMessage router (arcade-router.js) to the launcher via the poolHost/
+    // routerHost glue the classic script built above. ORDER MATTERS: this is
+    // deliberately the FIRST module block. Inline modules execute in document
+    // order, so window.__arcade.showGame is guaranteed set before the CATALOG
+    // block below even starts — its #app= deep-link path calls showGame as
+    // soon as catalog.json resolves. It also builds storageHost/uiHost (the
+    // members that touch the pool need the pool API in hand), which the
+    // STORAGE MODULES block consumes further down. The handshake path itself
+    // (game frame → arcade:hello → welcome) can only start after a user
+    // launches a game, so module-deferred wiring changes no behavior.
+    // ==========================================
+    import { initIframePool } from './arcade-pool.js';
+    import { initMessageRouter } from './arcade-router.js';
+
+    const pool = initIframePool(window.__arcade.poolHost);
+    window.__arcade.pool = pool;
+    // Same slots platformController used to fill, same semantics — classic-
+    // script consumers (quit button, pool-cap input, grid clicks) read them
+    // lazily and null-check.
+    window.__arcade.showGame = pool.showGame; // deep links + acceptance tests
+    window.__arcade.hideGameView = pool.hideGameView;
+    window.__arcade.applyPoolCap = pool.applyPoolCap;
+    window.__arcade.onGameHelloed = pool.onGameHelloed;
+
+    const router = initMessageRouter(
+        Object.assign({ pool }, window.__arcade.routerHost));
+    window.__arcade.router = router;
+    window.__arcade.requestQuit = router.requestQuit;
+
+    // Launcher-owned glue handed to the extracted storage modules. They
+    // receive exactly these capabilities — nothing reaches into the pool or
+    // the p2p bridge directly. stateSnapshotFor lives on the router (the
+    // hello path needs it synchronously); the modules only call it to reseed
+    // frames after an import.
+    window.__arcade.storageHost = {
+        postToIframe: pool.postToIframe,
+        listMountedGameIds: pool.mountedGameIds,
+        stateSnapshotFor: router.stateSnapshotFor,
+        showToast: window.__arcade.showToast,
+        dialog: (opts) => window.__arcade.dialog(opts),
+        broadcastSettings: () => window.__arcade.broadcastSettings(),
+        replayPendingStorageMessages: router.replayPendingStorageMessages,
+        // Sync engine hooks (arcade-sync.js) — no-ops until module block D
+        // wires window.__arcade.sync.
+        onStateWritten: (gameId, key, value) => { if (window.__arcade.sync) window.__arcade.sync.noteLocalWrite(key, value); },
+        onImportCommitted: (keys) => { if (window.__arcade.sync) window.__arcade.sync.noteImportCommitted(keys); }
+    };
+
+    // Launcher-owned glue handed to the UI chrome bridge (#35) — same
+    // capability-injection contract as storageHost above.
+    window.__arcade.uiHost = {
+        postToIframe: pool.postToIframe,
+        dialog: (opts) => window.__arcade.dialog(opts),
+        showToast: window.__arcade.showToast,
+        getGameName: pool.getGameName,
+        getActiveGameId: pool.getActiveGameId,
+        setGameTitle: pool.setGameTitle,
+        replayPendingUiMessages: router.replayPendingUiMessages
+    };
 </script>
 
 <script type="module">

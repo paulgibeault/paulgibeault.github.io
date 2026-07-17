@@ -10,6 +10,8 @@ const ASSETS_TO_CACHE = [
   './manifest.json',
   './arcade-sdk.js',
   './arcade-p2p.js',
+  './arcade-pool.js',
+  './arcade-router.js',
   './arcade-known-peers.js',
   './arcade-diag.js',
   './arcade-storage-core.js',
