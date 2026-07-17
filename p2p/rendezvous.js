@@ -281,14 +281,16 @@ export class RendezvousManager extends EventTarget {
         this.pairExchanges = new Map(); // peerId → completed exchange awaiting/holding confirmation
         this.earlyConfirms = new Map(); // peerId → mac (confirm that outran our async opt-in)
         this.confirmRetries = new Map();// peerId → count (crossed-exchange restarts)
-        this.episodes = new Map();      // pairId → episode
-        this._startingEpisodes = new Set(); // pairIds mid-_startEpisode, before the slot is claimed
+        this.episodes = new Map();      // pairId → episode RESOURCES (carrier, keys, shadow, publish closures)
         this._tombstoned = new Set();   // pairIds forgotten via disablePair — refuse stale re-persists
         // Episode state machines (rendezvous-episode-core.js): one per pair.
-        // The machine currently owns the pre-episode SCHEDULING states (the
-        // old delayTimers logic); live episodes migrate onto it next.
+        // The machine owns scheduling AND the live lifecycle spine (claim/
+        // settle/cancel/fail); the `episodes` map keeps only the runtime
+        // resources an episode holds. Exchange/presence decision flags are
+        // mid-migration: legacy mutations mirror into the machine context.
         this.machines = new Map();      // pairId → machine
         this._pairTimers = new Map();   // pairId → Map<timerId, clearFn>
+        this._setupRecs = new Map();    // pairId → rec staged between SETUP_READ and buildEpisode
         this._peerLocks = new Map();    // peerId → queue tail (pairing ops serialized per peer)
         this._recWrites = new Map();    // pairId → queue tail (record writes serialized per pair)
 
@@ -308,6 +310,7 @@ export class RendezvousManager extends EventTarget {
         }
         this._pairTimers.clear();
         this.machines.clear();
+        this._setupRecs.clear();
         this.myRands.clear();
         this.pendingRands.clear();
         for (const ex of this.pairExchanges.values()) { if (ex.timer) ex.timer(); }
@@ -547,7 +550,7 @@ export class RendezvousManager extends EventTarget {
                 await this._promoteEpisode(pairId, ep);
             } else {
                 this._diag(`pair ${pairId}: resumePair (call) — arming an active episode`);
-                this._startEpisode(pairId, rec.lastPeerId);
+                this._dispatch(pairId, { type: 'RESUME', peerId: rec.lastPeerId });
             }
         }
         return true;
@@ -560,14 +563,20 @@ export class RendezvousManager extends EventTarget {
      * survive — a Call must never destroy the handshake it's asking for.
      */
     async _promoteEpisode(pairId, ep) {
-        ep.standbyOnly = false;
+        const m = this._machine(pairId); // mirror: machine owns the lifecycle spine
+        m.standbyOnly = ep.standbyOnly = false;
         if (ep.phase !== 'active') {
-            ep.phase = 'active';
-            // A promoted episode earns a fresh active window before demoting.
-            this._after(ep, this.options.episodeTimeoutMs, () => this._demoteEpisode(pairId, ep));
+            m.phase = ep.phase = 'active';
+            // A promoted episode earns a fresh active window before demoting
+            // (replaces the machine's demote timer slot, never doubles it).
+            this._setPairTimer(pairId, 'demote', this.options.episodeTimeoutMs, () => {
+                if (this._destroyed) return;
+                const cur = this.episodes.get(pairId);
+                if (cur) this._demoteEpisode(pairId, cur);
+            });
         }
         if (!ep.announced) {
-            ep.announced = true;
+            m.announced = ep.announced = true;
             this._emit('reconnecting', { pairId, peerId: ep.peerId, role: ep.rec.role });
         }
         // An answer/adoption is in flight — let it finish; its stall timer
@@ -948,9 +957,14 @@ export class RendezvousManager extends EventTarget {
                         if (this._destroyed) return;
                         if (eff.id === 'delay') {
                             this._dispatch(pairId, { type: 'T_DELAY', connectedNow: !!this._connectedPeerIdFor(pairId) });
+                        } else if (eff.id === 'demote') {
+                            // TRANSITIONAL: presence still runs on the legacy
+                            // handler (mirrors keep the machine in sync).
+                            const ep = this.episodes.get(pairId);
+                            if (ep) this._demoteEpisode(pairId, ep);
                         }
-                        // 'demote'/'stall'/'lstall:*' arm once live episodes
-                        // run on the machine (later migration step).
+                        // 'stall'/'lstall:*' arm once the exchange family
+                        // runs on the machine (later migration step).
                     });
                     break;
                 case 'cancelTimer':
@@ -973,15 +987,103 @@ export class RendezvousManager extends EventTarget {
                     break;
                 }
                 case 'beginSetup': {
-                    // TRANSITIONAL: live episodes still run on the legacy
-                    // path. The machine hands over here and returns to idle;
-                    // _startEpisode's own guards re-validate everything.
-                    const peerId = m.peerId;
-                    const opts = eff.opts || {};
-                    this.machines.delete(pairId);
-                    this._startEpisode(pairId, peerId, opts);
+                    // Legacy _startEpisode's guarded record read. The full
+                    // record is staged shell-side for buildEpisode; the
+                    // machine only sees the decision fields.
+                    if (!this.options.carrierFactory) { this.machines.delete(pairId); break; }
+                    const gen = eff.gen;
+                    this._serial(this._recWrites, pairId, () => dbGet(pairId).catch(() => null))
+                        .then((rec) => {
+                            if (this._destroyed) return;
+                            if (rec) this._setupRecs.set(pairId, rec);
+                            else this._setupRecs.delete(pairId);
+                            if (!rec || !rec.enabled) {
+                                this._diag(`pair ${pairId}: episode not started (${!rec ? 'no stored secret' : 'pair disabled/paused'})`);
+                            }
+                            this._dispatch(pairId, {
+                                type: 'SETUP_READ', gen,
+                                rec: rec ? {
+                                    enabled: !!rec.enabled, role: rec.role,
+                                    byedRecently: !!(rec.byeAt && rec.byeAt > (rec.lastSeenAt || 0)),
+                                    seenNonces: rec.seenNonces,
+                                } : null,
+                                connectedNow: !!this._connectedPeerIdFor(pairId),
+                            });
+                        }).catch(() => {});
                     break;
                 }
+                case 'buildEpisode':
+                    // Long-running (carrier dial): deliberately NOT awaited —
+                    // the demote timer and the 'reconnecting' announcement
+                    // must not wait on a slow broker. Completion re-enters as
+                    // SETUP_DONE / SETUP_FAILED.
+                    this._buildEpisode(pairId, eff.gen).catch(() => {});
+                    break;
+                case 'armOffer': {
+                    const ep = this.episodes.get(pairId);
+                    if (ep && !ep.settled) await this._armCallerOffer(pairId, ep).catch((e) => {
+                        this._diag(`pair ${pairId}: could not arm an offer (${e && e.message})`, 'warn');
+                    });
+                    break;
+                }
+                case 'armRing': {
+                    const ep = this.episodes.get(pairId);
+                    if (ep && !ep.settled) await this._armRing(pairId, ep).catch((e) => {
+                        this._diag(`pair ${pairId}: could not arm a ring (${e && e.message})`, 'warn');
+                    });
+                    break;
+                }
+                case 'schedulePublishes': {
+                    const ep = this.episodes.get(pairId);
+                    if (ep && !ep.settled) this._schedulePublishes(pairId, ep);
+                    break;
+                }
+                case 'publishNow': {
+                    const ep = this.episodes.get(pairId);
+                    if (ep && !ep.settled && ep.publishOnce) await Promise.resolve(ep.publishOnce()).catch(() => {});
+                    break;
+                }
+                case 'ensureAlive': {
+                    const ep = this.episodes.get(pairId);
+                    try {
+                        if (ep && ep.carrier && typeof ep.carrier.ensureAlive === 'function') ep.carrier.ensureAlive();
+                    } catch (e) {}
+                    break;
+                }
+                case 'persistSettle': {
+                    // Legacy _settleEpisode's record write. ep.settled goes
+                    // true FIRST so in-flight publish ticks stop immediately.
+                    const ep = this.episodes.get(pairId);
+                    if (!ep) break;
+                    ep.settled = true;
+                    this._diag(ep.exchanged
+                        ? `pair ${pairId}: reconnected via sealed exchange — secret held stable (no ratchet)`
+                        : `pair ${pairId}: link recovered in-band — episode closed without touching the key`);
+                    ep.rec.lastPeerId = ep.peerId;
+                    ep.rec.lastSeenAt = Date.now();
+                    delete ep.rec.byeAt; // reconnected: any old hang-up is history
+                    try { await this._updateRec(pairId, () => ep.rec); } catch (e) {
+                        this._diag(`pair ${pairId}: FAILED to persist post-reconnect state (${e && e.message})`, 'error');
+                    }
+                    break;
+                }
+                case 'cleanup': {
+                    const timers = this._pairTimers.get(pairId);
+                    if (timers) {
+                        for (const clear of timers.values()) clear();
+                        this._pairTimers.delete(pairId);
+                    }
+                    this._setupRecs.delete(pairId);
+                    const ep = this.episodes.get(pairId);
+                    if (ep) {
+                        ep.settled = true;
+                        this._cleanupEpisode(pairId, ep);
+                    }
+                    break;
+                }
+                case 'emit':
+                    this._emit(eff.event, Object.assign({ pairId }, eff.payload));
+                    break;
                 case 'persistTouch':
                     // Legacy _onStatus 'connected' record touch (no episode).
                     this._updateRec(pairId, (rec) => {
@@ -1000,6 +1102,84 @@ export class RendezvousManager extends EventTarget {
                     // migration step reaching here is a bug — say so loudly.
                     this._diag(`pair ${pairId}: unhandled machine effect ${eff.t}`, 'error');
             }
+        }
+    }
+
+    /**
+     * The claimed episode's resource build (legacy _startEpisode's tail):
+     * carrier, key derivation, initial subscribe, topic-refresh cadence,
+     * session-restore republish hook. Completion (or failure) re-enters the
+     * machine; a stale generation means the episode was cancelled while the
+     * carrier dialed — close what was built and walk away.
+     */
+    async _buildEpisode(pairId, gen) {
+        const m = this._machine(pairId);
+        const rec = this._setupRecs.get(pairId);
+        this._setupRecs.delete(pairId);
+        if (m.gen !== gen || m.lifecycle !== 'live') return; // superseded while queued
+        if (!rec) {
+            // Cannot happen in the current flow (the record is staged in the
+            // same synchronous frame as the claim) — but a live machine with
+            // no episode would be a permanent wedge, so fail loudly.
+            this._dispatch(pairId, { type: 'SETUP_FAILED', gen, why: 'internal: no staged record' });
+            return;
+        }
+        const ep = {
+            peerId: m.peerId, rec, settled: false, exchanged: false, usedEpoch: null,
+            carrier: null, shadow: null, timers: [], unsubs: [], topicSubs: new Map(),
+            phase: m.phase, standbyOnly: m.standbyOnly, announced: m.announced,
+            offerNonce: null, sealedOffer: null, ringNonce: null, sealedRing: null,
+            answeredNonce: null, deadNonces: new Set(), seenRings: new Set(),
+            // Persistent cross-episode replay defense (S-sec-4a): seed from
+            // the record's history so a replayed prior-episode offer/ring is
+            // rejected on sight. Grows as this episode processes new nonces.
+            seenNonceSet: new Set(Array.isArray(rec.seenNonces) ? rec.seenNonces : []),
+            lastShadowAt: 0, publishOnce: null, publishScheduled: false, answering: false,
+            ownBlobs: new Set(), undecryptable: 0, lastNudgeAt: 0, republishWindowLogged: false
+        };
+        this.episodes.set(pairId, ep);
+        // The key check names the ROOM this episode meets in: two devices
+        // logging different checks hold different bases and can never hear
+        // each other — the one question a pair of connection logs must answer.
+        let check = 'unknown';
+        try { check = await RC.keyCheck(rec.base); } catch (e) {}
+        this._diag(`pair ${pairId}: episode started — role=${rec.role}, epoch=${rec.epoch || 0}, key check ${check}, phase=${ep.phase}${ep.standbyOnly ? ' (standby-only)' : ''}`);
+        try {
+            ep.carrier = this.options.carrierFactory();
+            ep.topicKey = await RC.deriveTopicKey(rec.base);
+            ep.aeadKey = await RC.deriveAeadKey(rec.base);
+            // A hardened carrier resolves on its first successful session and
+            // redials internally afterwards; episodes never die of carrier loss.
+            await ep.carrier.connect();
+            if (m.gen !== gen || ep.settled) { // cancelled while the carrier was dialing
+                try { ep.carrier.close(); } catch (e) {}
+                return;
+            }
+            await this._refreshTopics(pairId, ep); // initial subscribe (topicSubs empty)
+            this._diag(`pair ${pairId}: carrier up, subscribed to ${ep.topicSubs.size} day-topic(s)`);
+            // Publishers rotate to a new UTC-day topic at midnight. Without
+            // resubscribing, a long-quiet/standby episode is left subscribed
+            // only to topics nobody publishes on and goes silently deaf within
+            // ~24-48h — breaking the "app open ⇒ reachable" promise. Re-check
+            // topics every few hours so a new day-topic is always covered.
+            this._every(ep, RENDEZVOUS_TOPIC_REFRESH_MS, () => this._refreshTopics(pairId, ep).catch(() => {}));
+            // A broker session that comes BACK mid-episode (socket died in a
+            // suspend, broker restarted) re-issues the subscriptions inside
+            // the carrier — but everything we published into the dead socket
+            // is gone (QoS 0), so republish the moment the session is up
+            // instead of waiting out the current backoff slot. Unset until
+            // after the FIRST session (connect() above), so the initial
+            // schedule isn't doubled.
+            ep.carrier.onSessionUp = () => {
+                if (ep.settled || !ep.publishOnce) return;
+                this._diag(`pair ${pairId}: carrier session restored — republishing now`);
+                Promise.resolve(ep.publishOnce()).catch(() => {});
+            };
+            this._dispatch(pairId, { type: 'SETUP_DONE', gen });
+        } catch (e) {
+            if (m.gen !== gen) return; // cancelled while building — not a failure
+            this._diag(`pair ${pairId}: episode FAILED (${e && e.message}) — re-arming quietly in ${this.options.rearmDelayMs / 1000}s`, 'error');
+            this._dispatch(pairId, { type: 'SETUP_FAILED', gen, why: e && e.message });
         }
     }
 
@@ -1029,24 +1209,18 @@ export class RendezvousManager extends EventTarget {
             // peer, re-send its material now — a link flap mid-pairing used
             // to starve the exchange until it expired with nothing saved.
             this._serial(this._peerLocks, peerId, () => this._resumeExchangeLocked(peerId)).catch(() => {});
-            const ep = this.episodes.get(pairId);
-            if (ep && !ep.settled) {
-                this._settleEpisode(pairId, ep);
-            } else {
-                // Machine: clears any scheduled delay and touches the record.
-                this._dispatch(pairId, { type: 'CONNECTED', peerId });
-            }
+            // Machine: settles a live episode, clears a scheduled delay, or
+            // just touches the record.
+            this._dispatch(pairId, { type: 'CONNECTED', peerId });
         } else if (status === 'interrupted') {
-            // A live episode already owns the repair; otherwise the machine
-            // schedules the delayed start (in-band repair gets first claim:
-            // listener 15s, caller 30s).
-            if (this.episodes.has(pairId)) return;
+            // The machine schedules the delayed start unless the pair is
+            // already scheduled/starting/live (in-band repair gets first
+            // claim: listener 15s, caller 30s).
             const r = this._dispatch(pairId, { type: 'INTERRUPTED', peerId });
             if (r.effects.length) {
                 this._diag(`pair ${pairId}: link interrupted — rendezvous episode in ${this.options.listenerDelayMs / 1000}s (listener) / ${this.options.callerDelayMs / 1000}s (caller) unless in-band repair wins`);
             }
         } else if (status === 'disconnected' || status === 'failed' || status === 'closed') {
-            if (this.episodes.has(pairId) || this._startingEpisodes.has(pairId)) return;
             this._dispatch(pairId, { type: 'TERMINAL', peerId });
         }
     }
@@ -1074,7 +1248,7 @@ export class RendezvousManager extends EventTarget {
                 continue;
             }
             this.pairsByPeerId.set(rec.lastPeerId, pairId);
-            this._startEpisode(pairId, rec.lastPeerId);
+            this._dispatch(pairId, { type: 'RESUME', peerId: rec.lastPeerId });
         }
     }
 
@@ -1095,7 +1269,7 @@ export class RendezvousManager extends EventTarget {
             if (!rec || !rec.enabled || !rec.lastPeerId) continue;
             if (Date.now() - (rec.lastSeenAt || 0) > this.options.standbyMaxAgeMs) continue;
             this.pairsByPeerId.set(rec.lastPeerId, pairId);
-            this._startEpisode(pairId, rec.lastPeerId, { standbyOnly: true });
+            this._dispatch(pairId, { type: 'STANDBY', peerId: rec.lastPeerId });
         }
     }
 
@@ -1153,115 +1327,16 @@ export class RendezvousManager extends EventTarget {
         }
     }
 
-    /**
-     * One episode per pair, from trigger until settle/cancel. Phases:
-     *   active — initiating (offer or ring on the retry schedule) with the
-     *            session publicly claimed ('reconnecting' emitted);
-     *   quiet  — after episodeTimeoutMs: 'gave-up' emitted (UIs release the
-     *            claim) but the subscription stays and the slow republish
-     *            continues while the pair was seen within resumeWindowMs.
-     * standbyOnly episodes start quiet and initiate nothing until a ring
-     * (caller role) or an offer (listener role) provokes them. A received
-     * bye forces standbyOnly regardless of opts.
-     */
-    async _startEpisode(pairId, peerId, opts = {}) {
-        if (this.episodes.has(pairId) || this._startingEpisodes.has(pairId) || !this.options.carrierFactory) return;
-        // Claim the start synchronously, BEFORE the dbGet await below. Two
-        // triggers racing through that window (a terminal 'disconnected' status
-        // vs a user Call; the rearm timer vs a status event) would otherwise both
-        // build an episode and the second would overwrite the first in the map —
-        // orphaning the first's carriers (redialing forever) while it publishes a
-        // DIFFERENT offer nonce than the survivor: the exact competing-nonce
-        // failure _promoteEpisode was built to eliminate, plus a carrier leak.
-        this._startingEpisodes.add(pairId);
-        let ep = null;
-        try {
-            // Serialized read: observe any queued record write (a just-received
-            // bye, a racing pausePair) rather than a stale snapshot, so we don't
-            // arm a full active repair against a peer that deliberately hung up.
-            const rec = await this._serial(this._recWrites, pairId, () => dbGet(pairId).catch(() => null));
-            if (!rec || !rec.enabled) {
-                this._diag(`pair ${pairId}: episode not started (${!rec ? 'no stored secret' : 'pair disabled/paused'})`);
-                return;
-            }
-            if (this._connectedPeerIdFor(pairId)) return;
-            if (this.episodes.has(pairId)) return; // a concurrent path claimed the slot
-            const byed = !!(rec.byeAt && rec.byeAt > (rec.lastSeenAt || 0));
-            const standbyOnly = !!opts.standbyOnly || byed;
-            const quiet = !!opts.quiet || standbyOnly;
-            ep = {
-                peerId, rec, settled: false, exchanged: false, usedEpoch: null,
-                carrier: null, shadow: null, timers: [], unsubs: [], topicSubs: new Map(),
-                phase: quiet ? 'quiet' : 'active', standbyOnly, announced: false,
-                offerNonce: null, sealedOffer: null, ringNonce: null, sealedRing: null,
-                answeredNonce: null, deadNonces: new Set(), seenRings: new Set(),
-                // Persistent cross-episode replay defense (S-sec-4a): seed from
-                // the record's history so a replayed prior-episode offer/ring is
-                // rejected on sight. Grows as this episode processes new nonces.
-                seenNonceSet: new Set(Array.isArray(rec.seenNonces) ? rec.seenNonces : []),
-                lastShadowAt: 0, publishOnce: null, publishScheduled: false, answering: false,
-                ownBlobs: new Set(), undecryptable: 0, lastNudgeAt: 0, republishWindowLogged: false
-            };
-            this.episodes.set(pairId, ep);
-            // Slot is now claimed in `episodes` — release the start-guard so the
-            // long carrier-connect awaits below don't block a legitimate fresh
-            // start (e.g. a manual re-pairing that supersedes this very episode).
-            // From here the `episodes.has` guard alone is sufficient.
-            this._startingEpisodes.delete(pairId);
-            // The key check names the ROOM this episode meets in: two devices
-            // logging different checks hold different bases and can never hear
-            // each other — the one question a pair of connection logs must answer.
-            let check = 'unknown';
-            try { check = await RC.keyCheck(rec.base); } catch (e) {}
-            this._diag(`pair ${pairId}: episode started — role=${rec.role}, epoch=${rec.epoch || 0}, key check ${check}, phase=${ep.phase}${standbyOnly ? ' (standby-only' + (byed ? ', after bye' : '') + ')' : ''}`);
-            try {
-                ep.carrier = this.options.carrierFactory();
-                ep.topicKey = await RC.deriveTopicKey(rec.base);
-                ep.aeadKey = await RC.deriveAeadKey(rec.base);
-                if (!quiet) {
-                    ep.announced = true;
-                    this._emit('reconnecting', { pairId, peerId, role: rec.role });
-                }
-                this._after(ep, this.options.episodeTimeoutMs, () => this._demoteEpisode(pairId, ep));
-                // A hardened carrier resolves on its first successful session and
-                // redials internally afterwards; episodes never die of carrier loss.
-                await ep.carrier.connect();
-                if (ep.settled) { // cancelled while the carrier was dialing
-                    try { ep.carrier.close(); } catch (e) {}
-                    return;
-                }
-                await this._refreshTopics(pairId, ep); // initial subscribe (topicSubs empty)
-                this._diag(`pair ${pairId}: carrier up, subscribed to ${ep.topicSubs.size} day-topic(s)`);
-                // Publishers rotate to a new UTC-day topic at midnight. Without
-                // resubscribing, a long-quiet/standby episode is left subscribed
-                // only to topics nobody publishes on and goes silently deaf within
-                // ~24-48h — breaking the "app open ⇒ reachable" promise. Re-check
-                // topics every few hours so a new day-topic is always covered.
-                this._every(ep, RENDEZVOUS_TOPIC_REFRESH_MS, () => this._refreshTopics(pairId, ep).catch(() => {}));
-            // A broker session that comes BACK mid-episode (socket died in a
-            // suspend, broker restarted) re-issues the subscriptions inside
-            // the carrier — but everything we published into the dead socket
-            // is gone (QoS 0), so republish the moment the session is up
-            // instead of waiting out the current backoff slot. Unset until
-            // after the FIRST session (connect() above), so the initial
-            // schedule isn't doubled.
-            ep.carrier.onSessionUp = () => {
-                if (ep.settled || !ep.publishOnce) return;
-                this._diag(`pair ${pairId}: carrier session restored — republishing now`);
-                Promise.resolve(ep.publishOnce()).catch(() => {});
-            };
-                if (!ep.standbyOnly) {
-                    if (rec.role === 'caller') await this._armCallerOffer(pairId, ep);
-                    else await this._armRing(pairId, ep);
-                    this._schedulePublishes(pairId, ep);
-                }
-            } catch (e) {
-                this._failEpisode(pairId, ep, e.message);
-            }
-        } finally {
-            this._startingEpisodes.delete(pairId);
-        }
-    }
+    // One episode per pair, from trigger until settle/cancel — the lifecycle
+    // is the state machine's (see rendezvous-episode-core.js): _dispatch of
+    // TERMINAL/RESUME/STANDBY leads through beginSetup (guarded record read)
+    // → SETUP_READ (claim) → buildEpisode → SETUP_DONE (arm + cadence).
+    // Phases: active — initiating with the session publicly claimed
+    // ('reconnecting' emitted); quiet — after episodeTimeoutMs: 'gave-up'
+    // emitted but the subscription stays and the slow republish continues
+    // while the pair was seen within resumeWindowMs. standbyOnly episodes
+    // start quiet and initiate nothing until a ring (caller role) or an
+    // offer (listener role) provokes them. A received bye forces standbyOnly.
 
     /**
      * (Re)builds the caller's shadow connection and sealed offer. Offers
@@ -1291,6 +1366,11 @@ export class RendezvousManager extends EventTarget {
             sessionDesc: { type: pc.localDescription.type, sdp: ConnectionUtils.minifySDP(pc.localDescription.sdp, this.pm.options) }
         });
         ep.sealedOffer = await RC.seal(ep.aeadKey, await ConnectionUtils.encodePayload(payload), 'o', ep.usedEpoch);
+        // Mirror: machine context tracks arming for its freshness decisions.
+        const m = this._machine(pairId);
+        m.offerArmed = true;
+        m.offerNonce = ep.offerNonce;
+        m.lastShadowAt = ep.lastShadowAt;
         this._diag(`pair ${pairId}: caller offer armed (epoch ${ep.usedEpoch}, nonce ${ep.offerNonce})`);
     }
 
@@ -1302,6 +1382,7 @@ export class RendezvousManager extends EventTarget {
             JSON.stringify({ peerId: ep.peerId, n: ep.ringNonce }),
             'r', sealEpoch(ep.rec)
         );
+        this._machine(pairId).ringArmed = true; // mirror
         this._diag(`pair ${pairId}: listener ring armed (epoch ${sealEpoch(ep.rec)}, nonce ${ep.ringNonce})`);
     }
 
@@ -1315,6 +1396,7 @@ export class RendezvousManager extends EventTarget {
     _schedulePublishes(pairId, ep) {
         if (ep.publishScheduled) return;
         ep.publishScheduled = true;
+        this._machine(pairId).publishScheduled = true; // mirror
         const kind = ep.rec.role === 'caller' ? 'offer' : 'ring';
         const currentBlob = ep.rec.role === 'caller' ? () => ep.sealedOffer : () => ep.sealedRing;
         const publishOnce = async () => {
@@ -1423,7 +1505,7 @@ export class RendezvousManager extends EventTarget {
             return true;
         }
         this._diag(`pair ${pairId}: answer received (epoch ${ep.usedEpoch}) — adopting shadow connection, waiting for the channel to open`);
-        ep.exchanged = true;
+        this._machine(pairId).exchanged = ep.exchanged = true; // mirror
         this.pm.adoptConnection(ep.peerId, ep.shadow.pc, ep.shadow.dc, { fallbackType: 'client' });
         ep.shadow.adopted = true;
         await this.pm.acceptAnswer(payload);
@@ -1435,7 +1517,7 @@ export class RendezvousManager extends EventTarget {
             const p = this.pm.peers.get(ep.peerId);
             if (p && p.status === 'connected') return;
             this._diag(`pair ${pairId}: adopted answer never connected within ${this.options.answerStallMs / 1000}s (ICE could not find a path?) — re-arming a fresh offer`, 'warn');
-            ep.exchanged = false;
+            this._machine(pairId).exchanged = ep.exchanged = false; // mirror
             try {
                 await this._armCallerOffer(pairId, ep);
                 if (ep.publishOnce) await ep.publishOnce();
@@ -1463,7 +1545,7 @@ export class RendezvousManager extends EventTarget {
         const live = this.pm.peers.get(ep.peerId);
         if (live && live.status === 'connected') return true;
         this._diag(`pair ${pairId}: ring received — the listener side is asking for a fresh offer`);
-        ep.standbyOnly = false; // provoked: this standby now initiates
+        this._machine(pairId).standbyOnly = ep.standbyOnly = false; // provoked: this standby now initiates
         try {
             // Fresh shadow if we have none or ours has aged (the network may
             // have moved under it); otherwise just republish what we have.
@@ -1501,18 +1583,19 @@ export class RendezvousManager extends EventTarget {
             this._diag(`pair ${pairId}: caller re-armed (nonce ${payload.n}) — superseding our in-flight answer`);
         }
         this._diag(`pair ${pairId}: offer received (epoch ${usedEpoch}, nonce ${payload.n || 'none'}) — answering`);
-        ep.answering = true;
+        const m = this._machine(pairId); // mirror: machine owns the lifecycle spine
+        m.answering = ep.answering = true;
         // Persist this offer's nonce now (not at retirement): the winning offer
         // never enters deadNonces, so recording here is what makes a replay of
         // it in a future episode dead on arrival. A same-nonce republish this
         // episode is caught by the seenNonceSet check above (ignored, correct).
         this._rememberNonce(pairId, ep, payload.n);
         try {
-            ep.exchanged = true;
-            ep.standbyOnly = false;
-            ep.answeredNonce = payload.n || null;
+            m.exchanged = ep.exchanged = true;
+            m.standbyOnly = ep.standbyOnly = false;
+            m.answeredNonce = ep.answeredNonce = payload.n || null;
             ep.usedEpoch = usedEpoch;
-            ep.peerId = payload.peerId;
+            m.peerId = ep.peerId = payload.peerId;
             this.pairsByPeerId.set(payload.peerId, pairId);
 
             await this.pm._ensureCertificate();
@@ -1532,8 +1615,8 @@ export class RendezvousManager extends EventTarget {
                 this._diag(`pair ${pairId}: link recovered while answering — discarding the answer, keeping the live link`);
                 try { pc.close(); } catch (err) {}
                 if (payload.n) ep.deadNonces.add(payload.n);
-                ep.exchanged = false;
-                ep.answeredNonce = null;
+                m.exchanged = ep.exchanged = false;
+                m.answeredNonce = ep.answeredNonce = null;
                 return true;
             }
             // Adopt now so ondatachannel and the resilience handlers are wired
@@ -1569,63 +1652,59 @@ export class RendezvousManager extends EventTarget {
                 if (p && p.status === 'connected') return;
                 this._diag(`pair ${pairId}: answered offer never connected within ${this.options.answerStallMs / 1000}s (ICE could not find a path?) — retiring it, will answer the caller's next fresh offer`, 'warn');
                 if (staleNonce) ep.deadNonces.add(staleNonce);
-                if (ep.answeredNonce === staleNonce) ep.exchanged = false;
+                if (ep.answeredNonce === staleNonce) {
+                    this._machine(pairId).exchanged = ep.exchanged = false;
+                }
             });
         } catch (e) {
             this._diag(`pair ${pairId}: answering the offer failed (${e && e.message})`, 'warn');
-            ep.exchanged = false;
+            m.exchanged = ep.exchanged = false;
         } finally {
-            ep.answering = false;
+            m.answering = ep.answering = false;
         }
         return true;
     }
 
-    async _settleEpisode(pairId, ep) {
-        if (ep.settled) return;
-        ep.settled = true;
-        // NOTE: the per-reconnect key ratchet is intentionally ABSENT — the
-        // machinery (RendezvousCrypto.ratchet/transcriptHash, the epoch
-        // try-window) has been deleted, not merely switched off. Re-introducing
-        // it is a wire-breaking change: it requires a protocol version bump on
-        // top of the two-sided commit described below.
-        //
-        // The old design advanced `rec.base` (and `rec.epoch`) on every sealed
-        // reconnect. But each side decided to ratchet independently, from a
-        // purely LOCAL condition (were both DTLS fingerprints available at the
-        // instant this side settled?). There is no agreement step, so any
-        // divergence — one side adopts the sealed connection while the other's
-        // link heals in-band, or fingerprints populate a tick later on one end
-        // — leaves the two sides on DIFFERENT base keys. Because the AEAD key
-        // AND the daily topic both derive from `base`, a base split makes the
-        // pair permanently deaf in both directions (the epoch window cannot
-        // rescue a wrong key on a wrong topic): auto-reconnect bricks the pair
-        // until a manual Start Over + fresh invite on BOTH devices.
-        //
-        // Freezing the secret removes that failure mode outright: both sides
-        // always hold the exact key minted over DTLS at the last MANUAL
-        // ceremony (`_establishPair` re-derives base and resets epoch 0 on both
-        // ends simultaneously — symmetric by construction), and it never
-        // changes underneath either of them during unattended reconnects. The
-        // trade is forward secrecy on the rendezvous *signaling* keys between
-        // manual pairings: those keys now rotate only on an in-person re-pair,
-        // not on every auto-heal. Game traffic is unaffected (separately DTLS-
-        // protected) and topics still rotate daily. Re-introducing a CORRECT
-        // ratchet requires a two-sided commit over the live channel so both
-        // ends advance together or neither does, plus a protocol version bump
-        // (deployed clients seal and accept only the fixed epoch) — tracked in
-        // the security-hardening issue, deferred past the current "test what
-        // we have" phase.
-        this._diag(ep.exchanged
-            ? `pair ${pairId}: reconnected via sealed exchange — secret held stable (no ratchet)`
-            : `pair ${pairId}: link recovered in-band — episode closed without touching the key`);
-        ep.rec.lastPeerId = ep.peerId;
-        ep.rec.lastSeenAt = Date.now();
-        delete ep.rec.byeAt; // reconnected: any old hang-up is history
-        try { await this._updateRec(pairId, () => ep.rec); } catch (e) {
-            this._diag(`pair ${pairId}: FAILED to persist post-reconnect state (${e && e.message})`, 'error');
-        }
-        this._cleanupEpisode(pairId, ep);
-        this._emit(ep.exchanged ? 'reconnected' : 'recovered-inband', { pairId, peerId: ep.peerId });
+    /**
+     * Settles the episode through the machine (the CONNECTED row's settle:
+     * persistSettle → cleanup → emit, see _runEffects).
+     *
+     * NOTE: the per-reconnect key ratchet is intentionally ABSENT — the
+     * machinery (RendezvousCrypto.ratchet/transcriptHash, the epoch
+     * try-window) has been deleted, not merely switched off. Re-introducing
+     * it is a wire-breaking change: it requires a protocol version bump on
+     * top of the two-sided commit described below.
+     *
+     * The old design advanced `rec.base` (and `rec.epoch`) on every sealed
+     * reconnect. But each side decided to ratchet independently, from a
+     * purely LOCAL condition (were both DTLS fingerprints available at the
+     * instant this side settled?). There is no agreement step, so any
+     * divergence — one side adopts the sealed connection while the other's
+     * link heals in-band, or fingerprints populate a tick later on one end
+     * — leaves the two sides on DIFFERENT base keys. Because the AEAD key
+     * AND the daily topic both derive from `base`, a base split makes the
+     * pair permanently deaf in both directions (the epoch window cannot
+     * rescue a wrong key on a wrong topic): auto-reconnect bricks the pair
+     * until a manual Start Over + fresh invite on BOTH devices.
+     *
+     * Freezing the secret removes that failure mode outright: both sides
+     * always hold the exact key minted over DTLS at the last MANUAL
+     * ceremony (`_establishPair` re-derives base and resets epoch 0 on both
+     * ends simultaneously — symmetric by construction), and it never
+     * changes underneath either of them during unattended reconnects. The
+     * trade is forward secrecy on the rendezvous *signaling* keys between
+     * manual pairings: those keys now rotate only on an in-person re-pair,
+     * not on every auto-heal. Game traffic is unaffected (separately DTLS-
+     * protected) and topics still rotate daily. Re-introducing a CORRECT
+     * ratchet requires a two-sided commit over the live channel so both
+     * ends advance together or neither does, plus a protocol version bump
+     * (deployed clients seal and accept only the fixed epoch) — a future
+     * machine-level change: a new effect at the settle row, never a local
+     * decision. The settle row's effect payload already carries
+     * exchanged/peerId for it.
+     */
+    _settleEpisode(pairId, ep) {
+        this._dispatch(pairId, { type: 'CONNECTED', peerId: ep.peerId });
     }
 
     /**
@@ -1636,7 +1715,7 @@ export class RendezvousManager extends EventTarget {
      */
     _demoteEpisode(pairId, ep) {
         if (ep.settled || ep.phase === 'quiet') return;
-        ep.phase = 'quiet';
+        this._machine(pairId).phase = ep.phase = 'quiet';
         this._diag(`pair ${pairId}: active phase timed out after ${this.options.episodeTimeoutMs / 60000}min — going quiet (still subscribed and reachable)`);
         if (ep.announced) {
             this._emit('gave-up', { pairId, peerId: ep.peerId, why: 'timeout', standby: true });
@@ -1648,34 +1727,15 @@ export class RendezvousManager extends EventTarget {
      * one-shot design, a failed episode re-arms itself: one transient error
      * must not strand the pair until the next app restart.
      */
-    _failEpisode(pairId, ep, why) {
-        if (ep.settled) return;
-        ep.settled = true;
-        this._diag(`pair ${pairId}: episode FAILED (${why}) — re-arming quietly in ${this.options.rearmDelayMs / 1000}s`, 'error');
-        this._cleanupEpisode(pairId, ep);
-        if (ep.announced) this._emit('gave-up', { pairId, peerId: ep.peerId, why });
-        // Quiet re-arm through the machine's scheduled(rearm) stage.
-        const peerId = ep.peerId;
-        const m = this._machine(pairId);
-        if (m.lifecycle === 'idle') {
-            m.lifecycle = 'scheduled';
-            m.delayStage = 'rearm';
-            m.peerId = peerId;
-            this._setPairTimer(pairId, 'delay', this.options.rearmDelayMs, () => {
-                if (this._destroyed) return;
-                this._dispatch(pairId, { type: 'T_DELAY', connectedNow: !!this._connectedPeerIdFor(pairId) });
-            });
-        }
-    }
+    // Hard errors re-enter as SETUP_FAILED (see _buildEpisode's catch): the
+    // machine cleans up, emits 'gave-up' when announced, and re-arms quietly
+    // through scheduled(rearm) — one transient error must not strand the
+    // pair until the next app restart.
 
     _cancelEpisode(pairId) {
-        // Kill any scheduled delay / pending machine state first.
+        // The machine kills any scheduled delay, pending setup, or live
+        // episode (its cleanup effect tears down the resources).
         this._dispatch(pairId, { type: 'CANCEL', why: 'superseded' });
-        const ep = this.episodes.get(pairId);
-        if (ep) {
-            ep.settled = true;
-            this._cleanupEpisode(pairId, ep);
-        }
     }
 
     _cleanupEpisode(pairId, ep) {
