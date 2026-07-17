@@ -9,12 +9,20 @@
  *
  * Entry shape (per deviceId):
  *   { name, remoteName, firstConnectedAt, lastConnectedAt, timesConnected,
- *     fingerprint, fingerprintChangedAt?, autoReconnect?, paused?,
- *     syncEnabled?, backupTarget? }
+ *     fingerprint, fingerprintChangedAt?, pinPendingFingerprint?,
+ *     autoReconnect?, paused?, syncEnabled?, backupTarget?,
+ *     userPub?, deviceCertIssuedAt?, revoked? }
  *
  * `paused` is a display/intent flag only — it says the user hung up and
  * doesn't want this link auto-healed. The actual teardown and the
  * rendezvous pause live in arcade-p2p.js's hangUpKnownPeer/callKnownPeer.
+ *
+ * `userPub`/`deviceCertIssuedAt`/`revoked` are the user-identity layer
+ * (#32): userPub is the peer's user-level Ed25519 public key, pinned
+ * TOFU-style on the first VERIFIED device cert (arcade-p2p.js owns the
+ * verification; only it writes these two). `revoked` is a one-way latch —
+ * {revokedAt, sig} — set when the peer's OWNER signed a revocation of that
+ * device; there is no wire-level un-revoke, only the local clear below.
  */
 
 export const KNOWN_PEERS_KEY = 'arcade.v1._meta.knownPeers';
@@ -84,6 +92,36 @@ export function setKnownPeerBackupTarget(id, on) {
     return mutateKnownPeers((map) => {
         if (!map[id]) return null;
         map[id].backupTarget = !!on;
+        return map;
+    });
+}
+
+/**
+ * One-way revocation latch (#32): the peer's owner cryptographically
+ * disowned this device. Never overwritten once set — a revocation is a
+ * monotonic boolean, so there is no ordering/rollback surface at all
+ * (simpler AND safer than merge-by-recency). entry = {revokedAt, sig};
+ * the sig was already verified by the caller (arcade-p2p.js) against the
+ * userPub on file for this deviceId.
+ */
+export function markKnownPeerRevoked(id, entry) {
+    if (!entry || typeof entry.revokedAt !== 'number' || typeof entry.sig !== 'string') return false;
+    return mutateKnownPeers((map) => {
+        if (!map[id] || map[id].revoked) return null;
+        map[id].revoked = { revokedAt: entry.revokedAt, sig: entry.sig };
+        return map;
+    });
+}
+
+/**
+ * Local-only undo for the latch. Deliberately has NO wire form — an
+ * un-revoke can never be gossiped or replayed, only decided by this
+ * device's user at this device's UI.
+ */
+export function clearKnownPeerRevoked(id) {
+    return mutateKnownPeers((map) => {
+        if (!map[id] || !map[id].revoked) return null;
+        delete map[id].revoked;
         return map;
     });
 }

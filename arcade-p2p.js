@@ -26,6 +26,22 @@
  *     delivery rules as 'sync': direct links with a completed identity
  *     binding only, dispatched via onBackupEnvelope(fn), sent with
  *     sendBackupEnvelope(deviceId, env).
+ *   { arcade: 1, kind: 'revoke', deviceId, revokedAt, sig } — a signed
+ *     device revocation (#32): the sender's user disowned one of THEIR OWN
+ *     devices (a lost phone). Same delivery rules as 'sync'/'backup'; the
+ *     signature is verified against the userPub already pinned for the
+ *     TARGET deviceId, so the carrier is irrelevant — only the user key's
+ *     holder can mint one. Revocations also ride identity frames as gossip
+ *     (`uid.revocations`) for eventual propagation with no server.
+ *
+ * User identity above device identity (#32, arcade-user-identity.js): when
+ * the user has set one up, identity frames carry `uid: {userPub, cert,
+ * revocations}` — cert is an Ed25519 signature over {deviceId, fingerprint,
+ * issuedAt}. A receiver that already pinned the same userPub for that
+ * deviceId treats a VERIFIED cert over a rotated fingerprint as a routine
+ * re-attestation: the pin auto-promotes silently instead of raising the
+ * "device identity changed" alarm (detail.fingerprintAutoPromoted). An
+ * UNVERIFIED change keeps today's TOFU-with-notice treatment unchanged.
  *
  * Status vocabulary mapping (transport → SDK), aggregated across ALL peer
  * links so one wobbling link never flaps the global status:
@@ -89,9 +105,13 @@
 import { RendezvousManager, RDV_BUILD } from './p2p/rendezvous.js';
 import { DEFAULT_ICE_SERVERS } from './p2p/p2p-core.js';
 import { MqttCarrier, MultiCarrier } from './p2p/rendezvous-carriers.js';
-import { readKnownPeers, writeKnownPeers, setKnownPeerPaused } from './arcade-known-peers.js';
+import { readKnownPeers, writeKnownPeers, setKnownPeerPaused, markKnownPeerRevoked } from './arcade-known-peers.js';
 import { ArcadeDiag } from './arcade-diag.js';
-import { isDeviceId, validatePeerEnvelope } from './arcade-envelope.js';
+import { isDeviceId, validatePeerEnvelope, validateRevocationEntry } from './arcade-envelope.js';
+import {
+    readUserIdentityMeta, signDeviceCert, signRevocation,
+    verifyDeviceCert, verifyRevocation, isUserPub
+} from './arcade-user-identity.js';
 
 // Free public MQTT-over-WSS brokers used as the untrusted dead-drop. They
 // see only ciphertext on unlinkable rotating topics, and only during repair.
@@ -255,7 +275,8 @@ function getMyDeviceName() {
     catch (e) { return DEFAULT_DEVICE_NAME; }
 }
 
-const peerIdentityListeners = []; // fn({deviceId, name, remoteName, isNew, fingerprintChanged})
+const peerIdentityListeners = []; // fn({deviceId, name, remoteName, isNew, fingerprintChanged, fingerprintAutoPromoted})
+const revokedListeners = [];      // fn({deviceId, name}) — a verified revocation latched (#32)
 const pairRequestListeners = [];  // fn({deviceId, name}) — peer wants auto-reconnect, user undecided
 const remoteByeListeners = [];    // fn({deviceId, name}) — peer hung up on purpose
 const presenceListeners = [];     // fn({gameId, deviceId, name, kind}) — remote game mounted/listening
@@ -310,6 +331,20 @@ let hostCaps = new Set();
 
 function identityFrame() {
     return { arcade: 1, kind: 'identity', deviceId: getMyDeviceId(), name: getMyDeviceName(), caps: WIRE_CAPS };
+}
+
+// Broadcast our identity, with the user-identity extras (#32) attached when
+// one is set up. Async because the device cert is an Ed25519 signature; the
+// frame goes out a microtask later than the sync version did, which is
+// invisible at data-channel timescales. Callers mark seat.announced BEFORE
+// calling (same discipline as before), so no double-announce is possible.
+async function sendIdentity(mp, peerId) {
+    const frame = identityFrame();
+    try {
+        const extras = await buildIdentityExtras(mp, peerId);
+        if (extras) frame.uid = extras;
+    } catch (e) {} // extras are strictly optional — announce plain
+    try { mp.send(frame); } catch (e) {}
 }
 
 function deviceIdForPeerId(peerId) {
@@ -426,11 +461,15 @@ const fingerprintSuspects = new Set();
 // prior change left a still-unconfirmed pending pin on the stored record. The
 // stored `pinPendingFingerprint` survives a reload — the RAM set does not — so
 // an imposter can't wait out a page refresh to have its declined fingerprint
-// silently become the trusted pin.
+// silently become the trusted pin. A REVOKED device (#32) is suspect
+// unconditionally: revocation quarantines it out of pairing re-derivation,
+// pair-request auto-accept, sync, and backup until the user's explicit
+// local undo — a stolen device that still signs valid certs must never
+// rotate its way back into trust.
 function isFingerprintSuspect(deviceId, known) {
     if (fingerprintSuspects.has(deviceId)) return true;
     const rec = (known || readKnownPeers())[deviceId];
-    return !!(rec && rec.pinPendingFingerprint);
+    return !!(rec && (rec.pinPendingFingerprint || rec.revoked));
 }
 
 // deviceIds are machine-generated on the honest path: either a UUID
@@ -450,8 +489,15 @@ function stampLiveSession() {
  * manual in-person ceremony (that exchange IS the authentication), and
  * browsers rotate certificates ~monthly, so a changed fingerprint means
  * "tell the user", never "silently trust" and never "silently block".
+ *
+ * `uid` (#32) is the PRE-VERIFIED cross-sign verdict from evaluateIdentityUid
+ * — {userPub, certIssuedAt, promote} or null. Passing it in lets the single
+ * read-modify-write here apply the promotion atomically: when `promote` is
+ * set, the rotated fingerprint IS the new pin (the owner's signature
+ * re-attested this device), pending-pin state clears, and the change is
+ * reported as fingerprintAutoPromoted instead of fingerprintChanged.
  */
-function recordPeerIdentity(deviceId, remoteName, fingerprint) {
+function recordPeerIdentity(deviceId, remoteName, fingerprint, uid) {
     if (!isDeviceId(deviceId)) return null;
     const safeRemoteName = (typeof remoteName === 'string' && remoteName.trim())
         ? remoteName.trim().slice(0, 60) : 'Unnamed device';
@@ -460,24 +506,170 @@ function recordPeerIdentity(deviceId, remoteName, fingerprint) {
     const existing = known[deviceId];
     const now = new Date().toISOString();
     const prevFp = existing ? existing.fingerprint : null;
-    const fingerprintChanged = !!(prevFp && safeFp && prevFp !== safeFp);
+    const rawChanged = !!(prevFp && safeFp && prevFp !== safeFp);
+    const promoted = !!(uid && uid.promote && safeFp);
+    const fingerprintChanged = rawChanged && !promoted;
     known[deviceId] = existing
         ? { ...existing, remoteName: safeRemoteName, lastConnectedAt: now, timesConnected: (existing.timesConnected || 0) + 1,
             // On a fingerprint change, KEEP the trusted pin and stash the new
             // fingerprint as pending until the user explicitly re-trusts
-            // (enableAutoReconnect). Persisting it here — not only in the RAM
-            // fingerprintSuspects set — is what stops a reload from laundering an
-            // imposter's declined fingerprint into the pin.
+            // (enableAutoReconnect) — UNLESS a verified cert from the pinned
+            // userPub covers the new fingerprint (promoted), which is the
+            // owner re-attesting a routine rotation. Persisting the pending
+            // pin here — not only in the RAM fingerprintSuspects set — is
+            // what stops a reload from laundering an imposter's declined
+            // fingerprint into the pin.
             fingerprint: fingerprintChanged ? prevFp : (safeFp || prevFp || null),
             ...(fingerprintChanged ? { fingerprintChangedAt: now, pinPendingFingerprint: safeFp } : {}) }
         : { name: safeRemoteName, remoteName: safeRemoteName, firstConnectedAt: now, lastConnectedAt: now, timesConnected: 1,
             fingerprint: safeFp };
+    if (promoted) {
+        delete known[deviceId].pinPendingFingerprint;
+        delete known[deviceId].fingerprintChangedAt;
+    }
+    if (uid) {
+        known[deviceId].userPub = uid.userPub;
+        known[deviceId].deviceCertIssuedAt = uid.certIssuedAt;
+    }
     writeKnownPeers(known);
-    const detail = { deviceId, name: known[deviceId].name, remoteName: safeRemoteName, isNew: !existing, fingerprintChanged };
+    const detail = {
+        deviceId, name: known[deviceId].name, remoteName: safeRemoteName, isNew: !existing,
+        fingerprintChanged, fingerprintAutoPromoted: promoted && rawChanged
+    };
     for (const fn of peerIdentityListeners) {
         try { fn(detail); } catch (err) {}
     }
     return detail;
+}
+
+/**
+ * Decides what an identity frame's `uid` extras are worth BEFORE anything is
+ * written (#32). Returns null (ignore the extras entirely) or
+ * {userPub, certIssuedAt, promote}:
+ *   - promote:false — first contact: pin this userPub TOFU-style. Recording
+ *     it requires a VERIFIED cert over THIS connection's live fingerprint,
+ *     so a userPub on file is always proof-of-possession, never a bare claim.
+ *   - promote:true  — the pinned userPub re-attested this device under a
+ *     NEWER cert: eligible for silent fingerprint-pin promotion.
+ * Order matters: the revocation latch is checked FIRST — a revoked device
+ * presenting a fresh, validly-signed cert must never promote past the
+ * revocation (the stolen device still holds its keys; that's the point).
+ */
+async function evaluateIdentityUid(deviceId, uidRaw, liveFp) {
+    if (!liveFp || !uidRaw || typeof uidRaw !== 'object') return null;
+    const { userPub, cert } = uidRaw;
+    if (!isUserPub(userPub)) return null;
+    const known = readKnownPeers();
+    const rec = known[deviceId];
+    if (rec && rec.revoked) return null;
+    if (!cert || typeof cert !== 'object') return null;
+    if (cert.deviceId !== deviceId) return null;
+    // The fingerprint the cert vouches for must be the one THIS connection
+    // actually negotiated — a value carried in the frame proves nothing.
+    if (cert.fingerprint !== liveFp) return null;
+    if (!(await verifyDeviceCert(userPub, cert))) return null;
+    if (rec && rec.userPub) {
+        // Claiming a DIFFERENT user than the one pinned earns nothing —
+        // neither promotion nor a re-pin (that would be the impersonation).
+        if (rec.userPub !== userPub) return null;
+        // Strictly-newer issuedAt: an attacker replaying an OLDER still-valid
+        // cert (from a separately compromised past certificate) can't roll
+        // the pin backward.
+        if (!(cert.issuedAt > (rec.deviceCertIssuedAt || 0))) return null;
+        return { userPub, certIssuedAt: cert.issuedAt, promote: true };
+    }
+    return { userPub, certIssuedAt: cert.issuedAt, promote: false };
+}
+
+// Own signed device cert, rebuilt only when the fingerprint or user key
+// actually changes (both are stable within a session in practice).
+let uidExtrasCache = null; // { fingerprint, userPub, cert }
+
+/**
+ * The `uid` extras for an outgoing identity frame, or null when the user
+ * never set up an identity (the frame then looks exactly like today's).
+ * peerId names any live link — this side's DTLS fingerprint is the same on
+ * every link (one persistent RTC certificate).
+ */
+async function buildIdentityExtras(mp, peerId) {
+    const meta = readUserIdentityMeta();
+    if (!meta) return null;
+    let ownFp = null;
+    try { ownFp = mp.peerNode.getOwnFingerprint(peerId); } catch (e) {}
+    if (!ownFp) return null;
+    if (!uidExtrasCache || uidExtrasCache.fingerprint !== ownFp
+            || uidExtrasCache.userPub !== meta.userPub) {
+        const cert = await signDeviceCert(getMyDeviceId(), ownFp);
+        if (!cert) return null; // key store unavailable — announce plain
+        uidExtrasCache = { fingerprint: ownFp, userPub: meta.userPub, cert };
+    }
+    return { userPub: uidExtrasCache.userPub, cert: uidExtrasCache.cert, revocations: gossipRevocations() };
+}
+
+// Every latched revocation whose target has a userPub on file rides along
+// as gossip (newest first, capped — the cap is a frame-size bound, and 8
+// simultaneously-lost devices is beyond any honest fleet). Receivers verify
+// each entry against their OWN records, so carrying another user's
+// revocation is safe and widens propagation.
+const REVOCATION_GOSSIP_CAP = 8;
+function gossipRevocations() {
+    const known = readKnownPeers();
+    const out = [];
+    for (const id of Object.keys(known)) {
+        const rec = known[id];
+        if (rec && rec.revoked && rec.userPub) {
+            out.push({ deviceId: id, revokedAt: rec.revoked.revokedAt, sig: rec.revoked.sig });
+        }
+    }
+    out.sort((a, b) => b.revokedAt - a.revokedAt);
+    return out.slice(0, REVOCATION_GOSSIP_CAP);
+}
+
+/**
+ * Verifies and latches one revocation entry (#32). The signature check runs
+ * against the userPub THIS device already pinned for the target — never a
+ * value carried alongside the entry — so only the holder of that user's
+ * private key can produce an entry that passes, no matter who carried it.
+ * On success: one-way latch, drop any live link, forget the pairing secret,
+ * and quarantine (autoReconnect off + suspect) so nothing auto-heals it.
+ */
+async function applyRevocation(entry, source) {
+    if (entry.deviceId === getMyDeviceId()) return false; // peers judge me; nothing to latch locally
+    const rec = readKnownPeers()[entry.deviceId];
+    if (!rec || !rec.userPub || rec.revoked) return false;
+    if (!(await verifyRevocation(rec.userPub, entry))) return false;
+    if (!markKnownPeerRevoked(entry.deviceId, entry)) return false;
+    ArcadeDiag.log('bridge', `revocation latched for ${entry.deviceId} (${source})`);
+    fingerprintSuspects.add(entry.deviceId);
+    try {
+        const pid = deviceIndex.get(entry.deviceId);
+        if (pid !== undefined && addon && addon.peerNode.peers.has(pid)) {
+            addon.peerNode.disconnectPeer(pid);
+            addon.peerNode.forgetSession(pid);
+        }
+        if (rdv) await rdv.disablePair(entry.deviceId).catch(() => {});
+        unbindDevice(entry.deviceId);
+    } catch (e) {}
+    const known = readKnownPeers();
+    if (known[entry.deviceId]) {
+        known[entry.deviceId].autoReconnect = false;
+        writeKnownPeers(known);
+    }
+    for (const fn of revokedListeners) {
+        try { fn({ deviceId: entry.deviceId, name: rec.name || 'Unnamed device' }); } catch (err) {}
+    }
+    notifyRosterChange();
+    return true;
+}
+
+/** Gossip arrivals: shape-gate each entry, then the same verify-and-latch. */
+async function processRevocationGossip(entries) {
+    if (!Array.isArray(entries)) return;
+    for (const raw of entries.slice(0, REVOCATION_GOSSIP_CAP)) {
+        const v = validateRevocationEntry(raw);
+        if (!v.ok) continue;
+        try { await applyRevocation(v.entry, 'gossip'); } catch (e) {}
+    }
 }
 
 function loadLocalScript(relPath, checkGlobal) {
@@ -621,9 +813,7 @@ async function ensureAddon() {
                     const seat = getSeat(peerId);
                     if (!seat.announced) {
                         seat.announced = true;
-                        try {
-                            mp.send(identityFrame());
-                        } catch (err) {}
+                        sendIdentity(mp, peerId);
                     }
                 }
             } else if (peerId && (status === 'disconnected' || status === 'failed' || status === 'closed')) {
@@ -686,6 +876,21 @@ async function ensureAddon() {
                 const backupDev = deviceIdForPeerId(d.peerId);
                 if (!backupDev) return;
                 for (const fn of backupListeners) { try { fn(backupDev, env); } catch (err) {} }
+                return;
+            }
+            if (shape.kind === 'revoke') {
+                // Signed device revocation (#32): same delivery rules as
+                // 'sync'/'backup'. The envelope IS the entry ({deviceId,
+                // revokedAt, sig} ride at the top level); applyRevocation
+                // verifies the signature against the userPub already pinned
+                // for the TARGET device, so nothing here trusts the sender
+                // beyond "has a completed identity binding".
+                if (d.relayed) return;
+                const revokeSender = deviceIdForPeerId(d.peerId);
+                if (!revokeSender) return;
+                const rv = validateRevocationEntry(env);
+                if (!rv.ok) return;
+                applyRevocation(rv.entry, 'direct push from ' + revokeSender).catch(() => {});
                 return;
             }
             if (shape.kind === 'game') {
@@ -751,7 +956,30 @@ async function ensureAddon() {
             // recordPeerIdentity re-checks it (defense in depth for its other
             // callers) and owns name/fingerprint normalization.
             const fp = d.relayed ? null : mp.peerNode.getPeerFingerprint(d.peerId);
-            const detail = recordPeerIdentity(env.deviceId, env.name, fp);
+            if (!d.relayed && env.uid && typeof env.uid === 'object') {
+                // Cross-signed identity (#32): signature checks are async, so
+                // this frame completes a few microtasks later than a plain
+                // one. Safe: nothing that needs the binding (sync/backup/
+                // targeted frames) dispatches until the binding exists, and
+                // peers only talk after announcing. The verdict is computed
+                // BEFORE recordPeerIdentity so the pin promotion and the
+                // pending-pin stash are decided in one atomic write.
+                (async () => {
+                    let uid = null;
+                    try { uid = await evaluateIdentityUid(env.deviceId, env.uid, fp); } catch (err) {}
+                    finishIdentityBranch(mp, d, env, recordPeerIdentity(env.deviceId, env.name, fp, uid));
+                    try { await processRevocationGossip(env.uid.revocations); } catch (err) {}
+                })();
+                return;
+            }
+            finishIdentityBranch(mp, d, env, recordPeerIdentity(env.deviceId, env.name, fp));
+        });
+
+        // Everything after an identity frame's upsert: relay bookkeeping,
+        // seat binding, roster, pause-clear, suspect marking, pairing mint.
+        // Extracted verbatim from the listener so the cross-signed (async)
+        // and plain (sync) arrival paths above cannot drift apart.
+        function finishIdentityBranch(mp, d, env, detail) {
             if (!detail) return; // bind nothing
             if (d.relayed && !mp.peerNode.isHost && typeof d.from === 'string'
                     && env.deviceId !== getMyDeviceId()) {
@@ -784,9 +1012,7 @@ async function ensureAddon() {
                     // their identity is already recorded here, so their
                     // handler's own first-sighting re-announce (of us) finds
                     // nothing new on this side.
-                    try {
-                        mp.send(identityFrame());
-                    } catch (err) {}
+                    sendIdentity(mp, d.peerId);
                 }
             }
             if (!d.relayed) {
@@ -821,6 +1047,11 @@ async function ensureAddon() {
                 // 'connected' time this seat's deviceId binding didn't exist.)
                 setKnownPeerPaused(env.deviceId, false);
                 if (detail.fingerprintChanged) fingerprintSuspects.add(env.deviceId);
+                // A verified re-attestation (#32) clears any leftover suspect
+                // state from an earlier session's unverified sighting of the
+                // same rotation — the pending pin was already promoted inside
+                // recordPeerIdentity's write.
+                if (detail.fingerprintAutoPromoted) fingerprintSuspects.delete(env.deviceId);
                 // A manual ceremony with an auto-reconnect peer is a fresh
                 // trust event: re-establish the pairing secret every time —
                 // UNLESS this link's fingerprint mismatches the pinned one.
@@ -838,7 +1069,7 @@ async function ensureAddon() {
                     stampLiveSession();
                 }
             }
-        });
+        }
 
         // Rendezvous (PROTOCOL.md §7): zero-touch reconnection for opted-in
         // pairs. The carrier moves only sealed blobs; episodes surface to
@@ -1147,9 +1378,13 @@ export const ArcadeP2P = {
     /**
      * Subscribe to peer identity handshakes — fires once per newly-connected
      * transport peer once its self-reported identity arrives (a beat after
-     * its status goes 'connected'): fn({deviceId, name, remoteName, isNew}).
-     * `name` is the locally-stored label (see index.html's Known Peers menu
-     * panel for rename/delete); `isNew` marks a device seen for the first time.
+     * its status goes 'connected'): fn({deviceId, name, remoteName, isNew,
+     * fingerprintChanged, fingerprintAutoPromoted}). `name` is the
+     * locally-stored label (see index.html's Known Peers menu panel for
+     * rename/delete); `isNew` marks a device seen for the first time.
+     * `fingerprintAutoPromoted` (#32) means the fingerprint DID rotate but a
+     * verified device cert from the pinned userPub covered it — the pin was
+     * updated silently and no warning should be shown.
      */
     onPeerIdentity(fn) {
         peerIdentityListeners.push(fn);
@@ -1157,6 +1392,53 @@ export const ArcadeP2P = {
             const i = peerIdentityListeners.indexOf(fn);
             if (i >= 0) peerIdentityListeners.splice(i, 1);
         };
+    },
+
+    /**
+     * Subscribe to verified revocation latches (#32): fn({deviceId, name})
+     * fires after a revocation of a known device passed signature
+     * verification and was recorded — however it arrived (direct push,
+     * identity-frame gossip, or this device's own revokeDevice call).
+     */
+    onRevoked(fn) {
+        revokedListeners.push(fn);
+        return () => {
+            const i = revokedListeners.indexOf(fn);
+            if (i >= 0) revokedListeners.splice(i, 1);
+        };
+    },
+
+    /**
+     * Revoke one of THIS user's own devices (#32) — the lost-phone action.
+     * Only permitted when the target's pinned userPub equals this device's
+     * own user identity (cryptographic proof it's literally another of the
+     * user's devices — this API can never "ban" someone else's device).
+     * Signs the revocation, latches it locally (quarantining the target out
+     * of auto-reconnect/sync/backup), then pushes it to every currently
+     * connected peer; identity-frame gossip carries it to everyone else
+     * over time. Best-effort propagation by design — there is no server to
+     * guarantee delivery, matching sync/backup's posture. Returns false when
+     * the target isn't provably ours or nothing could be signed.
+     */
+    async revokeDevice(deviceId) {
+        ArcadeDiag.log('bridge', `user action: revoke device ${deviceId}`);
+        const meta = readUserIdentityMeta();
+        const rec = readKnownPeers()[deviceId];
+        if (!meta || !rec || rec.userPub !== meta.userPub || rec.revoked) return false;
+        const entry = await signRevocation(deviceId);
+        if (!entry) return false;
+        // Same verify-and-latch path gossip uses — our own signature passes
+        // the same gate, so the local latch can never diverge from what
+        // peers will accept.
+        const applied = await applyRevocation(entry, 'local user action');
+        if (!applied) return false;
+        if (addon) {
+            for (const [devId, pid] of deviceIndex) {
+                if (devId === deviceId || !seatReachable(pid)) continue;
+                try { addon.sendTo(pid, { arcade: 1, kind: 'revoke', ...entry }); } catch (e) {}
+            }
+        }
+        return true;
     },
 
     /**
@@ -1238,6 +1520,10 @@ export const ArcadeP2P = {
         ArcadeDiag.log('bridge', `user action: enable auto-reconnect for ${deviceId}`);
         const known = readKnownPeers();
         if (!known[deviceId]) return false;
+        // A revoked device (#32) cannot be re-trusted through this path —
+        // the UI hides the toggle, but the API refuses too. The only way
+        // back is the explicit local un-revoke (clearKnownPeerRevoked).
+        if (known[deviceId].revoked) return false;
         known[deviceId].autoReconnect = true;
         // Explicit user decision — re-trust this device even if its fingerprint
         // changed. Promote any pending fingerprint to the trusted pin so future
