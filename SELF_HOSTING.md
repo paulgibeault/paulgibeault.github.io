@@ -105,20 +105,22 @@ total-quota=12
 max-bps=1000000
 ```
 
-Then in **Multiplayer → Advanced → ICE servers**, add a TURN entry to the
-prepopulated JSON array. Keep the `stun:` entries so direct connections are
-still preferred — TURN is the fallback, not the first choice:
+Then in **Multiplayer → Advanced → ICE servers**, add your TURN lines below
+the prepopulated STUN defaults — one server per line, with TURN lines
+carrying `username password` after the URL. Keep the `stun:` lines so direct
+connections are still preferred — TURN is the fallback, not the first choice:
 
-```json
-[
-  { "urls": "stun:stun.l.google.com:19302" },
-  {
-    "urls": ["turn:turn.example.com:3478", "turns:turn.example.com:5349"],
-    "username": "arcade",
-    "credential": "choose-a-long-random-password"
-  }
-]
 ```
+stun:stun.l.google.com:19302
+stun:stun1.l.google.com:19302
+stun:stun2.l.google.com:19302
+stun:stun.services.mozilla.com
+turn:turn.example.com:3478 arcade choose-a-long-random-password
+turns:turn.example.com:5349 arcade choose-a-long-random-password
+```
+
+(The panel stores this canonically as an `RTCIceServer[]` JSON array under
+`arcade.v1._meta.iceServers` — relevant only if you set the key by hand.)
 
 This replaces the built-in STUN list entirely (it doesn't merge), and it
 applies to every connection the transport makes — first pairing, in-band

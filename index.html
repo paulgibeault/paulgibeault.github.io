@@ -386,8 +386,8 @@
             <div class="connections-dialog__advanced-body">
                 <label for="connections-dialog-brokers">Rendezvous brokers — one <code>wss://</code> URL per line</label>
                 <textarea id="connections-dialog-brokers" class="connections-dialog__advanced-input" rows="4" spellcheck="false" placeholder="wss://my-broker.example.com:8081/mqtt"></textarea>
-                <label for="connections-dialog-ice">ICE servers — STUN/TURN, JSON array</label>
-                <textarea id="connections-dialog-ice" class="connections-dialog__advanced-input" rows="6" spellcheck="false" placeholder='[{"urls":"turn:turn.example.com:3478","username":"u","credential":"p"}]'></textarea>
+                <label for="connections-dialog-ice">ICE servers — one <code>stun:</code>/<code>turn:</code>/<code>turns:</code> URL per line (TURN: append username and password)</label>
+                <textarea id="connections-dialog-ice" class="connections-dialog__advanced-input" rows="6" spellcheck="false" placeholder="turn:turn.example.com:3478 username password"></textarea>
                 <p class="connections-dialog__advanced-hint">
                     These are the built-in defaults — add, remove, or replace entries
                     to override them (restoring or blanking a field returns to the
@@ -2431,6 +2431,41 @@
         const advSave = document.getElementById('connections-dialog-advanced-save');
         const advStatus = document.getElementById('connections-dialog-advanced-status');
 
+        // The panel speaks a line format — `url` for STUN, `url user password`
+        // for TURN — but the stored key stays a canonical RTCIceServer[] (what
+        // the transport consumes, and what PROTOCOL.md documents).
+        function iceServersToLines(arr) {
+            const lines = [];
+            for (const s of arr) {
+                for (const u of [].concat(s.urls)) {
+                    lines.push(s.username !== undefined ? `${u} ${s.username} ${s.credential}` : u);
+                }
+            }
+            return lines.join('\n');
+        }
+        function parseIceLines(text) {
+            const servers = [];
+            for (const rawLine of text.split('\n')) {
+                const line = rawLine.trim();
+                if (!line) continue;
+                const url = line.split(/\s+/, 1)[0];
+                if (!/^(stun|turn|turns):/i.test(url)) {
+                    return { error: 'each line must start with a stun:, turn:, or turns: URL.' };
+                }
+                if (/^turns?:/i.test(url)) {
+                    // Credential may contain spaces; everything after the
+                    // username token is taken verbatim.
+                    const m = line.match(/^\S+\s+(\S+)\s+(.+)$/);
+                    if (!m) return { error: 'TURN lines are “url username password” — the browser rejects TURN without credentials.' };
+                    servers.push({ urls: url, username: m[1], credential: m[2] });
+                } else {
+                    if (/\s/.test(line)) return { error: 'STUN lines take no username/password.' };
+                    servers.push({ urls: url });
+                }
+            }
+            return { servers };
+        }
+
         async function populateAdvanced() {
             // Stored overrides win; otherwise show the REAL built-in defaults
             // so the default path is visible and individual entries can be
@@ -2442,13 +2477,13 @@
             } catch (e) {}
             try {
                 const raw = localStorage.getItem(ICE_SERVERS_KEY);
-                if (raw) iceVal = JSON.stringify(JSON.parse(raw), null, 2);
+                if (raw) iceVal = iceServersToLines(JSON.parse(raw));
             } catch (e) {}
             if (!brokersVal || !iceVal) {
                 try {
                     const b = await window.__arcade.loadP2P();
                     if (!brokersVal) brokersVal = b.defaultBrokerUrls().join('\n');
-                    if (!iceVal) iceVal = JSON.stringify(b.defaultIceServers(), null, 2);
+                    if (!iceVal) iceVal = iceServersToLines(b.defaultIceServers());
                 } catch (e) {} // bridge unavailable — leave the field blank
             }
             advBrokers.value = brokersVal;
@@ -2473,16 +2508,19 @@
             }
             let iceParsed = null;
             if (iceText) {
-                try { iceParsed = JSON.parse(iceText); } catch (e) {
-                    setAdvStatus('ICE servers: not valid JSON.', true);
+                const res = parseIceLines(iceText);
+                if (res.error) {
+                    setAdvStatus('ICE servers: ' + res.error, true);
                     return;
                 }
-                const valid = bridge.validateIceServers(iceParsed);
-                if (!valid || valid.length !== iceParsed.length) {
-                    setAdvStatus('ICE servers: each entry needs a stun:/turn:/turns: "urls" (plus optional string username/credential).', true);
-                    return;
+                if (res.servers.length) {
+                    const valid = bridge.validateIceServers(res.servers);
+                    if (!valid || valid.length !== res.servers.length) {
+                        setAdvStatus('ICE servers: each line needs a valid stun:/turn:/turns: URL.', true);
+                        return;
+                    }
+                    iceParsed = valid;
                 }
-                iceParsed = valid;
             }
             if (brokerLines.length) {
                 const valid = bridge.validateBrokerUrls(brokerLines);
