@@ -1,8 +1,10 @@
 # Paul's Arcade — Game Integration Template
 
 The minimal contract every game must satisfy to slot cleanly into the launcher.
-The SDK is a single file at `https://paulgibeault.github.io/arcade-sdk.js`;
-the rest is convention. Protocol version: **v2**.
+The SDK is a single file served from the launcher origin — pin the current
+major at `/sdk/v3/arcade-sdk.js` (`/arcade-sdk.js` is the evergreen alias);
+the rest is convention. SDK major: **v3** (semver + release log in
+[`sdk/CHANGELOG.md`](sdk/CHANGELOG.md)).
 
 For background see [ARCADE_PLATFORM.md](ARCADE_PLATFORM.md). This file is the
 implementer's checklist.
@@ -42,11 +44,18 @@ fragments (invite/reply links) take precedence over `#app=`.
 Drop two lines into `<head>` of `index.html`, before any game script that touches storage:
 
 ```html
-<script src="/arcade-sdk.js"></script>
+<script src="/sdk/v3/arcade-sdk.js"></script>
 <script>Arcade.init({ gameId: '<your-game-id>' });</script>
 ```
 
-Use a **root-relative** URL (`/arcade-sdk.js`), not the absolute
+Use the **major-pinned** path (`/sdk/v3/...`): it keeps serving SDK v3 even
+after a breaking v4 ships, so a launcher deploy can never brick a game that
+hasn't migrated. `/arcade-sdk.js` is the evergreen alias (always the newest
+major) — existing games loading it keep working, but new integrations should
+pin. Within a major, launcher↔SDK feature compatibility is negotiated at
+runtime by `welcome.caps`, never by version numbers.
+
+Use a **root-relative** URL, not the absolute
 `https://paulgibeault.github.io/...` form. Both work in production, but
 root-relative also resolves correctly when a local-dev harness stages the
 launcher and game side-by-side under `127.0.0.1`, so no rewrite is needed.
@@ -785,8 +794,8 @@ cleanup).
 
 - [ ] `manifest.json` `"scope"` and `"start_url"` are scoped to `/<gameId>/`, not `/`.
 - [ ] If the game registers a service worker, register it with `{ scope: '/<gameId>/' }` and place `sw.js` inside that path.
-- [ ] The service worker only caches assets under `/<gameId>/`. **Never** cache `/arcade-sdk.js` or anything at the launcher root — the SDK inspects the origin's caches at load and reports a `console.error` (plus a visible toast in `?dev=1` mode) when a game cache holds launcher files.
-- [ ] The fetch handler must ignore out-of-scope URLs. A controlled page routes **every** request through its SW — including `/arcade-sdk.js` — so the guard is mandatory, not optional:
+- [ ] The service worker only caches assets under `/<gameId>/`. **Never** cache the SDK (`/sdk/v3/arcade-sdk.js` or `/arcade-sdk.js`) or anything else at the launcher root — the SDK inspects the origin's caches at load and reports a `console.error` (plus a visible toast in `?dev=1` mode) when a game cache holds launcher files.
+- [ ] The fetch handler must ignore out-of-scope URLs. A controlled page routes **every** request through its SW — including the SDK script — so the guard is mandatory, not optional:
 
   ```js
   self.addEventListener('fetch', (event) => {
@@ -808,7 +817,7 @@ cleanup).
   version-keyed prefix (`<gameId>-*`) and never unregister workers you didn't
   register.
 
-> The launcher's own service worker lives at `/sw.js` (root scope), caches only launcher-owned files (`index.html`, `arcade-sdk.js`, `styles.css`, `p2p/`, launcher images), and its fetch handler path-filters to those same trees — requests for `/<gameId>/...` fall through untouched. The launcher SW is also skipped on loopback hosts (`localhost`, `127.x`, `::1`) so local-dev edits to launcher or SDK are never masked by stale cache.
+> The launcher's own service worker lives at `/sw.js` (root scope), caches only launcher-owned files (`index.html`, `arcade-sdk.js`, the `sdk/` pinned copies, `styles.css`, `p2p/`, launcher images), and its fetch handler path-filters to those same trees — requests for `/<gameId>/...` fall through untouched. The launcher SW is also skipped on loopback hosts (`localhost`, `127.x`, `::1`) so local-dev edits to launcher or SDK are never masked by stale cache.
 
 ---
 
@@ -884,7 +893,7 @@ A game is considered integrated when all of the following pass:
 - [ ] Any off-device / imported / shared string the game renders (peer names & messages, imported pack/level names, score entries) is escaped via `Arcade.html.escape` / `textContent` — a value like `"><img src=x onerror=alert(1)>` renders inertly.
 - [ ] If the game uses `Arcade.store` / `Arcade.files`, a Launcher Save → Load round-trip restores that data too (it rides the schema-v2 bundle).
 - [ ] Standalone URL (`https://paulgibeault.github.io/<gameId>/`) still works exactly as before.
-- [ ] Service worker (if any) does not intercept requests for `/arcade-sdk.js` or other launcher assets (no `[Arcade SDK]` warning in console).
+- [ ] Service worker (if any) does not intercept requests for the SDK (`/sdk/v3/arcade-sdk.js` / `/arcade-sdk.js`) or other launcher assets (no `[Arcade SDK]` warning in console).
 - [ ] `Arcade.peer.caps()` inside the launcher frame reports the full documented capability list (§14) — the caps contract arrived intact.
 - [ ] The game keeps working when a cap is absent (older launcher): gate every capability-backed feature on `Arcade.peer.caps()`, never assume the full list.
 
