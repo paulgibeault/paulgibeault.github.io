@@ -345,13 +345,17 @@ function identityFrame() {
 // frame goes out a microtask later than the sync version did, which is
 // invisible at data-channel timescales. Callers mark seat.announced BEFORE
 // calling (same discipline as before), so no double-announce is possible.
+// Resolves true when the frame was sent/queued on at least one link — a
+// false return means the announce is LOST unless the caller retries (field
+// report 2026-07-17: a host that never received the joiner's announce never
+// records the peer, silently and permanently).
 async function sendIdentity(mp, peerId) {
     const frame = identityFrame();
     try {
         const extras = await buildIdentityExtras(mp, peerId);
         if (extras) frame.uid = extras;
     } catch (e) {} // extras are strictly optional — announce plain
-    try { mp.send(frame); } catch (e) {}
+    try { return mp.send(frame) === true; } catch (e) { return false; }
 }
 
 function deviceIdForPeerId(peerId) {
@@ -390,6 +394,67 @@ function seatReachable(peerId) {
     if (!addon || peerId === undefined || peerId === null) return false;
     if (addon.peerNode.hasLink(peerId)) return true;
     return addon.peerNode.hasStashedSession(peerId) && rdvReconnecting.has(peerId);
+}
+
+// ---- Identity-announce hardening (field report 2026-07-17) ----------------
+// A connected pair where one side never received the other's identity frame
+// used to stay broken silently and permanently: the announce was one-shot
+// fire-and-forget, and the receiving side had no way to ask for it — the
+// user just never saw the peer appear in Known Devices. Three counters:
+//   1. announceSeat() resets the announced latch and retries when the send
+//      never reached the transport;
+//   2. an 'arcade.identity' ext frame (direct-link control channel, same
+//      trust as all ext frames) lets a device REQUEST an announce;
+//   3. requestIdentityIfUnbound() fires that request when a link stays
+//      unbound past a grace, or when app frames arrive on an unbound link.
+// Both directions are throttled per link so a hostile peer can't use the
+// request to amplify broadcasts.
+const IDENTITY_REQ_NS = 'arcade.identity';
+const IDENTITY_REQ_THROTTLE_MS = 5000;
+const identityReqSentAt = new Map();   // peerId → when we last ASKED them
+const identityReqServedAt = new Map(); // peerId → when we last ANSWERED them
+
+function identityThrottleOk(map, peerId) {
+    const now = Date.now();
+    if (now - (map.get(peerId) || 0) < IDENTITY_REQ_THROTTLE_MS) return false;
+    map.set(peerId, now);
+    return true;
+}
+
+function forgetIdentityThrottles(peerId) {
+    identityReqSentAt.delete(peerId);
+    identityReqServedAt.delete(peerId);
+}
+
+/**
+ * Announces our identity on a link, owning the seat's announced latch: set
+ * before sending (no double-announce), reset — with one delayed retry — when
+ * the send never made it onto a link.
+ */
+function announceSeat(mp, peerId, { retry = true } = {}) {
+    const seat = getSeat(peerId);
+    seat.announced = true;
+    sendIdentity(mp, peerId).then((ok) => {
+        if (ok || seats.get(peerId) !== seat) return;
+        seat.announced = false;
+        ArcadeDiag.log('bridge', `identity announce to ${peerId} did not send${retry ? ' — retrying' : ''}`);
+        if (!retry) return;
+        setTimeout(() => {
+            const s = seats.get(peerId);
+            if (s && !s.announced && mp.peerNode.hasLink(peerId)) {
+                announceSeat(mp, peerId, { retry: false });
+            }
+        }, 1500);
+    });
+}
+
+/** Asks a live-but-unbound link's peer to (re)announce its identity. */
+function requestIdentityIfUnbound(mp, peerId) {
+    if (!peerId || !mp.peerNode.hasLink(peerId)) return;
+    if (deviceIdForPeerId(peerId)) return;
+    if (!identityThrottleOk(identityReqSentAt, peerId)) return;
+    ArcadeDiag.log('bridge', `link ${peerId} has no identity binding — requesting an announce`);
+    mp.peerNode.sendExt(peerId, IDENTITY_REQ_NS, { req: 1 });
 }
 
 // Roster: the per-device view of every DIRECT link (a host sees all joiners;
@@ -705,6 +770,8 @@ function setStatus(next) {
         seats.clear();
         deviceIndex.clear();
         indirectPeers.clear();
+        identityReqSentAt.clear();
+        identityReqServedAt.clear();
         hostCaps = new Set();
         if (hadLinks) notifyRosterChange();
     }
@@ -810,10 +877,11 @@ async function ensureAddon() {
                 if (devId) setKnownPeerPaused(devId, false);
                 if (peerId) {
                     const seat = getSeat(peerId);
-                    if (!seat.announced) {
-                        seat.announced = true;
-                        sendIdentity(mp, peerId);
-                    }
+                    if (!seat.announced) announceSeat(mp, peerId);
+                    // Belt and braces for the reverse direction: if THEIR
+                    // announce hasn't produced a binding shortly after
+                    // connect, ask for it (throttled; no-op once bound).
+                    setTimeout(() => requestIdentityIfUnbound(mp, peerId), 4000);
                 }
             } else if (peerId && (status === 'disconnected' || status === 'failed' || status === 'closed')) {
                 // Terminal disconnect: reset announce/mint so a reconnect
@@ -823,7 +891,21 @@ async function ensureAddon() {
                 // idle clears every seat).
                 const seat = seats.get(peerId);
                 if (seat) { seat.announced = false; seat.minted = false; }
+                forgetIdentityThrottles(peerId);
             }
+        });
+
+        // A peer noticed our identity never landed and asked for it (see the
+        // announce-hardening block above). Ext frames arrive on the direct
+        // link only, so peerId names a real link partner; the served-side
+        // throttle bounds a spammy peer to one broadcast per window.
+        mp.peerNode.addEventListener('control-ext', (e) => {
+            const { peerId, ns, data } = e.detail || {};
+            if (ns !== IDENTITY_REQ_NS || !data || !data.req) return;
+            if (!peerId || !mp.peerNode.hasLink(peerId)) return;
+            if (!identityThrottleOk(identityReqServedAt, peerId)) return;
+            ArcadeDiag.log('bridge', `peer ${peerId} requested an identity announce — re-announcing`);
+            announceSeat(mp, peerId);
         });
 
         // ALL arcade envelopes are handled at the TRANSPORT level, where the
@@ -841,6 +923,13 @@ async function ensureAddon() {
             // decisions (relayed gates, targeting, attribution) stay below.
             const shape = validatePeerEnvelope(env);
             if (!shape.ok) return;
+            // A direct frame from a link we hold no identity binding for
+            // means their announce got lost (the sync/backup/revoke/game
+            // paths below will refuse or misattribute it) — ask them to
+            // re-announce instead of staying silently deaf.
+            if (!d.relayed && shape.kind !== 'identity' && !deviceIdForPeerId(d.peerId)) {
+                requestIdentityIfUnbound(mp, d.peerId);
+            }
             if (shape.kind === 'presence') {
                 // The remote launcher says a game with this gameId is mounted
                 // and listening over there.

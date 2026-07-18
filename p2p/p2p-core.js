@@ -50,11 +50,19 @@ export class ConnectionUtils {
 
     /**
      * Strips bulky/unnecessary lines from an SDP string to reduce QR code size.
-     * Specifically filters out TCP candidates and optionally mDNS (.local) and IPv6 based on options.
+     * Filters out TCP candidates, optionally mDNS (.local) and IPv6 (per
+     * options), and keeps only the FIRST candidate per (type × address family)
+     * category. Phones routinely gather several IPv6 privacy addresses and one
+     * mDNS name per interface — each redundant candidate costs 7-19 packed
+     * bytes, which is what pushes the QR past comfortably-scannable versions.
+     * One candidate per category preserves every distinct connectivity path
+     * (mDNS same-LAN, direct v4, direct v6, reflexive, relay); the duplicates
+     * it drops were alternates for the SAME path.
      */
     static minifySDP(sdpStr, options = {}) {
         const allowLocal = options.allowLocalCandidates !== false;
         const allowIPv6 = options.allowIPv6Candidates !== false;
+        const seenCategories = new Set();
         const lines = sdpStr.split('\r\n');
         const minified = lines.filter(line => {
             if (line.startsWith('a=candidate:')) {
@@ -65,9 +73,17 @@ export class ConnectionUtils {
                 if (!allowLocal && line.includes('.local')) return false;
 
                 const parts = line.split(' ');
-                // Drop IPv6 candidates if not allowed (address is part 4, 0-indexed)
-                if (!allowIPv6 && parts.length > 4 && parts[4].includes(':')) return false;
+                const address = parts.length > 4 ? parts[4] : '';
+                // Drop IPv6 candidates if not allowed
+                if (!allowIPv6 && address.includes(':')) return false;
 
+                const typIdx = parts.indexOf('typ');
+                const type = typIdx >= 0 ? parts[typIdx + 1] : 'host';
+                const family = address.endsWith('.local') ? 'mdns'
+                    : (address.includes(':') ? 'v6' : 'v4');
+                const category = `${type}/${family}`;
+                if (seenCategories.has(category)) return false;
+                seenCategories.add(category);
                 return true;
             }
             return true;
@@ -931,6 +947,10 @@ export class PeerManager extends EventTarget {
         } else {
             this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'error', msg: 'Cannot send, no channels open.' }}));
         }
+        // True when the frame was sent or queued on at least one link — lets
+        // callers that must not lose a frame (identity announce) detect the
+        // no-links case instead of firing and forgetting.
+        return sent;
     }
 
     // ---- link lifecycle (v1.7) -------------------------------------------

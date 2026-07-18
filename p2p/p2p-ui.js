@@ -222,6 +222,11 @@ export class P2PUIManager {
 
                 this.logDiag('info', 'Invite link received. Preparing your reply code...');
                 const answerData = await this.peerNode.createAnswer(data);
+                // This join ceremony owns the host's link — without this, the
+                // 'connected' status event is filtered as "not my ceremony"
+                // and the modal never auto-closes on the link path (the QR
+                // scan path sets it in the btnJoin handler).
+                this._ceremonyPeerId = data.peerId;
 
                 // QR-first even on the link path: show OUR code for them to
                 // scan. Replying by link stays available as the fallback.
@@ -910,13 +915,33 @@ export class P2PUIManager {
 
         try {
             this.ui.qrCanvas.innerHTML = '';
+            // Field-test lesson (2026-07-17): a fixed 256px canvas of a
+            // v10-v12 code (200+ char payload) lands at ~4 device-px per
+            // module after the browser upscales it on a 3x phone screen —
+            // blurry enough to defeat scanning. Three counters:
+            //   size — fill the modal (phones hold the code at arm's length);
+            //   dpr  — draw at device resolution, display at CSS size, so
+            //          module edges stay crisp;
+            //   EC   — level M's 15% redundancy costs ~2 QR versions on big
+            //          payloads; screen-to-camera is high-contrast, so L is
+            //          the better trade once the payload is large.
+            const size = Math.round(Math.max(240, Math.min(360, (window.innerWidth || 360) * 0.8)));
+            const dpr = Math.min(Math.max(window.devicePixelRatio || 1, 1), 3);
+            const correctLevel = this.rawSDPPayload.length > 160
+                ? QRCode.CorrectLevel.L : QRCode.CorrectLevel.M;
             new QRCode(this.ui.qrCanvas, {
                 text: this.rawSDPPayload,
-                width: 256,
-                height: 256,
-                // Packed payloads are tiny (~130-180 chars), so we can afford
-                // medium error correction for far more forgiving scans.
-                correctLevel: QRCode.CorrectLevel.M
+                width: Math.round(size * dpr),
+                height: Math.round(size * dpr),
+                correctLevel
+            });
+            // qrcodejs sizes its canvas/img to the raster dimensions — scale
+            // the DISPLAY back down to CSS px (1 CSS px = dpr device px, so
+            // modules map 1:1 onto device pixels).
+            this.ui.qrCanvas.querySelectorAll('canvas, img').forEach((el) => {
+                el.style.width = size + 'px';
+                el.style.height = size + 'px';
+                el.style.imageRendering = 'pixelated';
             });
         } catch(e) {
             this.logDiag('error', `QR Canvas err: ${e.message}`);
