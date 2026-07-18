@@ -851,10 +851,24 @@ export function initSyncEngine(host) {
         return { clock: clock, records: out };
     }
 
+    // Max GC-eviction watermark HLC across all apps — the delta-offer guard
+    // (durability design §6): a backup delta whose base bundle's journal
+    // clock predates this ceiling might not be able to express an evicted
+    // deletion, so the backup engine must offer a full transfer instead.
+    async function gcWatermarkCeiling() {
+        await ensureLoaded();
+        let max = null;
+        for (const wm of watermarks.values()) {
+            if (wm && typeof wm.h === 'string' && (max === null || hlcCompare(wm.h, max) > 0)) max = wm.h;
+        }
+        return max;
+    }
+
     return {
         noteLocalWrite,
         noteImportCommitted,
         exportJournal,
+        gcWatermarkCeiling,
         attachP2P,
         kick,
         onConflict,
