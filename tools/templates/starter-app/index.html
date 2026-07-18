@@ -8,10 +8,12 @@
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css">
 
-  <!-- The Arcade SDK. Load it ROOT-RELATIVE (/arcade-sdk.js), never with an
-       absolute host URL — that way it resolves on the live fleet, under
-       ./dev.sh staging, and in CI with no per-environment rewriting. -->
-  <script src="/arcade-sdk.js"></script>
+  <!-- The Arcade SDK. Load it ROOT-RELATIVE and MAJOR-PINNED (/sdk/v3/...):
+       root-relative so it resolves on the live fleet, under ./dev.sh staging,
+       and in CI with no per-environment rewriting; major-pinned so a future
+       breaking SDK major can never brick this app (/arcade-sdk.js is the
+       evergreen alias that moves with new majors). -->
+  <script src="/sdk/v3/arcade-sdk.js"></script>
   <script>
     // init() is synchronous: it claims this app's identity and starts the
     // launcher handshake. gameId MUST match the catalog entry, the manifest

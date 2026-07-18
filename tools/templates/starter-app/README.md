@@ -19,7 +19,7 @@ adds a `catalog.json` entry so the app shows up in the launcher grid.
 
 ## The contract (see main.js)
 
-- Load the SDK **root-relative**: `<script src="/arcade-sdk.js"></script>`.
+- Load the SDK **root-relative and major-pinned**: `<script src="/sdk/v3/arcade-sdk.js"></script>` (`/arcade-sdk.js` is the evergreen alias; pinning protects the app from a future breaking SDK major).
 - `Arcade.init({ gameId })` — gameId must match the catalog entry, the manifest
   `scope`, and `sw.js`'s `GAME_ID`.
 - `await Arcade.ready` before reading state.

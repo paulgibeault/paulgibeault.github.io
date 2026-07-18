@@ -182,6 +182,13 @@ suspend/resume, settings hooks, scoped manifest + the existing `game-sw.js`) tha
 — one breaking deploy bricks the whole fleet simultaneously (fine for 7 owned games, fatal for an
 ecosystem). Publish at `/sdk/v2/arcade-sdk.js` with the evergreen alias, adopt semver + CHANGELOG,
 implement the handshake version *negotiation* already deferred in `ARCADE_PLATFORM.md:350`.
+✅ **DONE** (2026-07-17, standalone after #40 closed) — published at `/sdk/v3/` not `/sdk/v2/`
+(the SDK generation had moved to 3, the number games already see in `Arcade.context.version`;
+one version story beats matching this plan's stale label). Semver (`SDK_SEMVER`, starts 3.0.0,
+surfaced as `Arcade.context.sdkVersion`) + `sdk/CHANGELOG.md` with the release/freeze procedure;
+`tools/sdk-version-unit.mjs` gates copy-in-sync, major agreement, and changelog. The handshake
+*negotiation* half was NOT built — superseded by caps-as-contract (`welcome.caps`; the wire
+version fields were deliberately retired, see ARCADE_PLATFORM.md "SDK version negotiation").
 
 **C7. Split framework from content** (long pole; needs B13 refactor first). An `arcade-framework`
 repo (SDK, p2p, launcher shell, tools, docs) that `paulgibeault.github.io` becomes the first

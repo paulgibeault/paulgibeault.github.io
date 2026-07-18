@@ -1,4 +1,4 @@
-const CACHE_NAME = 'paul-arcade-v42';
+const CACHE_NAME = 'paul-arcade-v43';
 // Network-first timeout: on lie-fi, stop waiting on the network and serve the
 // cached shell/asset so first paint stays bounded.
 const NET_TIMEOUT_MS = 5000;
@@ -9,6 +9,7 @@ const ASSETS_TO_CACHE = [
   './styles.css',
   './manifest.json',
   './arcade-sdk.js',
+  './sdk/v3/arcade-sdk.js',
   './arcade-p2p.js',
   './arcade-pool.js',
   './arcade-router.js',
@@ -142,7 +143,8 @@ self.addEventListener('fetch', (event) => {
   const isLauncherAsset =
     !rel.includes('/') ||             // '' (root) or a root-level file
     rel.startsWith('p2p/') ||
-    rel.startsWith('images/');
+    rel.startsWith('images/') ||
+    rel.startsWith('sdk/');           // major-pinned SDK URLs (sdk/v3/...)
   if (!isLauncherAsset) return;
   event.respondWith(networkFirst(event.request));
 });

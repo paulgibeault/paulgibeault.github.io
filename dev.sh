@@ -201,6 +201,17 @@ done
 ln -snf "$LAUNCHER_DIR/images" "$STAGE_DIR/images"
 ln -snf "$LAUNCHER_DIR/p2p" "$STAGE_DIR/p2p"
 
+# Major-pinned SDK copies (sdk/v<N>/arcade-sdk.js) — same sed rewrite as the
+# root alias, and a glob for the same reason as arcade-*.js above: a new major
+# stages with zero edits here.
+for src in "$LAUNCHER_DIR"/sdk/v*/arcade-sdk.js; do
+  if [ -f "$src" ]; then
+    rel_dir="sdk/$(basename "$(dirname "$src")")"
+    mkdir -p "$STAGE_DIR/$rel_dir"
+    sed "s|https://paulgibeault.github.io|$LOCAL_ORIGIN|g" "$src" > "$STAGE_DIR/$rel_dir/arcade-sdk.js"
+  fi
+done
+
 # ─── stage each game ───────────────────────────────────────────────────
 STAGED_IDS=""
 for arg in "$@"; do
@@ -278,7 +289,7 @@ echo "  Launcher:  $LOCAL_ORIGIN/"
 for game_id in $STAGED_IDS; do
   echo "  Game:      $LOCAL_ORIGIN/$game_id/   (standalone)"
 done
-echo "  SDK:       $LOCAL_ORIGIN/arcade-sdk.js"
+echo "  SDK:       $LOCAL_ORIGIN/arcade-sdk.js  (major-pinned copies under /sdk/v<N>/)"
 echo
 echo "  PID:       $NEW_PID"
 echo "  Log:       $LOG_FILE"
