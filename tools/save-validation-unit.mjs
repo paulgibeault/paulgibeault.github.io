@@ -22,7 +22,18 @@ import {
     checksumBundle,
     SAVE_FORMAT
 } from '../arcade-storage-core.js';
-import { validateSaveBundle, encryptBundleJson, decryptBundleJson, ENC_FORMAT } from '../arcade-save.js';
+import {
+    validateSaveBundle,
+    encryptBundleJson,
+    decryptBundleJson,
+    ENC_FORMAT,
+    buildJournalSection,
+    verifyJournalSection,
+    buildManifestSection,
+    verifyManifestSection
+} from '../arcade-save.js';
+import { checksumCanonical } from '../arcade-storage-core.js';
+import { hlcPack } from '../arcade-sync-core.js';
 
 let pass = 0, fail = 0;
 function ok(cond, label) {
@@ -163,6 +174,76 @@ async function validateTests() {
         'a bundle whose checksum is actually fine reports checksumOk:true regardless of the override flag');
 }
 
+async function sectionTests() {
+    console.log('\nbundle provenance sections (journal + manifest, durability design §4)');
+    const DEV = 'dev-aaaaaa';
+    const H1 = hlcPack(1000, 0, DEV), H2 = hlcPack(2000, 0, DEV), H3 = hlcPack(3000, 0, DEV);
+    const X = 'a'.repeat(64);
+    const clk = H3;
+
+    // --- journal: build is bounded (data keys + tombstones only) ---
+    const records = {
+        'arcade.v1.game.score': { h: H1, x: X, del: 0, t: 5 },
+        'arcade.v1.game.gone': { h: H2, x: X, del: 1, t: 6 },
+        'arcade.v1.game.orphan': { h: H1, x: X, del: 0, t: 7 } // live but absent from data
+    };
+    const j = await buildJournalSection(clk, records, new Set(['arcade.v1.game.score']));
+    ok(j.v === 1 && j.clock === clk, 'journal section carries v + the build-time clock');
+    ok(!!j.records['arcade.v1.game.score'], 'journal keeps records for keys present in data');
+    ok(!!j.records['arcade.v1.game.gone'], 'journal keeps tombstones even when the key is absent from data');
+    ok(!j.records['arcade.v1.game.orphan'], 'journal drops live records absent from data (bounded by construction)');
+
+    // --- journal: verify round-trip + fail-closed ---
+    let vj = await verifyJournalSection(j);
+    ok(vj.ok && vj.clock === clk && Object.keys(vj.records).length === 2, 'verifyJournalSection round-trips a built section');
+    const tamperedJ = JSON.parse(JSON.stringify(j));
+    tamperedJ.records['arcade.v1.game.gone'].del = 0; // resurrect a deletion
+    ok(!(await verifyJournalSection(tamperedJ)).ok, 'a tampered journal section fails its self-checksum');
+    const smuggleRecords = { 'arcade.v1._meta.deviceId': { h: H1, x: X, del: 0, t: 1 } };
+    const smuggle = { v: 1, clock: clk, records: smuggleRecords, checksum: await checksumCanonical({ clock: clk, records: smuggleRecords }) };
+    ok(!(await verifyJournalSection(smuggle)).ok, 'a journal entry for a non-sync-eligible key is rejected even with a valid checksum');
+    const badHlcRecords = { 'arcade.v1.game.k': { h: 'not-an-hlc', x: X, del: 0, t: 1 } };
+    const badHlc = { v: 1, clock: clk, records: badHlcRecords, checksum: await checksumCanonical({ clock: clk, records: badHlcRecords }) };
+    ok(!(await verifyJournalSection(badHlc)).ok, 'a journal record with a malformed HLC is rejected');
+    ok(!(await verifyJournalSection(undefined)).ok, 'an absent journal section verifies false (consumers degrade to today)');
+    ok(!(await verifyJournalSection({ v: 2, clock: clk, records: {}, checksum: 'x' })).ok, 'an unknown journal section version is rejected');
+    const nullClock = await buildJournalSection(null, {}, new Set());
+    ok((await verifyJournalSection(nullClock)).ok, 'a journal with a null clock (no stamps yet) round-trips');
+
+    // --- manifest: build + verify round-trip ---
+    const stores = { 'arcade.v1.game.store.default': { hi: { n: 1 } } };
+    const files = { 'arcade.v1.game': [{ name: 'a.bin', type: '', size: 1, b64: 'AA==' }] };
+    const m = await buildManifestSection(stores, files);
+    ok(m.v === 1 && /^sha256:[0-9a-f]{64}$/.test(m.stores['arcade.v1.game.store.default']), 'manifest carries one hash per store DB');
+    ok(/^sha256:[0-9a-f]{64}$/.test(m.files['arcade.v1.game/a.bin']), 'manifest carries one hash per file (dir/name key)');
+    ok((await verifyManifestSection(m)).ok, 'verifyManifestSection round-trips a built section');
+    const m2 = await buildManifestSection({ 'arcade.v1.game.store.default': { hi: { n: 2 } } }, files);
+    ok(m2.stores['arcade.v1.game.store.default'] !== m.stores['arcade.v1.game.store.default'], 'a store hash tracks the store content');
+    ok(m2.files['arcade.v1.game/a.bin'] === m.files['arcade.v1.game/a.bin'], 'file hashes are independent of store changes');
+    const tamperedM = JSON.parse(JSON.stringify(m));
+    tamperedM.files['arcade.v1.game/a.bin'] = 'sha256:' + 'b'.repeat(64);
+    ok(!(await verifyManifestSection(tamperedM)).ok, 'a tampered manifest section fails its self-checksum');
+    const badName = { v: 1, stores: { 'not-a-store-db': 'sha256:' + 'a'.repeat(64) }, files: {}, checksum: '' };
+    badName.checksum = await checksumCanonical({ stores: badName.stores, files: badName.files });
+    ok(!(await verifyManifestSection(badName)).ok, 'a manifest entry with an invalid store DB name is rejected');
+    ok(!(await verifyManifestSection(null)).ok, 'an absent manifest section verifies false');
+
+    // --- additive compatibility: sections never affect bundle validation ---
+    const data = { 'arcade.v1.game.score': '7' };
+    const withSections = {
+        format: SAVE_FORMAT, schemaVersion: 2, data, stores: {}, files: {},
+        checksum: await checksumBundle(data, {}, {}),
+        journal: j, manifest: m
+    };
+    let r = await validateSaveBundle(withSections);
+    ok(r.ok, 'a bundle carrying journal + manifest sections still validates (additive superset, schemaVersion stays 2)');
+    const garbageSections = { ...withSections, journal: { total: 'garbage' }, manifest: 42 };
+    r = await validateSaveBundle(garbageSections);
+    ok(r.ok, 'garbage sections cannot fail bundle validation (advisory, never authoritative)');
+    const sansSections = { format: SAVE_FORMAT, schemaVersion: 2, data, stores: {}, files: {}, checksum: await checksumBundle(data, {}, {}) };
+    ok((await validateSaveBundle(sansSections)).ok, 'a section-less bundle (old device export) still validates');
+}
+
 async function encryptionTests() {
     console.log('\nencryptBundleJson / decryptBundleJson');
     const json = JSON.stringify({ hello: 'world', n: 42 });
@@ -205,6 +286,7 @@ async function encryptionTests() {
     keyPredicateTests();
     checksumTests();
     await validateTests();
+    await sectionTests();
     await encryptionTests();
     console.log('');
     if (fail) { console.log(fail + ' check(s) FAILED.'); process.exit(1); }

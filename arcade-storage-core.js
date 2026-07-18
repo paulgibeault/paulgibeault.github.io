@@ -162,14 +162,20 @@ export function stableStringify(v) {
     const keys = Object.keys(v).sort();
     return '{' + keys.map((k) => JSON.stringify(k) + ':' + stableStringify(v[k])).join(',') + '}';
 }
-export async function checksumBundle(data, stores, files) {
-    const canonical = stableStringify({ data: data, stores: stores, files: files });
-    const buf = new TextEncoder().encode(canonical);
+// Canonical checksum of any JSON value: 'sha256:' over its stableStringify
+// form. checksumBundle (the outer save checksum) and the self-checksummed
+// journal/manifest bundle sections (arcade-save.js) all ride this one
+// implementation, so their canonical forms can never drift apart.
+export async function checksumCanonical(value) {
+    const buf = new TextEncoder().encode(stableStringify(value));
     const hash = await crypto.subtle.digest('SHA-256', buf);
     const bytes = new Uint8Array(hash);
     let hex = '';
     for (let i = 0; i < bytes.length; i++) hex += bytes[i].toString(16).padStart(2, '0');
     return 'sha256:' + hex;
+}
+export async function checksumBundle(data, stores, files) {
+    return checksumCanonical({ data: data, stores: stores, files: files });
 }
 
 // Minimal IndexedDB helpers (the SDK's stores all use a single 'kv'

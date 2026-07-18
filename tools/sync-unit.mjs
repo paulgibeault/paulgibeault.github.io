@@ -17,6 +17,8 @@ import {
     SYNC_PROTOCOL_V,
     SYNC_DB,
     SYNC_TOMBSTONE_CAP_PER_APP,
+    appIdOfKey,
+    planTombstoneGc,
     HLC_RE,
     hlcPack,
     hlcParse,
@@ -263,6 +265,151 @@ function validateSyncEnvelopeTests() {
     ok(validateSyncEnvelope(tooManyDiff, caps).reason === 'too-many', 'oversize diff reason is too-many');
 }
 
+function planTombstoneGcTests() {
+    console.log('\nplanTombstoneGc (cap eviction + watermark)');
+    const CAP = 3;
+    const tomb = (app, n, t) => ['arcade.v1.' + app + '.k' + n, { h: hlcPack(t, 0, DEV_A), x: 'x'.repeat(64), del: 1, t }, 'cls' + n];
+    const live = (app, n, t) => ['arcade.v1.' + app + '.live' + n, { h: hlcPack(t, 0, DEV_A), x: 'y'.repeat(64), del: 0, t }];
+
+    ok(appIdOfKey('arcade.v1.myapp.save1') === 'myapp', 'appIdOfKey extracts the app segment');
+    ok(appIdOfKey('arcade.v1.solo') === 'solo', 'appIdOfKey handles a key with no sub-path');
+
+    // Under the cap: nothing evicted, no watermark.
+    let plan = planTombstoneGc([tomb('appa', 1, 10), tomb('appa', 2, 20), live('appa', 1, 5)], CAP);
+    ok(plan.evict.length === 0 && plan.watermarks.size === 0, 'under-cap app: nothing evicted, no watermark minted');
+
+    // Over the cap: oldest evicted first, watermark = max evicted t/h.
+    plan = planTombstoneGc([tomb('appa', 1, 10), tomb('appa', 2, 20), tomb('appa', 3, 30), tomb('appa', 4, 40), tomb('appa', 5, 50)], CAP);
+    ok(plan.evict.length === 2, 'over-cap app evicts down to exactly cap');
+    ok(plan.evict[0][0] === 'arcade.v1.appa.k1' && plan.evict[1][0] === 'arcade.v1.appa.k2', 'oldest tombstones are evicted first');
+    ok(plan.evict[0][2] === 'cls1', 'extra entry elements are carried through to evict (class tag)');
+    const wm = plan.watermarks.get('appa');
+    ok(wm && wm.t === 20, 'watermark t is the max evicted t');
+    ok(wm && wm.h === hlcPack(20, 0, DEV_A), 'watermark h is the max evicted HLC');
+
+    // Live records never count toward (or get evicted by) the cap.
+    plan = planTombstoneGc([live('appa', 1, 1), live('appa', 2, 2), live('appa', 3, 3), live('appa', 4, 4), tomb('appa', 1, 10)], CAP);
+    ok(plan.evict.length === 0, 'live records never count toward the tombstone cap');
+
+    // Per-app isolation: one app over cap does not evict another's.
+    plan = planTombstoneGc([tomb('appa', 1, 10), tomb('appa', 2, 20), tomb('appa', 3, 30), tomb('appa', 4, 40), tomb('appb', 1, 5)], CAP);
+    ok(plan.evict.every((e) => appIdOfKey(e[0]) === 'appa'), 'eviction is per-app: an under-cap app is untouched');
+    ok(!plan.watermarks.has('appb'), 'no watermark for an app with no evictions');
+}
+
+// ---- engine-level pins (shimmed browser env, real arcade-sync.js) ----
+// The record-class separation is a security invariant, not a style choice:
+// handleInboundReq answers any key present in its map, so these tests run
+// the REAL engine over fake localStorage/IndexedDB and prove on the wire
+// that `local`-class records are unreachable — a req for a journaled
+// non-synced key returns nothing, and digests never advertise one.
+function settle(turns) {
+    return new Promise((resolve) => {
+        let n = turns || 25;
+        (function tick() { if (--n <= 0) resolve(); else setTimeout(tick, 0); })();
+    });
+}
+async function waitFor(cond, label) {
+    for (let i = 0; i < 400; i++) {
+        const v = cond();
+        if (v) return v;
+        await settle(2);
+    }
+    throw new Error('waitFor timed out: ' + label);
+}
+
+async function engineTests() {
+    console.log('\nsync engine — record classes / wire refusal / watermark (shimmed env)');
+    const { installFakeIndexedDB, installFakeLocalStorage } = await import('./lib/fake-idb.mjs');
+    installFakeIndexedDB();
+    installFakeLocalStorage();
+    globalThis.window = globalThis;
+    const { initSyncEngine } = await import('../arcade-sync.js');
+
+    localStorage.setItem('arcade.v1._meta.deviceId', DEV_A);
+    localStorage.setItem('arcade.v1._meta.knownPeers', JSON.stringify({ [DEV_B]: { name: 'B', syncEnabled: true } }));
+    localStorage.setItem('arcade.v1.appa._sync', JSON.stringify(['arcade.v1.appa.synced']));
+    localStorage.setItem('arcade.v1.appa._noExport', JSON.stringify(['arcade.v1.appa.temp']));
+
+    const engine = initSyncEngine({ postToIframe: () => {} });
+    const sent = [];
+    let inbound = null;
+    engine.attachP2P({
+        sendSyncEnvelope: (deviceId, env) => sent.push({ deviceId, env }),
+        onSyncEnvelope: (cb) => { inbound = cb; },
+        onPeerIdentity: () => {},
+        connectionState: () => 'connected',
+        isFingerprintSuspect: () => false
+    });
+
+    // Local writes through the bridge hook: one synced, one journaled (with
+    // a coalesced overwrite), one _noExport-listed, one non-synced delete.
+    localStorage.setItem('arcade.v1.appa.synced', '"s1"');
+    engine.noteLocalWrite('arcade.v1.appa.synced', '"s1"');
+    localStorage.setItem('arcade.v1.appa.private', '"p1"');
+    engine.noteLocalWrite('arcade.v1.appa.private', '"p0"'); // coalesced away by the flush
+    engine.noteLocalWrite('arcade.v1.appa.private', '"p1"');
+    engine.noteLocalWrite('arcade.v1.appa.temp', '"t1"');
+    engine.noteLocalWrite('arcade.v1.appa.gone', null);
+
+    await waitFor(() => engine._localRecords()['arcade.v1.appa.gone'] && engine._records()['arcade.v1.appa.synced'], 'journal flush');
+    await settle();
+    const recs = engine._records();
+    const localRecs = engine._localRecords();
+    ok(!!recs['arcade.v1.appa.synced'], 'a _sync-opted write lands in the sync record class');
+    ok(!recs['arcade.v1.appa.private'], 'a non-synced write NEVER lands in the sync class');
+    ok(!!localRecs['arcade.v1.appa.private'], 'a non-synced write lands in the local journal class');
+    ok(!localRecs['arcade.v1.appa.synced'], 'a synced write stays out of the local class');
+    ok(localRecs['arcade.v1.appa.private'].x === await sha256Hex('"p1"'), 'coalesced flush journals the FINAL value of a hammered key');
+    ok(!localRecs['arcade.v1.appa.temp'] && !recs['arcade.v1.appa.temp'], 'a _noExport-listed key is never journaled');
+    ok(localRecs['arcade.v1.appa.gone'] && localRecs['arcade.v1.appa.gone'].del === 1, 'deleting a non-synced key leaves a local-class tombstone');
+
+    // Exfiltration pin: a req for a journaled non-synced key returns NOTHING.
+    sent.length = 0;
+    inbound(DEV_B, { v: 1, op: 'req', keys: ['arcade.v1.appa.private', 'arcade.v1.appa.gone', 'arcade.v1.appa.synced'] });
+    await waitFor(() => sent.some((f) => f.env.op === 'diff'), 'req answer');
+    await settle();
+    const diffKeys = sent.filter((f) => f.env.op === 'diff').flatMap((f) => f.env.entries.map((e) => e.k));
+    ok(!diffKeys.includes('arcade.v1.appa.private'), 'req for a journaled non-synced key returns nothing (exfiltration pin)');
+    ok(!diffKeys.includes('arcade.v1.appa.gone'), 'req for a local-class tombstone returns nothing');
+    ok(diffKeys.includes('arcade.v1.appa.synced'), 'the same req still answers the genuinely synced key');
+
+    // Digest exclusion: local-class records are never advertised.
+    sent.length = 0;
+    engine.kick(DEV_B);
+    await waitFor(() => sent.some((f) => f.env.op === 'digest'), 'digest');
+    const digestKeys = sent.filter((f) => f.env.op === 'digest').flatMap((f) => f.env.entries.map((e) => e[0]));
+    ok(digestKeys.includes('arcade.v1.appa.synced'), 'digest advertises the sync-class record');
+    ok(!digestKeys.includes('arcade.v1.appa.private') && !digestKeys.includes('arcade.v1.appa.gone'), 'digest never includes local-class records');
+
+    // exportJournal merges both classes (bundle journal section source).
+    const journal = await engine.exportJournal();
+    ok(!!journal.records['arcade.v1.appa.synced'] && !!journal.records['arcade.v1.appa.private'], 'exportJournal merges both record classes');
+    ok(typeof journal.clock === 'string' && HLC_RE.test(journal.clock), 'exportJournal carries a packed HLC clock');
+
+    // Watermark: push an app past the cap, reload the engine (same fake
+    // IDB), and prove GC evicted oldest-first and persisted the watermark.
+    for (let i = 0; i < SYNC_TOMBSTONE_CAP_PER_APP + 3; i++) {
+        engine.noteLocalWrite('arcade.v1.appb.k' + String(i).padStart(4, '0'), null);
+    }
+    await waitFor(() => Object.keys(engine._localRecords()).filter((k) => appIdOfKey(k) === 'appb').length === SYNC_TOMBSTONE_CAP_PER_APP + 3, 'tombstone fill');
+    const engine2 = initSyncEngine({ postToIframe: () => {} });
+    await engine2.exportJournal(); // forces ensureLoaded -> loadFromIdb + gcTombstones
+    const appbLeft = Object.keys(engine2._localRecords()).filter((k) => appIdOfKey(k) === 'appb');
+    ok(appbLeft.length === SYNC_TOMBSTONE_CAP_PER_APP, 'reload GC evicts local-class tombstones down to the per-app cap');
+    ok(!appbLeft.includes('arcade.v1.appb.k0000') && !appbLeft.includes('arcade.v1.appb.k0002'), 'the OLDEST tombstones are the ones evicted');
+    const wm = engine2._watermark('appb');
+    ok(wm && typeof wm.t === 'number' && wm.t > 0, 'eviction persists a per-app watermark (t)');
+    ok(wm && HLC_RE.test(wm.h), 'watermark carries the max evicted HLC');
+    ok(engine2._watermark('appa') === null, 'no watermark for an app that never evicted');
+
+    // The watermark survives a further reload with no new evictions.
+    const engine3 = initSyncEngine({ postToIframe: () => {} });
+    await engine3.exportJournal();
+    const wm3 = engine3._watermark('appb');
+    ok(wm3 && wm3.t === wm.t && wm3.h === wm.h, 'watermark is persisted, not recomputed away on a quiet reload');
+}
+
 async function sha256HexTests() {
     console.log('\nsha256Hex');
     const h1 = await sha256Hex('hello world');
@@ -284,7 +431,9 @@ async function sha256HexTests() {
     applyDecisionTests();
     isConcurrentLossTests();
     validateSyncEnvelopeTests();
+    planTombstoneGcTests();
     await sha256HexTests();
+    await engineTests();
     console.log('');
     if (fail) { console.log(fail + ' check(s) FAILED.'); process.exit(1); }
     console.log('All ' + pass + ' sync unit checks passed.');

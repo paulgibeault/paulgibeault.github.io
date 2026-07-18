@@ -12,7 +12,7 @@
  * browser (see tools/sync-unit.mjs).
  */
 
-import { syncEligibleKey } from './arcade-storage-core.js';
+import { KEY_PREFIX, syncEligibleKey } from './arcade-storage-core.js';
 import { DEVICE_ID_PATTERN } from './arcade-envelope.js';
 
 // ---- protocol + storage constants ----
@@ -88,6 +88,50 @@ export function hlcRecv(prev, remote, nowMs, deviceId) {
     else counter = 0;
     if (counter > 9999) { millis += 1; counter = 0; }
     return hlcPack(millis, counter, deviceId);
+}
+
+// ---- key helpers ----
+export function appIdOfKey(fullKey) {
+    const rest = fullKey.slice(KEY_PREFIX.length);
+    const dot = rest.indexOf('.');
+    return dot === -1 ? rest : rest.slice(0, dot);
+}
+
+// ---- tombstone GC planning (cap-only, with eviction watermark) ----
+// entries: Array<[fullKey, rec, ...extra]> across ALL record classes (sync
+// and local journal records alike — the per-app cap is a cap on tombstones,
+// not on one class of them). Non-tombstone entries are ignored. Returns the
+// entries to evict (oldest-first beyond `cap`, extra elements carried
+// through untouched so the caller knows which map each came from) and the
+// per-app eviction watermark: the max `t` and max `h` among this round's
+// evictions. The engine persists the running max of these watermarks —
+// a future delta offer (durability design §6) whose base predates an
+// evicted tombstone cannot express that deletion, so it must compare its
+// base clock against the watermark and fall back to a full transfer.
+export function planTombstoneGc(entries, cap) {
+    const byApp = new Map();
+    for (const e of entries) {
+        const rec = e[1];
+        if (!rec || rec.del !== 1) continue;
+        const appId = appIdOfKey(e[0]);
+        if (!byApp.has(appId)) byApp.set(appId, []);
+        byApp.get(appId).push(e);
+    }
+    const evict = [];
+    const watermarks = new Map();
+    for (const [appId, list] of byApp) {
+        if (list.length <= cap) continue;
+        list.sort((a, b) => ((a[1].t || 0) - (b[1].t || 0)) || hlcCompare(a[1].h || '', b[1].h || ''));
+        let maxT = 0, maxH = '';
+        for (let i = 0; i < list.length - cap; i++) {
+            evict.push(list[i]);
+            const rec = list[i][1];
+            if ((rec.t || 0) > maxT) maxT = rec.t || 0;
+            if (typeof rec.h === 'string' && hlcCompare(rec.h, maxH) > 0) maxH = rec.h;
+        }
+        watermarks.set(appId, { t: maxT, h: maxH });
+    }
+    return { evict, watermarks };
 }
 
 // ---- checksum ----
