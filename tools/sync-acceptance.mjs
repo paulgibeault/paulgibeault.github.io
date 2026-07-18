@@ -478,6 +478,100 @@ try {
 
         await s.ctxH.close(); await s.ctxJ.close();
     }
+
+    // 8. RESTORE-RESURRECTION (durability design §5, PR 7). The hole: a
+    //    bundle taken AFTER a deletion carries no trace of it, so restoring
+    //    onto a fresh device and then syncing with a peer that was offline
+    //    for the deletion pulls the deleted key back as brand-new. With the
+    //    journal section: delete on B while A is offline → B's export
+    //    carries the tombstone → fresh C restores it and adopts the
+    //    tombstone at its ORIGINAL HLC → pairing C with A must NOT
+    //    resurrect the key on C; instead C's newer tombstone wins LWW and
+    //    the deletion finally reaches A.
+    {
+        console.log('\n  [restore-resurrection: a restored bundle journal defends deletions]');
+        const s = await freshPair('G');
+        await enableSyncBoth(s.H, s.J);
+        await enableApp(s.H, 'syncfix'); await enableApp(s.J, 'syncfix');
+        await stateWrite(s.H, 'syncfix', 'arcade.v1.syncfix.doomed', '"live"');
+        check('key replicated A -> B before the split',
+            await waitFor(async () => (await lsGet(s.J, 'arcade.v1.syncfix.doomed')) === '"live"'));
+
+        // A goes offline still holding the key live; B deletes it unheard.
+        await s.H.close();
+        await stateWrite(s.J, 'syncfix', 'arcade.v1.syncfix.doomed', null);
+        check('B holds a tombstone after the offline delete',
+            await waitFor(async () => {
+                const r = (await syncRecords(s.J))['arcade.v1.syncfix.doomed'];
+                return !!r && r.del === 1;
+            }));
+
+        // B's save export — the bundle's journal must carry the tombstone.
+        const [dl] = await Promise.all([
+            s.J.waitForEvent('download'),
+            s.J.evaluate(() => document.getElementById('btn-save').click())
+        ]);
+        const bundleJson = await readFile(await dl.path(), 'utf8');
+        const bBundle = JSON.parse(bundleJson);
+        const bTomb = bBundle.journal && bBundle.journal.records
+            && bBundle.journal.records['arcade.v1.syncfix.doomed'];
+        check("B's bundle journal carries the deletion as a tombstone", !!bTomb && bTomb.del === 1,
+            JSON.stringify(bBundle.journal && Object.keys(bBundle.journal.records || {})));
+        await s.ctxJ.close(); // B's job is done — it must never heal A itself
+
+        // Fresh C restores B's bundle BEFORE meeting any peer.
+        const ctxC = await harness.newDeviceContext();
+        const C = await launcherPage('G:fresh', ctxC);
+        await loadBridge(C);
+        await C.evaluate(() => { window.confirm = () => true; });
+        const imported = await C.evaluate((json) =>
+            window.__arcade.save.importBundleJson(json, 'test restore'), bundleJson);
+        check('fresh C committed the restore', imported === true);
+        check('C adopted the tombstone at its ORIGINAL HLC into the sync class (never re-stamped)',
+            await waitFor(async () => {
+                const r = (await syncRecords(C))['arcade.v1.syncfix.doomed'];
+                return !!r && r.del === 1 && r.h === bTomb.h;
+            }));
+
+        // A comes back on its preserved storage, still holding the key live,
+        // and pairs with C.
+        const A2 = await launcherPage('G:hostback', s.ctxH);
+        await loadBridge(A2);
+        check('A still holds the key live (it never observed the deletion)',
+            (await lsGet(A2, 'arcade.v1.syncfix.doomed')) === '"live"');
+        // waitHost false: A2 may still be futilely auto-reconnecting to the
+        // closed B, so its AGGREGATE status is not what this ceremony proves.
+        await ceremony(A2, C, { waitHost: false });
+        const cId = await C.evaluate(() => localStorage.getItem('arcade.v1._meta.deviceId'));
+        const aId = await A2.evaluate(() => localStorage.getItem('arcade.v1._meta.deviceId'));
+        check('identity handshake upserted the new pair on both sides',
+            await waitFor(async () => {
+                const onA = await A2.evaluate(() => localStorage.getItem('arcade.v1._meta.knownPeers'));
+                const onC = await C.evaluate(() => localStorage.getItem('arcade.v1._meta.knownPeers'));
+                return !!onA && !!onC && JSON.parse(onA)[cId] && JSON.parse(onC)[aId];
+            }));
+        const enableSyncFor = (page, peerId) => page.evaluate(async (id) => {
+            const { setKnownPeerSyncEnabled } = await import('./arcade-known-peers.js');
+            setKnownPeerSyncEnabled(id, true);
+            window.__arcade.sync.kick(id);
+        }, peerId);
+        await enableSyncFor(A2, cId);
+        await enableSyncFor(C, aId);
+
+        // The strong assertion: C's adopted tombstone WINS — the deletion
+        // reaches A instead of A's stale live copy reaching C.
+        check('the deletion propagated to A (no resurrection anywhere)',
+            await waitFor(async () => (await lsGet(A2, 'arcade.v1.syncfix.doomed')) === null, 25000));
+        check('C never resurrected the deleted key',
+            (await lsGet(C, 'arcade.v1.syncfix.doomed')) === null);
+        check("C's record is still the ORIGINAL-HLC tombstone after the exchange",
+            await waitFor(async () => {
+                const r = (await syncRecords(C))['arcade.v1.syncfix.doomed'];
+                return !!r && r.del === 1;
+            }));
+
+        await s.ctxH.close(); await ctxC.close();
+    }
 } catch (e) {
     console.error('\nFATAL:', e.message);
     check('run completed', false, e.message);

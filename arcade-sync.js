@@ -717,13 +717,63 @@ export function initSyncEngine(host) {
         onSyncedLocalWrite(key, value).catch((e) => ArcadeDiag.log('sync', `local-write stamp failed: ${(e && e.message) || e}`));
     }
 
+    // T3 §5.2 — bundle tombstones are adopted at their ORIGINAL HLC, never
+    // re-stamped: a re-stamped tombstone would beat edits made AFTER the
+    // bundle was taken and delete live remote data; at original HLC it loses
+    // to any newer write — plain LWW. This is what closes the fresh-device
+    // resurrection hole: the restored device now KNOWS about pre-bundle
+    // deletions and refuses to pull them back from (and propagates the
+    // deletion to) a peer that held the key live.
+    async function adoptImportTombstones(importedKeys, journalRecords) {
+        const imported = new Set(importedKeys);
+        for (const k of Object.keys(journalRecords)) {
+            const rec = journalRecords[k];
+            if (!rec || rec.del !== 1) continue;
+            if (imported.has(k)) continue; // key present in data — its imported value is the newer truth
+            if (!syncEligibleKey(k)) continue; // verified section guarantees this; defensive
+            const existingSync = records.get(k);
+            const existing = existingSync || localRecords.get(k);
+            if (existing && hlcCompare(existing.h, rec.h) >= 0) continue; // local knowledge is newer — LWW
+            let raw;
+            try { raw = localStorage.getItem(k); } catch (e) { raw = null; }
+            // A live local value with NO record predates the journal — LWW
+            // cannot order it, and the import confirm promised "data not in
+            // the file is kept as-is". Never delete what we cannot order.
+            if (raw !== null && !existing) continue;
+            const tomb = { h: rec.h, x: await tombstoneHash(), del: 1, t: (typeof rec.t === 'number' ? rec.t : Date.now()) };
+            if (raw !== null) {
+                // The tombstone beats a stamped live value — apply the
+                // deletion the way a wire apply would.
+                try { localStorage.removeItem(k); } catch (e) { continue; }
+                postToIframe(appIdOfKey(k), { type: CHANGED, key: k, value: null });
+            }
+            const cls = existingSync ? 'sync'
+                : localRecords.has(k) ? 'local'
+                : (isKeySynced(k) ? 'sync' : 'local');
+            if (cls === 'sync') {
+                records.set(k, tomb);
+                localRecords.delete(k);
+                try { await idbPut(db, 'k|' + k, tomb); } catch (e) {}
+                try { await idbDel(db, 'j|' + k); } catch (e) {}
+            } else {
+                localRecords.set(k, tomb);
+                try { await idbPut(db, 'j|' + k, tomb); } catch (e) {}
+            }
+        }
+    }
+
     // Called from arcade-save.js after a save-file import commits its
     // localStorage keys. An import is a deliberate "now" edit — imported
     // synced keys are unconditionally re-stamped (unlike the passive
     // "only if missing/changed" rule ensureLoaded uses for pre-existing
     // data), so the import wins over older remote edits on the next sync.
-    function noteImportCommitted(keys) {
-        if (!Array.isArray(keys) || !keys.length) return;
+    // `journal` is the bundle's VERIFIED journal section ({clock, records})
+    // or null; when present it adds the two T3 restore mechanics (§5):
+    // clock seeding before the re-stamp, tombstone adoption after it.
+    function noteImportCommitted(keys, journal) {
+        if (!Array.isArray(keys)) keys = [];
+        const j = (journal && typeof journal === 'object'
+            && journal.records && typeof journal.records === 'object') ? journal : null;
         const relevantApps = new Set();
         for (const k of keys) {
             if (typeof k !== 'string') continue;
@@ -733,9 +783,26 @@ export function initSyncEngine(host) {
             try { listRaw = localStorage.getItem(KEY_PREFIX + appId + '._sync'); } catch (e) { listRaw = null; }
             if (listRaw) relevantApps.add(appId);
         }
-        if (!relevantApps.size) return; // no app in this import opts into sync — nothing to do
+        if (!relevantApps.size && !j) return; // nothing synced, no journal — nothing to do
         (async () => {
             await ensureLoaded();
+            // The import may have COMMITTED an app's _sync list itself (a
+            // restore onto a fresh device). If the engine loaded before the
+            // commit, its syncable cache predates the restored lists —
+            // refresh every app this import touches so re-stamping and
+            // tombstone class placement see the restored opt-ins.
+            const apps = new Set();
+            for (const k of keys) if (typeof k === 'string' && syncEligibleKey(k)) apps.add(appIdOfKey(k));
+            if (j) for (const k of Object.keys(j.records)) if (syncEligibleKey(k)) apps.add(appIdOfKey(k));
+            for (const appId of apps) refreshSyncableForApp(appId);
+            // T3 §5.1 — clock seeding, BEFORE any re-stamp: a restored
+            // device with a skewed-behind wall clock could otherwise mint
+            // "fresh" stamps that lose LWW to edits the ORIGINAL device made
+            // after the bundle was taken — silently violating restore-wins.
+            if (j && typeof j.clock === 'string') {
+                clock = hlcRecv(clock, j.clock, Date.now(), getMyDeviceId());
+                try { await idbPut(db, 'clock', clock); } catch (e) {}
+            }
             for (const k of keys) {
                 if (typeof k !== 'string' || !isKeySynced(k)) continue;
                 let raw;
@@ -743,6 +810,7 @@ export function initSyncEngine(host) {
                 if (raw === null) continue;
                 await stampAndStore(k, await sha256Hex(raw), 0);
             }
+            if (j) await adoptImportTombstones(keys, j.records);
         })().catch((e) => ArcadeDiag.log('sync', `import re-stamp failed: ${(e && e.message) || e}`));
     }
 

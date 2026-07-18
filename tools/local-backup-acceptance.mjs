@@ -109,14 +109,13 @@ try {
         JSON.stringify(await status()));
     const firstNewest = (await status()).newest;
 
-    // Force staleness: rewrite the stored generation's meta row directly via
-    // raw IndexedDB (mirrors the split-row 'm|' layout arcade-local-backup.js
-    // writes) so the row on disk is >24h old, change the state (so the
-    // "identical to newest" dedupe in planGenerationStore doesn't swallow
-    // an unchanged bundle), then reload — a REAL boot, reading the patched
-    // row fresh, is what proves the >24h staleness gate itself rather than
-    // the maybeSnapshot(true) manual-override escape hatch.
-    await page.evaluate(() => new Promise((resolve, reject) => {
+    // Force staleness: rewrite the NEWEST stored generation's meta row
+    // directly via raw IndexedDB (mirrors the split-row 'm|' layout
+    // arcade-local-backup.js writes) so the row on disk is >24h old — a
+    // REAL boot, reading the patched row fresh, is what proves the >24h
+    // staleness gate itself rather than the maybeSnapshot(true)
+    // manual-override escape hatch.
+    const backdateNewestMeta = () => page.evaluate(() => new Promise((resolve, reject) => {
         const rq = indexedDB.open('arcade-local-backup', 1);
         rq.onsuccess = () => {
             const db = rq.result;
@@ -124,7 +123,8 @@ try {
             const store = tx.objectStore('kv');
             const getKeys = store.getAllKeys();
             getKeys.onsuccess = () => {
-                const metaKey = getKeys.result.find((k) => typeof k === 'string' && k.startsWith('m|'));
+                const metaKeys = getKeys.result.filter((k) => typeof k === 'string' && k.startsWith('m|')).sort();
+                const metaKey = metaKeys[metaKeys.length - 1]; // newest (lexicographic = chronological)
                 const g = store.get(metaKey);
                 g.onsuccess = () => {
                     const meta = g.result;
@@ -137,6 +137,10 @@ try {
         };
         rq.onerror = () => reject(rq.error);
     }));
+    // Change the state too, so the "identical to newest" dedupe in
+    // planGenerationStore (and the PR-7 fingerprint gate before it) doesn't
+    // swallow an unchanged bundle.
+    await backdateNewestMeta();
     await setState(2);
     await page.reload({ waitUntil: 'load' });
     await page.waitForTimeout(300);
@@ -148,6 +152,26 @@ try {
     check('the fresh snapshot is newer than the backdated one and has a different checksum',
         secondStatus.newest.receivedAt > firstNewest.receivedAt && secondStatus.newest.checksum !== firstNewest.checksum,
         JSON.stringify({ firstNewest, secondStatus }));
+    check('the stored generation meta carries the build-avoidance fingerprint (data + manifest checksums)',
+        typeof secondStatus.newest.dataChecksum === 'string' && typeof secondStatus.newest.manifestChecksum === 'string',
+        JSON.stringify(secondStatus.newest));
+
+    // ── Build-avoidance (durability PR 7): backdate again WITHOUT changing
+    //    any state — a real stale boot must renew the staleness clock via the
+    //    cheap fingerprint and skip the full bundle build entirely (no new
+    //    generation, diag records the skip). ──
+    await backdateNewestMeta();
+    await page.reload({ waitUntil: 'load' });
+    await page.waitForTimeout(300);
+    check('unchanged state on a stale boot stores no new generation',
+        await waitFor(async () => {
+            const s = await status();
+            return s.count === 2 && s.newest.receivedAt > Date.now() - 60 * 1000;
+        }, 10000),
+        JSON.stringify(await status()));
+    check('the staleness clock was renewed via fingerprint match, skipping the build (diag pin)',
+        await waitFor(async () => page.evaluate(() =>
+            window.__arcadeDiag.entries().some((e) => e.tag === 'local-backup' && /build skipped/.test(e.msg))), 10000));
 
     // Corrupt/clear the seeded key, then restore — must ride the full import
     // gate chain (native confirm accepted above) and recover it.

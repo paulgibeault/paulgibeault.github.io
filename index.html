@@ -1539,7 +1539,7 @@
         // Sync engine hooks (arcade-sync.js) — no-ops until module block D
         // wires window.__arcade.sync.
         onStateWritten: (gameId, key, value) => { if (window.__arcade.sync) window.__arcade.sync.noteLocalWrite(key, value); },
-        onImportCommitted: (keys) => { if (window.__arcade.sync) window.__arcade.sync.noteImportCommitted(keys); },
+        onImportCommitted: (keys, journal) => { if (window.__arcade.sync) window.__arcade.sync.noteImportCommitted(keys, journal); },
         // Bundle provenance (durability design §4): buildBundle stamps the
         // journal section from the sync engine's merged record classes.
         getJournalSnapshot: () => (window.__arcade.sync ? window.__arcade.sync.exportJournal() : null)
@@ -1667,6 +1667,9 @@
     window.__arcade.localBackup = initLocalBackupEngine({
         getBundleJson: () => window.__arcade.save.exportBundleString(),
         importBundleJson: (json, intro) => window.__arcade.save.importBundleJson(json, intro),
+        // Build-avoidance (durability PR 7): the cheap change fingerprint the
+        // 24h cycle compares before paying for a full bundle build.
+        getFingerprint: () => window.__arcade.save.durabilityFingerprint(),
         showToast: storageHost.showToast
     });
     window.__arcade.localBackup.maybeSnapshot().catch(() => {});
