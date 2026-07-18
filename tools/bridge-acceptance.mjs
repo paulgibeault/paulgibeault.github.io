@@ -55,7 +55,7 @@ try {
     // welcome snapshot path is exercised with real data.
     await page.evaluate(() => {
         localStorage.setItem('arcade.v1.bridge-test.seeded', '"yes"');
-        localStorage.setItem('arcade.v1._meta.deviceId', 'dev-123');
+        localStorage.setItem('arcade.v1._meta.deviceId', 'dev-abc123');
         localStorage.setItem('arcade.v1._meta.deviceName', 'Test Device');
     });
 
@@ -100,7 +100,7 @@ try {
     check('welcome snapshot delivers pre-existing state', seeded === 'yes', JSON.stringify(seeded));
 
     const self = await frame.evaluate(() => Arcade.peer.self());
-    check('peer.self() served from snapshot meta', !!self && self.deviceId === 'dev-123' && self.name === 'Test Device', JSON.stringify(self));
+    check('peer.self() served from snapshot meta', !!self && self.deviceId === 'dev-abc123' && self.name === 'Test Device', JSON.stringify(self));
 
     await frame.evaluate(() => Arcade.state.set('written', { n: 7 }));
     let written = null;
@@ -142,7 +142,7 @@ try {
     }));
     check('own-namespace raw write lands (deny is namespace-based)', rawOk === '"raw"', String(rawOk));
     check('foreign-namespace write refused', denied.foreign === null, String(denied.foreign));
-    check('device-identity meta write refused', denied.meta === 'dev-123', String(denied.meta));
+    check('device-identity meta write refused', denied.meta === 'dev-abc123', String(denied.meta));
     check('dunder-segment key refused', denied.dunder === null, String(denied.dunder));
     check('non-arcade key refused', denied.evil === null, String(denied.evil));
 

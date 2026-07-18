@@ -32,6 +32,8 @@ import {
     PROBE_KEY,
     checksumData,
     checksumBundle,
+    checksumCanonical,
+    syncEligibleKey,
     STORE_DB_RE,
     FILE_GID_RE,
     FILE_NAME_RE,
@@ -44,6 +46,116 @@ import {
     listArcadeDbNames,
     opfsRoot
 } from './arcade-storage-core.js';
+import { HLC_RE } from './arcade-sync-core.js';
+
+// ---- bundle provenance sections (durability design §4, Node-testable) ----
+// Optional, additive, SELF-checksummed `journal` + `manifest` top-level
+// sections at schemaVersion 2 — the same additive-superset pattern as
+// welcome.caps and the SDP-codec extras trailer. validateSaveBundle reads
+// only the fields it knows, so every existing device provably ignores them;
+// the outer checksum keeps covering exactly data/stores/files. The sections
+// are advisory, never authoritative: a tampered or absent section degrades
+// consumers to today's behavior (no clock seed, no tombstone adoption, no
+// delta) and can never grant write authority the bundle body lacks.
+export const JOURNAL_SECTION_V = 1;
+export const MANIFEST_SECTION_V = 1;
+const REC_HASH_RE = /^[0-9a-f]{64}$/;
+const SECTION_SUM_RE = /^sha256:[0-9a-f]{64}$/;
+
+// records: { fullKey: {h, x, del, t} } (both classes merged — class is a
+// device-local property, not a bundle property). Bounded by construction:
+// only keys present in `data` (dataKeys) plus tombstones, so the section can
+// never dwarf the data it annotates.
+export async function buildJournalSection(clock, records, dataKeys) {
+    const bounded = {};
+    for (const k of Object.keys(records || {})) {
+        const rec = records[k];
+        if (!rec) continue;
+        if (rec.del !== 1 && !(dataKeys && dataKeys.has(k))) continue;
+        bounded[k] = { h: rec.h, x: rec.x, del: rec.del ? 1 : 0, t: rec.t };
+    }
+    const clk = (typeof clock === 'string') ? clock : null;
+    return {
+        v: JOURNAL_SECTION_V,
+        clock: clk,
+        records: bounded,
+        checksum: await checksumCanonical({ clock: clk, records: bounded })
+    };
+}
+
+// Shape + self-checksum gate for a bundle's journal section. Fails closed to
+// { ok: false } on ANY irregularity — consumers then treat the bundle as
+// journal-less (today's behavior), never partially trust a section.
+export async function verifyJournalSection(journal) {
+    if (!journal || typeof journal !== 'object' || Array.isArray(journal)) return { ok: false };
+    if (journal.v !== JOURNAL_SECTION_V) return { ok: false };
+    const clk = journal.clock;
+    if (clk !== null && (typeof clk !== 'string' || !HLC_RE.test(clk))) return { ok: false };
+    const records = journal.records;
+    if (!records || typeof records !== 'object' || Array.isArray(records)) return { ok: false };
+    for (const k of Object.keys(records)) {
+        if (!syncEligibleKey(k)) return { ok: false };
+        const rec = records[k];
+        if (!rec || typeof rec !== 'object' || Array.isArray(rec)) return { ok: false };
+        if (typeof rec.h !== 'string' || !HLC_RE.test(rec.h)) return { ok: false };
+        if (typeof rec.x !== 'string' || !REC_HASH_RE.test(rec.x)) return { ok: false };
+        if (rec.del !== 0 && rec.del !== 1) return { ok: false };
+        if (typeof rec.t !== 'number' || !Number.isFinite(rec.t) || rec.t < 0) return { ok: false };
+    }
+    let expected;
+    try { expected = await checksumCanonical({ clock: clk, records: records }); } catch (e) { return { ok: false }; }
+    if (journal.checksum !== expected) return { ok: false };
+    return { ok: true, clock: clk, records: records };
+}
+
+// One content hash per store DB and per file — already-serialized material
+// (the bundle carries every row/blob anyway), so hashing at build time is
+// marginal. Change detection and deltas for these sections operate at
+// whole-DB / whole-file granularity, which matches how they actually change
+// (blobs are replaced, not edited).
+export async function buildManifestSection(stores, files) {
+    const storeHashes = {};
+    for (const name of Object.keys(stores || {})) {
+        storeHashes[name] = await checksumCanonical(stores[name]);
+    }
+    const fileHashes = {};
+    for (const dir of Object.keys(files || {})) {
+        const items = Array.isArray(files[dir]) ? files[dir] : [];
+        for (const it of items) {
+            if (!it || typeof it.name !== 'string') continue;
+            fileHashes[dir + '/' + it.name] = await checksumCanonical(typeof it.b64 === 'string' ? it.b64 : '');
+        }
+    }
+    return {
+        v: MANIFEST_SECTION_V,
+        stores: storeHashes,
+        files: fileHashes,
+        checksum: await checksumCanonical({ stores: storeHashes, files: fileHashes })
+    };
+}
+
+export async function verifyManifestSection(manifest) {
+    if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return { ok: false };
+    if (manifest.v !== MANIFEST_SECTION_V) return { ok: false };
+    const stores = manifest.stores, files = manifest.files;
+    if (!stores || typeof stores !== 'object' || Array.isArray(stores)) return { ok: false };
+    if (!files || typeof files !== 'object' || Array.isArray(files)) return { ok: false };
+    for (const name of Object.keys(stores)) {
+        if (!STORE_DB_RE.test(name) || hasDunderSegment(name)) return { ok: false };
+        if (typeof stores[name] !== 'string' || !SECTION_SUM_RE.test(stores[name])) return { ok: false };
+    }
+    for (const path of Object.keys(files)) {
+        const slash = path.indexOf('/');
+        if (slash <= 0) return { ok: false };
+        const dir = path.slice(0, slash), name = path.slice(slash + 1);
+        if (!FILE_GID_RE.test(dir) || hasDunderSegment(dir) || !FILE_NAME_RE.test(name)) return { ok: false };
+        if (typeof files[path] !== 'string' || !SECTION_SUM_RE.test(files[path])) return { ok: false };
+    }
+    let expected;
+    try { expected = await checksumCanonical({ stores: stores, files: files }); } catch (e) { return { ok: false }; }
+    if (manifest.checksum !== expected) return { ok: false };
+    return { ok: true, stores: stores, files: files };
+}
 
 // ---- pure validation (Node-testable) ----
 // Runs import gates 4–6 over an already-parsed bundle: shape, per-key
@@ -401,7 +513,7 @@ export function initSaveLoad(host) {
         const gameIds = appId ? new Set([appId]) : await gatherGameIds(scopedData, dbNames);
         const stores = await collectStores(scopedDbNames);
         const files = await collectFiles(gameIds, scopedDbNames);
-        return {
+        const bundle = {
             format: SAVE_FORMAT,
             schemaVersion: SAVE_SCHEMA,
             exportedAt: new Date().toISOString(),
@@ -411,6 +523,30 @@ export function initSaveLoad(host) {
             stores: stores,
             files: files
         };
+        // Additive provenance sections (durability design §4). Advisory by
+        // invariant: a failure here degrades to a section-less bundle —
+        // exactly today's format — never a failed export.
+        try {
+            if (host.getJournalSnapshot) {
+                const snap = await host.getJournalSnapshot();
+                if (snap && snap.records && typeof snap.records === 'object') {
+                    let recs = snap.records;
+                    if (appId) {
+                        const prefix = KEY_PREFIX + appId + '.';
+                        const scoped = {};
+                        for (const k of Object.keys(recs)) {
+                            if (k.indexOf(prefix) === 0) scoped[k] = recs[k];
+                        }
+                        recs = scoped;
+                    }
+                    bundle.journal = await buildJournalSection(snap.clock, recs, new Set(Object.keys(scopedData)));
+                }
+            }
+        } catch (e) {}
+        try {
+            bundle.manifest = await buildManifestSection(stores, files);
+        } catch (e) {}
+        return bundle;
     }
 
     function filterDataByApp(data, appId) {

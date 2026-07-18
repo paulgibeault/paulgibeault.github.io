@@ -36,10 +36,13 @@
  * IndexedDB open at call time. Every entry point gates on a cheap, scan-free
  * check first (a single localStorage.getItem for a write's own app, or a
  * syncEnabled flag read from knownPeers) and only calls ensureLoaded() —
- * which performs the one-time full scan + IDB load — once sync is actually
- * relevant. A visitor with no `_sync` opt-in list anywhere and no
- * sync-enabled paired device therefore never opens the `arcade-sync` IDB
- * database at all.
+ * which performs the one-time full scan + IDB load — once sync or the
+ * durability journal is actually relevant. Since the two-tier journal
+ * (durability design §3), EVERY bridged write is journaled — synced keys as
+ * replicated `sync` records, everything else as never-replicated `local`
+ * records — so a device where a game writes state opens the `arcade-sync`
+ * DB on the first coalesced journal flush. The no-P2P visitor who never
+ * launches a game still never opens it.
  *
  * No top-level side effects: everything below is import statements and
  * function/const declarations. initSyncEngine(host) is the only thing that
@@ -49,8 +52,11 @@
 import {
     SYNC_DB,
     SYNC_TOMBSTONE_CAP_PER_APP,
+    appIdOfKey,
+    planTombstoneGc,
     hlcNext,
     hlcRecv,
+    hlcCompare,
     sha256Hex,
     chunkEntries,
     planFromDigest,
@@ -124,7 +130,18 @@ export function initSyncEngine(host) {
     let loadingPromise = null;
     let db = null;                 // persistent IDB handle to the 'arcade-sync' database
     let clock = null;               // packed HLC string | null — last issued/observed
-    const records = new Map();      // fullKey -> { h, x, del, t }
+    const records = new Map();      // fullKey -> { h, x, del, t } — sync class, replicated
+    const localRecords = new Map(); // fullKey -> { h, x, del, t } — local class, NEVER replicated.
+                                    // Separate map + separate IDB prefix ('j|' vs 'k|') is a
+                                    // security invariant, not a style choice: every wire path
+                                    // (sendDigestTo, buildDiffEntries, handleInboundReq) reads
+                                    // `records` only, so a malicious-but-paired peer req'ing a
+                                    // journaled non-synced key gets nothing — it cannot leak
+                                    // even by bug, because the wire never sees this map.
+    const watermarks = new Map();   // appId -> { t, h } — max tombstone ever GC-evicted ('w|'
+                                    // rows). A delta base older than this cannot express the
+                                    // evicted deletion (durability design §6) — offers must
+                                    // fall back to a full transfer.
     const cursors = new Map();      // deviceId -> { hlc, at }
     const syncable = new Map();     // appId -> Set(keys) | '*'  (from each app's _sync list)
     let p2p = null;                 // ArcadeP2P, once attachP2P() wires it
@@ -146,12 +163,6 @@ export function initSyncEngine(host) {
         return tombstoneHashPromise;
     }
 
-    function appIdOf(fullKey) {
-        const rest = fullKey.slice(KEY_PREFIX.length);
-        const dot = rest.indexOf('.');
-        return dot === -1 ? rest : rest.slice(0, dot);
-    }
-
     function refreshSyncableForApp(appId) {
         const listKey = KEY_PREFIX + appId + '._sync';
         let list;
@@ -165,7 +176,7 @@ export function initSyncEngine(host) {
 
     function isKeySynced(fullKey) {
         if (!syncEligibleKey(fullKey)) return false;
-        const s = syncable.get(appIdOf(fullKey));
+        const s = syncable.get(appIdOfKey(fullKey));
         if (!s) return false;
         return s === '*' || s.has(fullKey);
     }
@@ -175,7 +186,7 @@ export function initSyncEngine(host) {
         try {
             for (let i = 0; i < localStorage.length; i++) {
                 const k = localStorage.key(i);
-                if (k && SYNC_LIST_RE.test(k)) refreshSyncableForApp(appIdOf(k));
+                if (k && SYNC_LIST_RE.test(k)) refreshSyncableForApp(appIdOfKey(k));
             }
         } catch (e) {}
     }
@@ -188,7 +199,9 @@ export function initSyncEngine(host) {
         for (const row of rows) {
             if (typeof row.key !== 'string') continue;
             if (row.key.charAt(0) === 'k' && row.key.charAt(1) === '|') records.set(row.key.slice(2), row.value);
+            else if (row.key.charAt(0) === 'j' && row.key.charAt(1) === '|') localRecords.set(row.key.slice(2), row.value);
             else if (row.key.charAt(0) === 'p' && row.key.charAt(1) === '|') cursors.set(row.key.slice(2), row.value);
+            else if (row.key.charAt(0) === 'w' && row.key.charAt(1) === '|') watermarks.set(row.key.slice(2), row.value);
         }
     }
 
@@ -200,23 +213,35 @@ export function initSyncEngine(host) {
     // beyond it (oldest first) is the documented residual window (see
     // arcade-sync-core.js).
     async function gcTombstones() {
-        const byApp = new Map();
-        for (const [k, rec] of records) {
-            if (!rec || rec.del !== 1) continue;
-            const appId = appIdOf(k);
-            if (!byApp.has(appId)) byApp.set(appId, []);
-            byApp.get(appId).push([k, rec]);
+        // Both record classes feed one per-app cap: the cap bounds tombstone
+        // memory for the app, not per class. The class rides along in each
+        // entry so eviction hits the right map/prefix.
+        const entries = [];
+        for (const [k, rec] of records) entries.push([k, rec, 'sync']);
+        for (const [k, rec] of localRecords) {
+            if (!records.has(k)) entries.push([k, rec, 'local']);
         }
-        const toDelete = [];
-        for (const list of byApp.values()) {
-            if (list.length > SYNC_TOMBSTONE_CAP_PER_APP) {
-                list.sort((a, b) => (a[1].t || 0) - (b[1].t || 0));
-                for (let i = 0; i < list.length - SYNC_TOMBSTONE_CAP_PER_APP; i++) toDelete.push(list[i][0]);
+        const plan = planTombstoneGc(entries, SYNC_TOMBSTONE_CAP_PER_APP);
+        for (const [k, , cls] of plan.evict) {
+            if (cls === 'sync') {
+                records.delete(k);
+                try { await idbDel(db, 'k|' + k); } catch (e) {}
+            } else {
+                localRecords.delete(k);
+                try { await idbDel(db, 'j|' + k); } catch (e) {}
             }
         }
-        for (const k of toDelete) {
-            records.delete(k);
-            try { await idbDel(db, 'k|' + k); } catch (e) {}
+        // Persist the running-max eviction watermark per app. Only ever
+        // ratchets forward — it must survive every future GC round, because
+        // "base older than ANY evicted tombstone" is the delta-refusal rule.
+        for (const [appId, wm] of plan.watermarks) {
+            const prev = watermarks.get(appId);
+            const merged = prev ? {
+                t: Math.max(prev.t || 0, wm.t || 0),
+                h: hlcCompare(prev.h || '', wm.h || '') >= 0 ? (prev.h || '') : wm.h
+            } : wm;
+            watermarks.set(appId, merged);
+            try { await idbPut(db, 'w|' + appId, merged); } catch (e) {}
         }
     }
 
@@ -517,7 +542,7 @@ export function initSyncEngine(host) {
         records.set(key, rec);
         try { await idbPut(db, 'k|' + key, rec); } catch (err) {}
 
-        const appId = appIdOf(key);
+        const appId = appIdOfKey(key);
         postToIframe(appId, { type: CHANGED, key, value: isDel ? null : e.v });
         // Inbound adoption: replication stays bidirectional even before the
         // app ever ran locally on this device. Broadcasts its own
@@ -562,7 +587,7 @@ export function initSyncEngine(host) {
     // ---- host hooks (local writes) ----
     async function onSyncListWrite(listKey) {
         await ensureLoaded();
-        const appId = appIdOf(listKey);
+        const appId = appIdOfKey(listKey);
         refreshSyncableForApp(appId);
         const prefix = KEY_PREFIX + appId + '.';
         const toCheck = [];
@@ -602,10 +627,77 @@ export function initSyncEngine(host) {
         }
     }
 
+    // ---- tier-1 journal: non-synced bridged writes (durability design §3) ----
+    // Every syncEligibleKey-passing write that is NOT `_sync`-opted-in gets a
+    // `local`-class record, so bundles/deltas know what changed and when, and
+    // deletions of non-synced keys leave tombstones a bundle can carry.
+    // Cost discipline: noteLocalWrite only does a Map.set here; hashing and
+    // the IDB put happen on a coalesced microtask flush — a game hammering
+    // state.set in a loop journals the final value once per key per flush.
+    const journalQueue = new Map();  // fullKey -> latest raw value | null (coalesced)
+    let journalFlushPromise = null;
+
+    function isNoExportListed(fullKey) {
+        // A _noExport-listed key never enters a bundle, so its provenance
+        // buys nothing — skip it entirely (list shape mirrors
+        // arcade-save.js's collectArcadeKeys: full keys).
+        let list;
+        try { list = JSON.parse(localStorage.getItem(KEY_PREFIX + appIdOfKey(fullKey) + '._noExport') || 'null'); } catch (e) { list = null; }
+        return Array.isArray(list) && list.indexOf(fullKey) !== -1;
+    }
+
+    function scheduleJournalFlush() {
+        if (journalFlushPromise) return;
+        journalFlushPromise = (async () => {
+            try {
+                await ensureLoaded();
+                while (journalQueue.size) {
+                    const batch = [...journalQueue.entries()];
+                    journalQueue.clear();
+                    const toSync = [];
+                    const stamped = [];
+                    for (const [key, value] of batch) {
+                        // The syncable cache is authoritative now that
+                        // ensureLoaded ran — a key adopted into a _sync list
+                        // since enqueue routes to the sync tier instead.
+                        if (isKeySynced(key)) { toSync.push([key, value]); continue; }
+                        if (isNoExportListed(key)) continue;
+                        const hash = (value === null) ? await tombstoneHash() : await sha256Hex(value);
+                        const del = (value === null) ? 1 : 0;
+                        const prev = localRecords.get(key);
+                        if (prev && prev.x === hash && prev.del === del) continue; // same content — no re-stamp churn
+                        const now = Date.now();
+                        clock = hlcNext(clock, now, getMyDeviceId());
+                        const rec = { h: clock, x: hash, del: del, t: now };
+                        localRecords.set(key, rec);
+                        stamped.push([key, rec]);
+                    }
+                    if (stamped.length) {
+                        // Clock is persisted first (and once per batch, not
+                        // per key): the persisted clock must stay >= every
+                        // persisted record's stamp, or a crash could reload
+                        // a regressed clock that re-issues stamps sorting
+                        // before existing records.
+                        try { await idbPut(db, 'clock', clock); } catch (e) {}
+                        for (const [key, rec] of stamped) {
+                            try { await idbPut(db, 'j|' + key, rec); } catch (e) {}
+                        }
+                    }
+                    for (const [key, value] of toSync) await onSyncedLocalWrite(key, value);
+                }
+            } catch (e) {
+                ArcadeDiag.log('sync', `journal flush failed: ${(e && e.message) || e}`);
+            } finally {
+                journalFlushPromise = null;
+                if (journalQueue.size) scheduleJournalFlush(); // writes raced in during the last await
+            }
+        })();
+    }
+
     // Called from the storage-bridge host hook for EVERY bridged write
     // (synced or not) — must stay cheap (no IDB, no full scan) for the
     // common non-synced case: a single localStorage.getItem for this key's
-    // own app's _sync list, nothing more.
+    // own app's _sync list plus a Map.set, nothing more.
     function noteLocalWrite(key, value) {
         if (typeof key !== 'string') return;
         if (SYNC_LIST_RE.test(key)) {
@@ -614,11 +706,14 @@ export function initSyncEngine(host) {
         }
         if (!syncEligibleKey(key)) return;
         let listRaw;
-        try { listRaw = localStorage.getItem(KEY_PREFIX + appIdOf(key) + '._sync'); } catch (e) { listRaw = null; }
-        if (!listRaw) return; // no opt-in list for this app at all — nothing to do, no IDB touched
-        let list;
-        try { list = JSON.parse(listRaw); } catch (e) { list = null; }
-        if (!Array.isArray(list) || (list.indexOf('*') === -1 && list.indexOf(key) === -1)) return;
+        try { listRaw = localStorage.getItem(KEY_PREFIX + appIdOfKey(key) + '._sync'); } catch (e) { listRaw = null; }
+        let list = null;
+        if (listRaw) { try { list = JSON.parse(listRaw); } catch (e) { list = null; } }
+        if (!Array.isArray(list) || (list.indexOf('*') === -1 && list.indexOf(key) === -1)) {
+            journalQueue.set(key, (value === undefined) ? null : value);
+            scheduleJournalFlush();
+            return;
+        }
         onSyncedLocalWrite(key, value).catch((e) => ArcadeDiag.log('sync', `local-write stamp failed: ${(e && e.message) || e}`));
     }
 
@@ -632,7 +727,7 @@ export function initSyncEngine(host) {
         const relevantApps = new Set();
         for (const k of keys) {
             if (typeof k !== 'string') continue;
-            const appId = appIdOf(k);
+            const appId = appIdOfKey(k);
             if (relevantApps.has(appId)) continue;
             let listRaw;
             try { listRaw = localStorage.getItem(KEY_PREFIX + appId + '._sync'); } catch (e) { listRaw = null; }
@@ -673,18 +768,44 @@ export function initSyncEngine(host) {
         };
     }
 
+    // Journal snapshot for bundle building (arcade-save.js via the
+    // host.getJournalSnapshot hook): both record classes merged — class is a
+    // device-local property, not a bundle property (durability design §4).
+    // Sync-class wins on overlap (it is authoritative for synced keys). The
+    // pending journal queue is drained first so a just-written key is
+    // included in the export that prompted the snapshot.
+    async function exportJournal() {
+        if (journalFlushPromise) { try { await journalFlushPromise; } catch (e) {} }
+        await ensureLoaded();
+        const out = {};
+        for (const [k, v] of localRecords) out[k] = { h: v.h, x: v.x, del: v.del, t: v.t };
+        for (const [k, v] of records) out[k] = { h: v.h, x: v.x, del: v.del, t: v.t };
+        return { clock: clock, records: out };
+    }
+
     return {
         noteLocalWrite,
         noteImportCommitted,
+        exportJournal,
         attachP2P,
         kick,
         onConflict,
-        // Test hooks: RAM-mirror snapshot and per-pair cursor. Fine to expose
-        // read-only — acceptance suites poll these to assert convergence.
+        // Test hooks: RAM-mirror snapshots, per-pair cursor, per-app GC
+        // watermark. Fine to expose read-only — acceptance suites poll these
+        // to assert convergence.
         _records() {
             const out = {};
             for (const [k, v] of records) out[k] = { h: v.h, x: v.x, del: v.del, t: v.t };
             return out;
+        },
+        _localRecords() {
+            const out = {};
+            for (const [k, v] of localRecords) out[k] = { h: v.h, x: v.x, del: v.del, t: v.t };
+            return out;
+        },
+        _watermark(appId) {
+            const wm = watermarks.get(appId);
+            return wm ? { t: wm.t, h: wm.h } : null;
         },
         _cursor(deviceId) {
             const c = cursors.get(deviceId);
