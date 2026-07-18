@@ -40,6 +40,7 @@ import {
     LOCAL_BACKUP_MAX_CHARS,
     localSnapshotKey,
     isSnapshotStale,
+    fingerprintMatches,
     planGenerationStore
 } from './arcade-local-backup-core.js';
 import { idbOpen, idbGet, idbPut, idbKeys, idbDel } from './arcade-storage-core.js';
@@ -78,7 +79,8 @@ export function initLocalBackupEngine(host) {
                     const v = (await idbGet(db, key)) || {};
                     index.push({
                         key: 's' + key.slice(1), checksum: v.checksum, chars: v.chars,
-                        exportedAt: v.exportedAt, receivedAt: v.receivedAt
+                        exportedAt: v.exportedAt, receivedAt: v.receivedAt,
+                        dataChecksum: v.dataChecksum, manifestChecksum: v.manifestChecksum
                     });
                 } else if (key === 'folder') {
                     const v = await idbGet(db, key);
@@ -91,13 +93,42 @@ export function initLocalBackupEngine(host) {
     }
 
     // ---- snapshot cycle ----
+    function snapshotMeta(g) {
+        return {
+            checksum: g.checksum, chars: g.chars, exportedAt: g.exportedAt, receivedAt: g.receivedAt,
+            dataChecksum: g.dataChecksum, manifestChecksum: g.manifestChecksum
+        };
+    }
+
+    // Renew the newest generation's staleness clock without storing anything
+    // new — the device's content is proven unchanged (either by fingerprint,
+    // or by a full build whose checksum matched). Without this, an idle
+    // device re-runs the whole cycle on EVERY boot past the 24h mark,
+    // because nothing ever moved receivedAt forward.
+    async function touchNewest(fields) {
+        const newest = index[index.length - 1];
+        newest.receivedAt = Date.now();
+        if (fields && typeof fields.dataChecksum === 'string') newest.dataChecksum = fields.dataChecksum;
+        if (fields && typeof fields.manifestChecksum === 'string') newest.manifestChecksum = fields.manifestChecksum;
+        try { await idbPut(db, 'm' + newest.key.slice(1), snapshotMeta(newest)); } catch (e) {}
+    }
+
     async function storeSnapshot(bundle) {
         const plan = planGenerationStore(index, bundle.checksum, LOCAL_BACKUP_GENERATIONS);
-        if (!plan.store) return false; // identical to the newest kept generation — nothing changed
+        if (!plan.store) {
+            // Identical to the newest kept generation — refresh its clock
+            // (adopting fingerprint fields a legacy meta lacks, so the NEXT
+            // cycle can skip the build entirely).
+            await touchNewest(bundle);
+            return false;
+        }
         let ms = Date.now();
         let key = localSnapshotKey(ms);
         while (index.some((g) => g.key === key)) key = localSnapshotKey(++ms);
-        const meta = { checksum: bundle.checksum, chars: bundle.json.length, exportedAt: bundle.exportedAt || '', receivedAt: ms };
+        const meta = {
+            checksum: bundle.checksum, chars: bundle.json.length, exportedAt: bundle.exportedAt || '', receivedAt: ms,
+            dataChecksum: bundle.dataChecksum, manifestChecksum: bundle.manifestChecksum
+        };
         // Split rows: the bundle string under 's|…', its meta under 'm|…' —
         // ensureDb's index build reads only the latter.
         await idbPut(db, key, { json: bundle.json });
@@ -121,6 +152,22 @@ export function initLocalBackupEngine(host) {
                 await ensureDb();
                 const newest = index.length ? index[index.length - 1] : null;
                 if (!force && !isSnapshotStale(newest ? newest.receivedAt : null, Date.now())) return false;
+                // Build-avoidance (durability design PR 7): before the full
+                // bundle build, compare a cheap fingerprint (data checksum +
+                // stores/files manifest checksum) against the newest
+                // generation's. A match means a build could only reproduce
+                // the stored content — renew the clock and skip it. Fails
+                // open on any irregularity (no hook, legacy meta, fingerprint
+                // error): fall through to the build-and-compare path.
+                if (!force && newest && host.getFingerprint) {
+                    let fp = null;
+                    try { fp = await host.getFingerprint(); } catch (e) {}
+                    if (fingerprintMatches(newest, fp)) {
+                        await touchNewest(null);
+                        ArcadeDiag.log('local-backup', 'nothing changed since the newest generation (fingerprint match) — full bundle build skipped');
+                        return false;
+                    }
+                }
                 let bundle;
                 try { bundle = await host.getBundleJson(); }
                 catch (e) {
@@ -301,7 +348,10 @@ export function initLocalBackupEngine(host) {
             const newest = index.length ? index[index.length - 1] : null;
             return {
                 count: index.length,
-                newest: newest ? { checksum: newest.checksum, receivedAt: newest.receivedAt } : null,
+                newest: newest ? {
+                    checksum: newest.checksum, receivedAt: newest.receivedAt,
+                    dataChecksum: newest.dataChecksum, manifestChecksum: newest.manifestChecksum
+                } : null,
                 folder: folderHandle ? folderHandle.name : null
             };
         }

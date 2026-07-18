@@ -44,5 +44,20 @@ export function isSnapshotStale(newestAt, now, staleMs) {
     return (now - newestAt) >= window_;
 }
 
+// ---- build-avoidance fingerprint (durability design, PR 7) ----
+// A generation's meta row may carry the checksums of its bundle's data
+// section and manifest section (arcade-save.js exportBundleString /
+// durabilityFingerprint — computed identically on both sides). When the
+// device's CURRENT cheap fingerprint equals the newest generation's, nothing
+// a bundle would carry has changed, so the engine renews the staleness clock
+// WITHOUT assembling the full bundle. Fails closed: a legacy meta (no
+// fingerprint fields) or an unavailable fingerprint never matches, so those
+// devices build-and-compare exactly as before.
+export function fingerprintMatches(meta, fp) {
+    return !!(meta && fp
+        && typeof meta.dataChecksum === 'string' && meta.dataChecksum === fp.dataChecksum
+        && typeof meta.manifestChecksum === 'string' && meta.manifestChecksum === fp.manifestChecksum);
+}
+
 // ---- retention/dedup: reused as-is, not reimplemented ----
 export { planGenerationStore } from './arcade-backup-core.js';

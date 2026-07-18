@@ -809,8 +809,22 @@ export function initSaveLoad(host) {
         }
         // Sync engine hook (arcade-sync.js, wired in index.html): an import
         // is a deliberate "now" edit — re-stamp every imported key that's
-        // synced so it wins over older remote edits on the next sync.
-        if (host.onImportCommitted) { try { host.onImportCommitted(cleanKeys); } catch (e) {} }
+        // synced so it wins over older remote edits on the next sync. When
+        // the bundle carries a journal section (durability design §5), the
+        // VERIFIED section rides along so the engine can seed its clock and
+        // adopt tombstones at their original HLC; a tampered/absent section
+        // hands over null — exactly the pre-journal behavior (advisory,
+        // never authoritative).
+        if (host.onImportCommitted) {
+            let journal = null;
+            if (parsed.journal) {
+                try {
+                    const vj = await verifyJournalSection(parsed.journal);
+                    if (vj.ok) journal = { clock: vj.clock, records: vj.records };
+                } catch (e) {}
+            }
+            try { host.onImportCommitted(cleanKeys, journal); } catch (e) {}
+        }
         // Notify mounted iframes. Opaque frames can't see storage events
         // — each gets its fresh post-import snapshot to reseed its cache.
         for (const gid of host.listMountedGameIds()) {
@@ -853,7 +867,42 @@ export function initSaveLoad(host) {
             if (!importable
                 && Object.keys(bundle.stores).length === 0
                 && countFiles(bundle.files) === 0) return null;
-            return { json: JSON.stringify(bundle), checksum: bundle.checksum, exportedAt: bundle.exportedAt };
+            return {
+                json: JSON.stringify(bundle),
+                checksum: bundle.checksum,
+                exportedAt: bundle.exportedAt,
+                // Build-avoidance fingerprint fields (durability PR 7): must
+                // be computed exactly like durabilityFingerprint() below so
+                // a stored generation's meta compares equal to a later cheap
+                // fingerprint of unchanged state.
+                dataChecksum: await checksumCanonical(data),
+                manifestChecksum: bundle.manifest ? bundle.manifest.checksum : null
+            };
+        },
+
+        /**
+         * Cheap change fingerprint for the local-backup engine's 24h cycle:
+         * everything a bundle would carry, WITHOUT assembling the bundle —
+         * no whole-bundle serialize, no outer checksum over the full
+         * canonical form, no journal section. `dataChecksum` covers the
+         * localStorage section directly (deliberately NOT the journal's
+         * max-HLC: launcher-owned `_meta.*`/`global.*` keys and keys
+         * committed by an import never enter the journal, so a journal-based
+         * fingerprint would silently skip backing up their changes);
+         * `manifestChecksum` covers stores/files at the same whole-DB/
+         * whole-file granularity the bundle manifest uses.
+         */
+        async durabilityFingerprint() {
+            const data = collectArcadeKeys();
+            const dbNames = await listArcadeDbNames();
+            const gameIds = await gatherGameIds(data, dbNames);
+            const stores = await collectStores(dbNames);
+            const files = await collectFiles(gameIds, dbNames);
+            const manifest = await buildManifestSection(stores, files);
+            return {
+                dataChecksum: await checksumCanonical(data),
+                manifestChecksum: manifest.checksum
+            };
         },
 
         /**

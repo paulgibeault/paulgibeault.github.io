@@ -410,6 +410,106 @@ async function engineTests() {
     ok(wm3 && wm3.t === wm.t && wm3.h === wm.h, 'watermark is persisted, not recomputed away on a quiet reload');
 }
 
+// ---- restore-side consumers (T3, durability design §5) ----
+// Fresh shimmed world (new fake IDB + localStorage): proves clock seeding
+// and original-HLC tombstone adoption through the real noteImportCommitted.
+async function importConsumerTests() {
+    console.log('\nsync engine — restore consumers: clock seeding + tombstone adoption (T3)');
+    const { installFakeIndexedDB, installFakeLocalStorage } = await import('./lib/fake-idb.mjs');
+    installFakeIndexedDB();
+    installFakeLocalStorage();
+    globalThis.window = globalThis;
+    const { initSyncEngine } = await import('../arcade-sync.js');
+
+    localStorage.setItem('arcade.v1._meta.deviceId', DEV_A);
+    localStorage.setItem('arcade.v1.appc._sync', JSON.stringify(['*']));
+    const engine = initSyncEngine({ postToIframe: () => {} });
+
+    // 1. Clock seeding: a bundle clock far in the future must be observed
+    // BEFORE the re-stamp, so the fresh stamp still sorts after it.
+    const farFuture = hlcPack(Date.now() + 1e9, 0, DEV_B);
+    localStorage.setItem('arcade.v1.appc.k1', '"v1"');
+    engine.noteImportCommitted(['arcade.v1.appc.k1'], { clock: farFuture, records: {} });
+    // ensureLoaded's passive stampMissingOrChanged may stamp this key with a
+    // pre-seed clock first; the import re-stamp (post-seed) lands right
+    // after — wait for the FINAL state, not the first record to appear.
+    let rec = await waitFor(() => {
+        const r = engine._records()['arcade.v1.appc.k1'];
+        return (r && hlcCompare(r.h, farFuture) > 0) ? r : null;
+    }, 'seeded re-stamp sorting after the bundle clock');
+    ok(hlcCompare(rec.h, farFuture) > 0, 'clock seeding: the re-stamp sorts after the bundle clock (restore-wins survives clock skew)');
+
+    // 2. Tombstone adoption, synced app, fresh key: adopted at the ORIGINAL
+    // HLC and t, never re-stamped, into the sync class.
+    const hTomb = hlcPack(5000, 0, DEV_B);
+    engine.noteImportCommitted([], { clock: null, records: {
+        'arcade.v1.appc.gone': { h: hTomb, x: 'a'.repeat(64), del: 1, t: 4242 }
+    } });
+    rec = await waitFor(() => engine._records()['arcade.v1.appc.gone'], 'tombstone adoption');
+    ok(rec.del === 1 && rec.h === hTomb, 'a bundle tombstone is adopted at its ORIGINAL HLC (never re-stamped)');
+    ok(rec.t === 4242, 'the adopted tombstone keeps its original t (GC evicts genuinely-old deletions first)');
+    ok(!engine._localRecords()['arcade.v1.appc.gone'], 'a synced app\'s adopted tombstone lands in the sync class (digests will defend it)');
+
+    // 3. Non-synced app: adoption lands in the local class.
+    engine.noteImportCommitted([], { clock: null, records: {
+        'arcade.v1.appd.gone': { h: hTomb, x: 'a'.repeat(64), del: 1, t: 1 }
+    } });
+    rec = await waitFor(() => engine._localRecords()['arcade.v1.appd.gone'], 'local-class adoption');
+    ok(rec.del === 1 && rec.h === hTomb, 'a non-synced app\'s tombstone is adopted into the local class');
+    ok(!engine._records()['arcade.v1.appd.gone'], 'the local-class adoption stays out of the sync class');
+
+    // 4. LWW: an existing NEWER record beats the bundle tombstone.
+    localStorage.setItem('arcade.v1.appc.kept', '"keep"');
+    engine.noteLocalWrite('arcade.v1.appc.kept', '"keep"'); // stamps now (newer than hTomb)
+    await waitFor(() => engine._records()['arcade.v1.appc.kept'], 'stamp before adoption');
+    engine.noteImportCommitted([], { clock: null, records: {
+        'arcade.v1.appc.kept': { h: hTomb, x: 'a'.repeat(64), del: 1, t: 1 }
+    } });
+    await settle(30);
+    ok(engine._records()['arcade.v1.appc.kept'].del === 0, 'an older bundle tombstone loses LWW to a newer local record');
+    ok(localStorage.getItem('arcade.v1.appc.kept') === '"keep"', 'the newer live value is untouched');
+
+    // 5. A live value with NO record predates the journal — never deleted.
+    localStorage.setItem('arcade.v1.appd.unstamped', '"old"');
+    const futureTomb = hlcPack(Date.now() + 1e9, 1, DEV_B);
+    engine.noteImportCommitted([], { clock: null, records: {
+        'arcade.v1.appd.unstamped': { h: futureTomb, x: 'a'.repeat(64), del: 1, t: 1 }
+    } });
+    await settle(30);
+    ok(localStorage.getItem('arcade.v1.appd.unstamped') === '"old"', 'a live-but-unstamped value survives (LWW cannot order it)');
+    ok(!engine._localRecords()['arcade.v1.appd.unstamped'], 'no tombstone is adopted over an unorderable live value');
+
+    // 6. A NEWER bundle tombstone beats an older stamped live value: the
+    // deletion applies like a wire apply would.
+    localStorage.setItem('arcade.v1.appc.doomed', '"stale"');
+    engine.noteLocalWrite('arcade.v1.appc.doomed', '"stale"');
+    await waitFor(() => engine._records()['arcade.v1.appc.doomed'], 'stamp doomed');
+    engine.noteImportCommitted([], { clock: null, records: {
+        'arcade.v1.appc.doomed': { h: futureTomb, x: 'a'.repeat(64), del: 1, t: 7 }
+    } });
+    rec = await waitFor(() => {
+        const r = engine._records()['arcade.v1.appc.doomed'];
+        return (r && r.del === 1) ? r : null;
+    }, 'winning tombstone applies');
+    ok(rec.h === futureTomb, 'a newer bundle tombstone replaces the older record at its original HLC');
+    ok(localStorage.getItem('arcade.v1.appc.doomed') === null, 'the older live value is deleted (plain LWW, wire-apply semantics)');
+
+    // 7. A restored _sync list takes effect within the SAME import: the
+    // engine refreshes its syncable cache from the committed lists, so a
+    // fresh-device restore re-stamps into the sync class immediately.
+    localStorage.setItem('arcade.v1.appe._sync', JSON.stringify(['*'])); // committed by the "import"
+    localStorage.setItem('arcade.v1.appe.v', '"x"');
+    engine.noteImportCommitted(['arcade.v1.appe._sync', 'arcade.v1.appe.v'], null);
+    rec = await waitFor(() => engine._records()['arcade.v1.appe.v'], 'restored-list re-stamp');
+    ok(rec.del === 0, 'an import that carries an app\'s _sync list re-stamps that app\'s keys into the sync class (no reload needed)');
+
+    // 8. No journal ⇒ exactly the pre-journal behavior (re-stamp only).
+    localStorage.setItem('arcade.v1.appc.plain', '"p"');
+    engine.noteImportCommitted(['arcade.v1.appc.plain'], null);
+    rec = await waitFor(() => engine._records()['arcade.v1.appc.plain'], 'journal-less import');
+    ok(rec.del === 0, 'a journal-less import still re-stamps synced keys (old bundles degrade to today)');
+}
+
 async function sha256HexTests() {
     console.log('\nsha256Hex');
     const h1 = await sha256Hex('hello world');
@@ -434,6 +534,7 @@ async function sha256HexTests() {
     planTombstoneGcTests();
     await sha256HexTests();
     await engineTests();
+    await importConsumerTests();
     console.log('');
     if (fail) { console.log(fail + ' check(s) FAILED.'); process.exit(1); }
     console.log('All ' + pass + ' sync unit checks passed.');

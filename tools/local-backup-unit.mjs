@@ -16,6 +16,7 @@ import {
     LOCAL_BACKUP_STALE_MS,
     localSnapshotKey,
     isSnapshotStale,
+    fingerprintMatches,
     planGenerationStore
 } from '../arcade-local-backup-core.js';
 
@@ -66,9 +67,31 @@ function retentionReuseTests() {
         `at the cap (${LOCAL_BACKUP_GENERATIONS}): oldest snapshot is pruned to make room`);
 }
 
+function fingerprintTests() {
+    console.log('\nfingerprintMatches (build-avoidance, durability PR 7)');
+    const DATA = 'sha256:' + 'd'.repeat(64);
+    const MANI = 'sha256:' + 'e'.repeat(64);
+    const meta = { checksum: SUM, receivedAt: 1, dataChecksum: DATA, manifestChecksum: MANI };
+    ok(fingerprintMatches(meta, { dataChecksum: DATA, manifestChecksum: MANI }) === true,
+        'matching data + manifest checksums ⇒ build can be skipped');
+    ok(fingerprintMatches(meta, { dataChecksum: 'sha256:' + 'f'.repeat(64), manifestChecksum: MANI }) === false,
+        'a changed data checksum forces a build');
+    ok(fingerprintMatches(meta, { dataChecksum: DATA, manifestChecksum: 'sha256:' + 'f'.repeat(64) }) === false,
+        'a changed manifest checksum forces a build');
+    ok(fingerprintMatches({ checksum: SUM, receivedAt: 1 }, { dataChecksum: DATA, manifestChecksum: MANI }) === false,
+        'a legacy meta (no fingerprint fields) never matches — old generations rebuild as before');
+    ok(fingerprintMatches(meta, null) === false, 'a null fingerprint never matches (hook missing/failed)');
+    ok(fingerprintMatches(null, { dataChecksum: DATA, manifestChecksum: MANI }) === false, 'a null meta never matches');
+    ok(fingerprintMatches(meta, { dataChecksum: DATA, manifestChecksum: null }) === false,
+        'a null manifest checksum (manifest failed to build) never matches');
+    ok(fingerprintMatches({ ...meta, dataChecksum: undefined }, { dataChecksum: undefined, manifestChecksum: MANI }) === false,
+        'undefined === undefined does NOT count as a match (both sides must carry real checksums)');
+}
+
 keyTests();
 stalenessTests();
 retentionReuseTests();
+fingerprintTests();
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
