@@ -11,12 +11,24 @@
 // ('.' never appears in the legacy deflate-base64url payloads, so the two
 // formats are unambiguous.)
 //
-// Binary layout — see IMPLEMENTATION_NOTES.md for the byte-level spec.
+// Binary layout — see PROTOCOL.md §3.1 for the byte-level spec.
+//
+// After the candidate list the payload may carry an EXTRAS trailer: TLV
+// entries of (tag u8, value lstr). This is a format-1-compatible superset,
+// not a version bump, because decoders shipped before the trailer existed
+// stop reading after the last candidate and ignore trailing bytes — an old
+// device decodes a new payload exactly as it always did, and a new device
+// decodes an old payload as one with no extras. Every extra value is an
+// lstr, so unknown tags are skippable by construction. Current tags:
+//   1 = n — the rendezvous offer/answer exchange nonce (PROTOCOL.md §7.4).
+//       Before the trailer existed, pack() silently DROPPED `n`, leaving
+//       the offer↔answer replay binding inert on the packed wire path.
 //
 // This module is environment-agnostic (browser + Node) for testability.
 // ==========================================
 
 const FORMAT_VERSION = 1;
+const EXTRA_TAG = { NONCE: 1 };
 
 const ADDR_KIND = { IPV4: 0, IPV6: 1, MDNS: 2, RAW: 3 };
 const CAND_TYPE = ['host', 'srflx', 'prflx', 'relay'];
@@ -233,8 +245,12 @@ function buildSDP({ type, ufrag, pwd, fingerprint, hash, mid, candidates }) {
 
 export class SDPCodec {
     /**
-     * Packs a signaling payload {peerId, sessionDesc:{type, sdp}} into a
-     * compact string: "1." + base64url(binary).
+     * Packs a signaling payload {peerId, sessionDesc:{type, sdp}, n?} into a
+     * compact string: "1." + base64url(binary). `n` (the rendezvous exchange
+     * nonce) rides the extras trailer; a payload with a nonce the trailer
+     * can't carry (non-ASCII/oversize) throws, which the encodePayload
+     * caller turns into the legacy deflate fallback — the nonce is never
+     * silently dropped again.
      */
     static pack(payload) {
         const { peerId, sessionDesc } = payload;
@@ -279,6 +295,13 @@ export class SDPCodec {
             if (kind === ADDR_KIND.RAW) w.lstr(cand.address);
             else w.raw(addrBytes);
             w.u16(cand.port);
+        }
+
+        // Extras trailer (see header). A payload without extras stays
+        // byte-identical to the pre-trailer format.
+        if (payload.n !== undefined && payload.n !== null) {
+            w.u8(EXTRA_TAG.NONCE);
+            w.lstr(String(payload.n)); // throws on non-ASCII/oversize → deflate fallback
         }
 
         return `${FORMAT_VERSION}.${bytesToBase64url(w.toUint8Array())}`;
@@ -342,13 +365,25 @@ export class SDPCodec {
             candidates.push({ address, port, type: type_ });
         }
 
-        return {
+        const out = {
             peerId,
             sessionDesc: {
                 type,
                 sdp: buildSDP({ type, ufrag, pwd, fingerprint, hash, mid, candidates })
             }
         };
+
+        // Extras trailer: uniform (tag u8, value lstr) entries, so tags from
+        // a future sender skip cleanly; a truncated entry throws like any
+        // other corruption. Absent trailer (every pre-trailer sender) ⇒ no
+        // extras on the payload.
+        while (r.pos < r.bytes.length) {
+            const tag = r.u8();
+            const value = r.lstr();
+            if (tag === EXTRA_TAG.NONCE) out.n = assertSdpToken(value, 'nonce extra');
+        }
+
+        return out;
     }
 }
 
