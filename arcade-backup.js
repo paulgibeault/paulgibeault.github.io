@@ -36,6 +36,19 @@
  * (expired while the peer's consent prompt sat open) re-offers instead of
  * failing silently.
  *
+ * Delta transfers (durability design §6, additive on v1): an offer may name
+ * `deltaFrom` (the per-peer acked base checksum, guarded by the sync
+ * engine's GC eviction watermark); a receiver still holding that generation
+ * answers `accept-delta`, the sender ships a diff document (delta-info +
+ * the same chunk frames), and the receiver MATERIALIZES the full bundle
+ * from its stored base, requires the offer's exact checksum, and runs the
+ * full validateSaveBundle gate before storing — a delta can never smuggle
+ * state a full transfer couldn't, and every failure falls back to the
+ * plain full transfer. Old peers interoperate with zero negotiation: an
+ * old receiver ignores deltaFrom and plain-accepts (full transfer); an old
+ * sender never offers deltaFrom. Generations remain full bundles at rest —
+ * a delta is a transfer optimization, never a storage format.
+ *
  * Memory discipline: the multi-MB bundle string is never parked. A pending
  * offer holds only its checksum/size; the string is (re)built from the
  * short-lived bundle cache when the accept actually arrives, and if the
@@ -70,13 +83,19 @@ import {
     BACKUP_CHUNK_CHARS,
     BACKUP_MAX_CHARS,
     BACKUP_PROTOCOL_V,
+    BACKUP_DELTA_FORMAT,
     chunkString,
     genKey,
     planGenerationStore,
-    validateBackupEnvelope
+    validateBackupEnvelope,
+    senderBaseInfo,
+    deltaOfferAllowed,
+    buildBackupDelta,
+    validateBackupDelta,
+    applyBackupDelta
 } from './arcade-backup-core.js';
 import { validateSaveBundle, bytesToB64, b64ToBytes } from './arcade-save.js';
-import { idbOpen, idbGet, idbPut, idbKeys, idbDel } from './arcade-storage-core.js';
+import { SAVE_FORMAT, SAVE_SCHEMA, checksumBundle, idbOpen, idbGet, idbPut, idbKeys, idbDel } from './arcade-storage-core.js';
 import { readKnownPeers, setKnownPeerBackupTarget } from './arcade-known-peers.js';
 import { ArcadeDiag } from './arcade-diag.js';
 
@@ -163,6 +182,8 @@ export function initBackupEngine(host) {
     let loadingPromise = null;
     const genIndex = new Map();  // deviceId -> [{key, checksum, chars, exportedAt, receivedAt}] oldest-first (json stays in IDB)
     const acked = new Map();     // deviceId -> checksum of the peer-confirmed stored copy of OUR bundle
+    const ackedInfo = new Map(); // deviceId -> full 'a|' row: {checksum, at, clock?, dataHashes?, storeHashes?, fileHashes?}
+                                 // — the delta base info persisted at ack time (durability §6)
     let p2p = null;
 
     const outbound = new Map();       // deviceId -> {id, checksum, chars, parts, at, timer} — never the bundle string
@@ -192,7 +213,9 @@ export function initBackupEngine(host) {
                         exportedAt: v.exportedAt, receivedAt: v.receivedAt
                     });
                 } else if (key.charAt(0) === 'a' && key.charAt(1) === '|') {
-                    acked.set(key.slice(2), ((await idbGet(db, key)) || {}).checksum);
+                    const row = (await idbGet(db, key)) || {};
+                    acked.set(key.slice(2), row.checksum);
+                    ackedInfo.set(key.slice(2), row);
                 }
             }
             for (const list of genIndex.values()) list.sort((a, b) => a.key < b.key ? -1 : 1);
@@ -274,27 +297,55 @@ export function initBackupEngine(host) {
         };
         transfer.timer = setTimeout(() => dropTransfer(outbound, deviceId, transfer), OFFER_TTL_MS);
         outbound.set(deviceId, transfer);
-        const sent = send(deviceId, {
+        // Delta base (durability §6): offer deltaFrom only when we hold the
+        // acked bundle's diff material AND its journal clock clears the GC
+        // eviction watermark (a base older than an evicted tombstone can't
+        // be trusted to express that deletion). Old receivers ignore the
+        // field and reply plain 'accept' ⇒ full transfer, no negotiation.
+        const offer = {
             op: 'offer', id: transfer.id, checksum: transfer.checksum,
             chars: transfer.chars, parts: transfer.parts,
             exportedAt: String(bundle.exportedAt || '').slice(0, 40)
-        });
+        };
+        const info = ackedInfo.get(deviceId);
+        if (info && info.checksum === acked.get(deviceId) && info.checksum !== bundle.checksum) {
+            let ceiling = null;
+            try { ceiling = host.getWatermarkCeiling ? await host.getWatermarkCeiling() : null; } catch (e) {}
+            if (deltaOfferAllowed(info, ceiling)) offer.deltaFrom = info.checksum;
+        }
+        const sent = send(deviceId, offer);
         if (!sent) dropTransfer(outbound, deviceId, transfer);
     }
 
-    async function deliverChunks(deviceId, transfer) {
-        // The bundle string was deliberately NOT parked in the transfer:
-        // rebuild it (cheap while the cache is warm) and verify it is still
-        // the state the offer promised — the receiver hard-rejects a
-        // checksum switch, so a drifted bundle must restart as a new offer.
+    // Rebuilds the current bundle (cheap while the cache is warm) and
+    // verifies it is still the state the offer promised — the receiver
+    // hard-rejects a checksum switch, so a drifted bundle must restart as a
+    // new offer. Also stashes the parsed bundle + its delta base info on the
+    // transfer: the base info is small (hashes only, never values) and is
+    // what the ack persists so the NEXT offer can go out as a delta.
+    async function bundleForTransfer(deviceId, transfer) {
         let bundle;
         try { bundle = await getBundle(); } catch (e) { bundle = null; }
         if (!bundle || bundle.checksum !== transfer.checksum) {
             dropTransfer(outbound, deviceId, transfer);
             if (bundle) maybeOffer(deviceId, true).catch(() => {});
-            return;
+            return null;
         }
-        const chunks = chunkString(bundle.json, BACKUP_CHUNK_CHARS);
+        // The parsed object is returned as same-call scratch only — the
+        // transfer parks nothing bigger than baseInfo (hashes, never values).
+        let parsed = null;
+        try {
+            parsed = JSON.parse(bundle.json);
+            if (!transfer.baseInfo) {
+                const info = await senderBaseInfo(parsed);
+                if (info) transfer.baseInfo = { checksum: transfer.checksum, ...info };
+            }
+        } catch (e) {}
+        return { bundle, parsed };
+    }
+
+    async function sendChunkFrames(deviceId, transfer, payload) {
+        const chunks = chunkString(payload, BACKUP_CHUNK_CHARS);
         for (let i = 0; i < chunks.length; i++) {
             if (outbound.get(deviceId) !== transfer) return; // superseded/dropped mid-flight
             const ok = send(deviceId, { op: 'chunk', id: transfer.id, seq: i, parts: chunks.length, body: chunks[i] });
@@ -307,22 +358,80 @@ export function initBackupEngine(host) {
         }
     }
 
+    async function deliverChunks(deviceId, transfer) {
+        const r = await bundleForTransfer(deviceId, transfer);
+        if (!r) return;
+        await sendChunkFrames(deviceId, transfer, r.bundle.json);
+    }
+
+    // accept-delta arrived: ship a delta document instead of the bundle —
+    // when one can actually be built, is smaller than the full bundle, and
+    // the base the receiver named is the base we hold diff material for.
+    // Every bail-out lands on deliverChunks: the receiver's delta-mode
+    // reassembly recognizes a full bundle by its format field, so shipping
+    // full instead of delta needs no extra signaling.
+    async function deliverDelta(deviceId, transfer, base) {
+        const r = await bundleForTransfer(deviceId, transfer);
+        if (!r) return;
+        const info = ackedInfo.get(deviceId);
+        if (!info || info.checksum !== base || !deltaOfferAllowed(info, null) || !r.parsed) {
+            await sendChunkFrames(deviceId, transfer, r.bundle.json);
+            return;
+        }
+        let deltaJson = null;
+        try {
+            const doc = await buildBackupDelta(info, r.parsed);
+            if (doc) deltaJson = JSON.stringify(doc);
+        } catch (e) {
+            ArcadeDiag.log('backup', `delta build failed for ${deviceId}: ${(e && e.message) || e}`);
+        }
+        if (!deltaJson || deltaJson.length >= r.bundle.json.length) {
+            // No delta, or one that wouldn't save anything — full transfer.
+            await sendChunkFrames(deviceId, transfer, r.bundle.json);
+            return;
+        }
+        const parts = Math.max(1, Math.ceil(deltaJson.length / BACKUP_CHUNK_CHARS));
+        if (!send(deviceId, { op: 'delta-info', id: transfer.id, chars: deltaJson.length, parts })) {
+            dropTransfer(outbound, deviceId, transfer);
+            return;
+        }
+        ArcadeDiag.log('backup', `delta transfer to ${peerName(deviceId)}: ${deltaJson.length} chars (full bundle ${r.bundle.json.length})`);
+        await sendChunkFrames(deviceId, transfer, deltaJson);
+    }
+
     // ---- inbound: consent gate, reassembly, generation storage ----
-    function acceptOffer(deviceId, env) {
+    async function acceptOffer(deviceId, env) {
+        // Delta eligibility (durability §6): the sender named a base bundle
+        // it can diff against — answer accept-delta only if we actually
+        // HOLD a stored generation with that exact checksum to materialize
+        // from. Anything else (no deltaFrom, base pruned, never stored)
+        // stays a plain accept ⇒ full transfer.
+        let base = null;
+        if (typeof env.deltaFrom === 'string') {
+            await ensureDb();
+            const list = genIndex.get(deviceId) || [];
+            if (list.some((g) => g.checksum === env.deltaFrom)) base = env.deltaFrom;
+        }
         const prev = inbound.get(deviceId);
         if (prev && prev.timer) clearTimeout(prev.timer);
         const buf = {
             id: env.id, checksum: env.checksum, chars: env.chars, parts: env.parts,
+            // The offer's counts describe the FULL bundle — kept so a failed
+            // delta can re-arm for the full-transfer fallback.
+            offerChars: env.chars, offerParts: env.parts, base,
             chunks: new Map(), startedAt: Date.now(), timer: null
         };
         buf.timer = setTimeout(() => dropTransfer(inbound, deviceId, buf), REASSEMBLY_TIMEOUT_MS);
         inbound.set(deviceId, buf);
-        send(deviceId, { op: 'accept', id: env.id });
+        send(deviceId, base ? { op: 'accept-delta', id: env.id, base } : { op: 'accept', id: env.id });
     }
 
     function handleInboundOffer(fromDeviceId, env) {
         const flag = backupFlag(fromDeviceId);
-        if (flag === true) { acceptOffer(fromDeviceId, env); return; }
+        if (flag === true) {
+            acceptOffer(fromDeviceId, env).catch((e) => ArcadeDiag.log('backup', `accept failed: ${(e && e.message) || e}`));
+            return;
+        }
         if (flag === false) { send(fromDeviceId, { op: 'decline', id: env.id, reason: 'off' }); return; }
         // Never asked yet: consent prompt, exactly once even if offers churn
         // while it is up — the freshest offer wins when the user says yes.
@@ -335,7 +444,7 @@ export function initBackupEngine(host) {
                 consentPending.delete(fromDeviceId);
                 setKnownPeerBackupTarget(fromDeviceId, !!yes);
                 if (yes) {
-                    acceptOffer(fromDeviceId, latest);
+                    acceptOffer(fromDeviceId, latest).catch((e) => ArcadeDiag.log('backup', `accept failed: ${(e && e.message) || e}`));
                     // Symmetric flag: our side now offers too. Consent was
                     // this moment's deliberate touch — skip the dedupe.
                     maybeOffer(fromDeviceId, true).catch(() => {});
@@ -347,6 +456,96 @@ export function initBackupEngine(host) {
                 consentPending.delete(fromDeviceId);
                 ArcadeDiag.log('backup', `consent prompt failed: ${(e && e.message) || e}`);
             });
+    }
+
+    // Sender's answer to accept-delta: the delta document's own size/parts
+    // (the offer's counts describe the full bundle). Accepted only before
+    // any chunk has landed — a mid-transfer resize is a malformed sender.
+    function handleDeltaInfo(fromDeviceId, env) {
+        const buf = inbound.get(fromDeviceId);
+        if (!buf || buf.id !== env.id || !buf.base || buf.chunks.size > 0) return;
+        buf.chars = env.chars;
+        buf.parts = env.parts;
+    }
+
+    // §6 fallback: the delta could not produce the offered bundle — drop it
+    // and re-arm for the ORIGINAL full transfer under the same id. The
+    // sender's outbound transfer is still alive (it drops only on ack/
+    // decline/TTL), so a plain 'accept' makes it deliver the full bundle;
+    // if it already expired, handleInboundAnswer's no-transfer path turns
+    // the accept into a fresh offer instead.
+    function requestFullFallback(deviceId, buf, why) {
+        ArcadeDiag.log('backup', `delta from ${deviceId} unusable (${why}) — requesting full transfer`);
+        const fresh = {
+            id: buf.id, checksum: buf.checksum, chars: buf.offerChars, parts: buf.offerParts,
+            offerChars: buf.offerChars, offerParts: buf.offerParts, base: null,
+            chunks: new Map(), startedAt: Date.now(), timer: null
+        };
+        fresh.timer = setTimeout(() => dropTransfer(inbound, deviceId, fresh), REASSEMBLY_TIMEOUT_MS);
+        inbound.set(deviceId, fresh);
+        send(deviceId, { op: 'accept', id: buf.id });
+    }
+
+    // A reassembled payload in delta mode: materialize the full bundle from
+    // the stored base generation + the delta, require the offer's exact
+    // checksum, then run the FULL validateSaveBundle gate before storing —
+    // a delta can never smuggle state a full transfer couldn't (§7.2).
+    async function handleDeltaPayload(fromDeviceId, buf, doc, deltaChars) {
+        const dv = validateBackupDelta(doc);
+        if (!dv.ok || doc.to !== buf.checksum || doc.from !== buf.base) {
+            requestFullFallback(fromDeviceId, buf, dv.ok ? 'checksum-fields' : dv.reason);
+            return;
+        }
+        await ensureDb();
+        const list = genIndex.get(fromDeviceId) || [];
+        const gen = list.filter((g) => g.checksum === buf.base).pop();
+        let baseObj = null;
+        if (gen) {
+            let rec;
+            try { rec = await idbGet(db, gen.key); } catch (e) { rec = null; }
+            const baseJson = rec ? await openAtRest(fromDeviceId, rec) : null;
+            if (typeof baseJson === 'string') {
+                try { baseObj = JSON.parse(baseJson); } catch (e) { baseObj = null; }
+            }
+        }
+        if (!baseObj) {
+            requestFullFallback(fromDeviceId, buf, 'base-unreadable');
+            return;
+        }
+        let m = null;
+        try { m = applyBackupDelta(baseObj, doc); } catch (e) { m = null; }
+        if (!m) {
+            requestFullFallback(fromDeviceId, buf, 'apply-failed');
+            return;
+        }
+        let checksum = null;
+        try { checksum = await checksumBundle(m.data, m.stores, m.files); } catch (e) {}
+        if (checksum !== buf.checksum) {
+            requestFullFallback(fromDeviceId, buf, 'materialized-checksum-mismatch');
+            return;
+        }
+        const bundle = {
+            format: SAVE_FORMAT, schemaVersion: SAVE_SCHEMA,
+            exportedAt: String(doc.exportedAt || ''), appVersion: '1.0.0',
+            checksum, data: m.data, stores: m.stores, files: m.files
+        };
+        if (doc.journal) bundle.journal = doc.journal;
+        if (doc.manifest) bundle.manifest = doc.manifest;
+        const outJson = JSON.stringify(bundle);
+        if (outJson.length > BACKUP_MAX_CHARS) {
+            // A full transfer of this state couldn't have been offered
+            // either — nothing to fall back to.
+            ArcadeDiag.log('backup', `materialized bundle from ${fromDeviceId} exceeds ${BACKUP_MAX_CHARS} chars — dropped`);
+            return;
+        }
+        const v = await validateSaveBundle(bundle);
+        if (!v.ok) {
+            requestFullFallback(fromDeviceId, buf, 'bundle-validation:' + v.reason);
+            return;
+        }
+        ArcadeDiag.log('backup', `delta from ${peerName(fromDeviceId)} materialized (${deltaChars} delta chars -> ${outJson.length} bundle chars)`);
+        buf.exportedAt = String(doc.exportedAt || '').slice(0, 40);
+        await storeGeneration(fromDeviceId, buf, outJson);
     }
 
     async function storeGeneration(fromDeviceId, buf, json) {
@@ -409,6 +608,15 @@ export function initBackupEngine(host) {
             ArcadeDiag.log('backup', `transfer from ${fromDeviceId} is not valid JSON — dropped`);
             return;
         }
+        // Delta mode: the payload is normally a delta document — but a
+        // sender that couldn't (or chose not to) build one ships the full
+        // bundle over the same accepted transfer with no extra signaling;
+        // the format field disambiguates, and a full bundle falls through
+        // to the unchanged full-transfer gate below.
+        if (buf.base && parsed && parsed.format === BACKUP_DELTA_FORMAT) {
+            await handleDeltaPayload(fromDeviceId, buf, parsed, json.length);
+            return;
+        }
         const v = await validateSaveBundle(parsed);
         if (!v.ok || parsed.checksum !== buf.checksum) {
             ArcadeDiag.log('backup', `transfer from ${fromDeviceId} failed bundle validation (${v.ok ? 'checksum-switch' : v.reason}) — dropped`);
@@ -425,11 +633,15 @@ export function initBackupEngine(host) {
             // peer's consent prompt sat open. Their flag is now true — offer
             // again (dedupe-gated, so a hostile accept spray costs at most
             // one bundle build a minute).
-            if (env.op === 'accept') maybeOffer(fromDeviceId).catch(() => {});
+            if (env.op === 'accept' || env.op === 'accept-delta') maybeOffer(fromDeviceId).catch(() => {});
             return;
         }
         if (env.op === 'accept') {
             await deliverChunks(fromDeviceId, transfer);
+            return;
+        }
+        if (env.op === 'accept-delta') {
+            await deliverDelta(fromDeviceId, transfer, env.base);
             return;
         }
         if (env.op === 'decline') {
@@ -448,7 +660,16 @@ export function initBackupEngine(host) {
         dropTransfer(outbound, fromDeviceId, transfer);
         await ensureDb();
         acked.set(fromDeviceId, transfer.checksum);
-        try { await idbPut(db, 'a|' + fromDeviceId, { checksum: transfer.checksum, at: Date.now() }); } catch (e) {}
+        // Persist the delta base info alongside the acked checksum: the
+        // NEXT offer diffs against exactly the bundle the peer just stored.
+        // A transfer that never captured base info (sections missing)
+        // persists checksum-only — full transfers until the next ack.
+        const row = { checksum: transfer.checksum, at: Date.now() };
+        if (transfer.baseInfo && transfer.baseInfo.checksum === transfer.checksum) {
+            Object.assign(row, transfer.baseInfo);
+        }
+        ackedInfo.set(fromDeviceId, row);
+        try { await idbPut(db, 'a|' + fromDeviceId, row); } catch (e) {}
         ArcadeDiag.log('backup', `bundle backed up to ${peerName(fromDeviceId)} (${transfer.chars} chars)`);
     }
 
@@ -462,6 +683,7 @@ export function initBackupEngine(host) {
             }
             if (result.op === 'offer') handleInboundOffer(fromDeviceId, env);
             else if (result.op === 'chunk') await handleInboundChunk(fromDeviceId, env);
+            else if (result.op === 'delta-info') handleDeltaInfo(fromDeviceId, env);
             else await handleInboundAnswer(fromDeviceId, env);
         } catch (e) {
             ArcadeDiag.log('backup', `inbound handling error from ${fromDeviceId}: ${(e && e.message) || e}`);

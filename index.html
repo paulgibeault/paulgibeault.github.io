@@ -1645,6 +1645,9 @@
     window.__arcade.backup = initBackupEngine({
         getBundleJson: () => window.__arcade.save.exportBundleString(),
         importBundleJson: (json, intro) => window.__arcade.save.importBundleJson(json, intro),
+        // Delta-offer guard (durability §6): the sync engine's GC eviction
+        // watermark ceiling — a delta base older than it must not be offered.
+        getWatermarkCeiling: () => (window.__arcade.sync ? window.__arcade.sync.gcWatermarkCeiling() : null),
         showToast: storageHost.showToast,
         confirmBackupOffer: ({ name }) => window.__arcade.dialog({
             message: '"' + name + '" wants to keep a backup of their arcade data on this device.\n\n'

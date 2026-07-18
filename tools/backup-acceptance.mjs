@@ -237,6 +237,93 @@ try {
 
         await s.ctxH.close(); await s.ctxJ.close();
     }
+
+    // 6. DELTA TRANSFERS (durability design §6, PR 8): after a full backup
+    //    is acked, the next changed-state offer names deltaFrom, the
+    //    receiver answers accept-delta, and only a small delta document
+    //    crosses the wire — while the STORED generation is the materialized
+    //    FULL bundle (a delta is a transfer optimization, never a storage
+    //    format). Then the fallback: a receiver whose stored base is
+    //    unreadable answers the delta with a plain 'accept' — the same wire
+    //    outcome as an old receiver that ignores deltaFrom — and the sender
+    //    delivers the full bundle under the same transfer id.
+    {
+        console.log('\n  [delta transfer round trip; unreadable base falls back to full]');
+        const s = await freshPair('E');
+        const bigValue = '"' + 'y'.repeat(200000) + '"';
+        await stateWrite(s.H, 'backfix', 'arcade.v1.backfix.big', bigValue);
+        const devOnH = await setBackupFlag(s.H, true);
+        const devOnJ = await setBackupFlag(s.J, true);
+        await kick(s.H, devOnH);
+        check('baseline full generation stored and acked',
+            await waitFor(async () => (await gens(s.J, devOnJ)).length === 1
+                && (await acked(s.H, devOnH)) === (await gens(s.J, devOnJ))[0].checksum, 20000));
+
+        // Small change → the transfer must go as a delta.
+        await stateWrite(s.H, 'backfix', 'arcade.v1.backfix.small', '"d1"');
+        await kick(s.H, devOnH);
+        check('changed state stored a second generation',
+            await waitFor(async () => (await gens(s.J, devOnJ)).length === 2, 20000));
+        const newest = (await gens(s.J, devOnJ))[0];
+        check('the stored generation is the materialized FULL bundle, not the delta document',
+            newest.chars > 200000, JSON.stringify(newest));
+        check('sender diag shows the transfer went as a delta (small vs full)',
+            await s.H.evaluate(() => window.__arcadeDiag.entries().some((e) =>
+                e.tag === 'backup' && /^delta transfer to /.test(e.msg))));
+        check('receiver diag shows the delta materialized against the stored base',
+            await s.J.evaluate(() => window.__arcadeDiag.entries().some((e) =>
+                e.tag === 'backup' && /^delta from .* materialized/.test(e.msg))));
+        check("sender's acked checksum advanced to the materialized bundle",
+            await waitFor(async () => (await acked(s.H, devOnH)) === newest.checksum));
+
+        // Restore the delta-built generation through the full import
+        // pipeline: both the untouched big key and the delta'd key must land.
+        s.J.on('dialog', (d) => d.accept());
+        const [restored] = await Promise.all([
+            s.J.evaluate((d) => window.__arcade.backup.restoreLatest(d), devOnJ),
+            s.J.waitForEvent('download').catch(() => null)
+        ]);
+        check('restoring the materialized generation commits', restored === true);
+        check('the delta-transferred key landed', (await lsGet(s.J, 'arcade.v1.backfix.small')) === '"d1"');
+        check('the base-carried key landed intact', (await lsGet(s.J, 'arcade.v1.backfix.big')) === bigValue);
+
+        // FORCED FALLBACK: destroy the receiver's stored bundle strings
+        // ('g|' rows) while its in-RAM index still lists them — the next
+        // delta materialization finds base-unreadable and re-requests the
+        // full transfer under the same id (§6 failure ⇒ drop delta,
+        // request full).
+        await s.J.evaluate(() => new Promise((resolve, reject) => {
+            const rq = indexedDB.open('arcade-backup', 1);
+            rq.onsuccess = () => {
+                const db = rq.result;
+                const tx = db.transaction('kv', 'readwrite');
+                const store = tx.objectStore('kv');
+                const getKeys = store.getAllKeys();
+                getKeys.onsuccess = () => {
+                    for (const k of getKeys.result) {
+                        if (typeof k === 'string' && k.startsWith('g|')) store.delete(k);
+                    }
+                };
+                tx.oncomplete = () => { db.close(); resolve(); };
+                tx.onerror = () => reject(tx.error);
+            };
+            rq.onerror = () => reject(rq.error);
+        }));
+        await stateWrite(s.H, 'backfix', 'arcade.v1.backfix.small', '"d2"');
+        await kick(s.H, devOnH);
+        check('the fallback still produced a stored generation (full transfer under the same id)',
+            await waitFor(async () => {
+                const list = await gens(s.J, devOnJ);
+                return list.length === 3 && (await acked(s.H, devOnH)) === list[0].checksum;
+            }, 25000));
+        check('receiver diag shows the delta was dropped and full re-requested',
+            await s.J.evaluate(() => window.__arcadeDiag.entries().some((e) =>
+                e.tag === 'backup' && /unusable \(base-unreadable\) — requesting full transfer/.test(e.msg))));
+        check('the full-fallback generation is full-sized',
+            (await gens(s.J, devOnJ))[0].chars > 200000);
+
+        await s.ctxH.close(); await s.ctxJ.close();
+    }
 } catch (e) {
     console.error('\nFATAL:', e.message);
     check('run completed', false, e.message);

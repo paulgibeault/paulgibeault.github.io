@@ -12,11 +12,22 @@ import {
     BACKUP_CHUNK_CHARS,
     BACKUP_MAX_PARTS,
     BACKUP_MAX_CHARS,
+    BACKUP_DELTA_FORMAT,
+    BACKUP_DELTA_V,
     chunkString,
     genKey,
     planGenerationStore,
-    validateBackupEnvelope
+    validateBackupEnvelope,
+    dataHashesOf,
+    senderBaseInfo,
+    deltaOfferAllowed,
+    buildBackupDelta,
+    validateBackupDelta,
+    applyBackupDelta
 } from '../arcade-backup-core.js';
+import { checksumBundle } from '../arcade-storage-core.js';
+import { sha256Hex, hlcPack } from '../arcade-sync-core.js';
+import { buildJournalSection, buildManifestSection } from '../arcade-save.js';
 
 let pass = 0, fail = 0;
 function ok(cond, label) {
@@ -126,10 +137,167 @@ function retentionTests() {
     ok(plan.store === true && plan.prune.length === 0, 'under the cap: nothing pruned');
 }
 
+function deltaEnvelopeTests() {
+    console.log('\nvalidateBackupEnvelope — delta ops (additive on v1)');
+    ok(validateBackupEnvelope({ ...OFFER, deltaFrom: SUM2 }).ok, 'offer with a well-formed deltaFrom passes');
+    ok(validateBackupEnvelope(OFFER).ok, 'offer without deltaFrom still passes (field is optional)');
+    ok(validateBackupEnvelope({ ...OFFER, deltaFrom: 'garbage' }).reason === 'bad-checksum', 'malformed deltaFrom rejected');
+    ok(validateBackupEnvelope({ ...OFFER, deltaFrom: 42 }).reason === 'bad-checksum', 'non-string deltaFrom rejected');
+    ok(validateBackupEnvelope({ v: 1, op: 'accept-delta', id: 'x1', base: SUM }).ok, 'well-formed accept-delta passes');
+    ok(validateBackupEnvelope({ v: 1, op: 'accept-delta', id: 'x1' }).reason === 'bad-checksum', 'accept-delta without base rejected');
+    ok(validateBackupEnvelope({ v: 1, op: 'delta-info', id: 'x1', chars: 100, parts: 1 }).ok, 'well-formed delta-info passes');
+    ok(validateBackupEnvelope({ v: 1, op: 'delta-info', id: 'x1', chars: 0, parts: 1 }).reason === 'bad-size', 'delta-info chars 0 rejected');
+    ok(validateBackupEnvelope({ v: 1, op: 'delta-info', id: 'x1', chars: 100, parts: BACKUP_MAX_PARTS + 1 }).reason === 'bad-size',
+        'delta-info parts over the cap rejected');
+}
+
+function deltaOfferAllowedTests() {
+    console.log('\ndeltaOfferAllowed (watermark refusal)');
+    const CLK = hlcPack(5000, 0, DEV);
+    const info = { checksum: SUM, clock: CLK, dataHashes: {}, storeHashes: {}, fileHashes: {} };
+    ok(deltaOfferAllowed(info, null) === true, 'no eviction ever ⇒ delta allowed');
+    ok(deltaOfferAllowed(info, hlcPack(4000, 0, DEV)) === true, 'base clock past the watermark ⇒ delta allowed');
+    ok(deltaOfferAllowed(info, CLK) === true, 'base clock exactly AT the watermark ⇒ still allowed (>=)');
+    ok(deltaOfferAllowed(info, hlcPack(6000, 0, DEV)) === false,
+        'base clock BEHIND the watermark ⇒ refused (an evicted tombstone may postdate the base)');
+    ok(deltaOfferAllowed({ ...info, clock: null }, hlcPack(1, 0, DEV)) === false, 'no base clock + a watermark ⇒ refused');
+    ok(deltaOfferAllowed({ ...info, dataHashes: undefined }, null) === false, 'missing diff material ⇒ refused');
+    ok(deltaOfferAllowed(null, null) === false, 'no base info at all ⇒ refused');
+}
+
+// Synthetic full bundle with real journal/manifest sections — the same
+// shapes buildBundle emits, minus the browser storage collection.
+async function makeBundle(data, stores, files, journalRecords) {
+    const bundle = {
+        format: 'pauls-arcade-save', schemaVersion: 2,
+        exportedAt: '2026-07-18T00:00:00.000Z', appVersion: '1.0.0',
+        checksum: await checksumBundle(data, stores, files),
+        data, stores, files
+    };
+    bundle.journal = await buildJournalSection(hlcPack(9000, 0, DEV), journalRecords || {}, new Set(Object.keys(data)));
+    bundle.manifest = await buildManifestSection(stores, files);
+    return bundle;
+}
+
+async function deltaRoundTripTests() {
+    console.log('\nbuildBackupDelta / applyBackupDelta (materialize-and-verify)');
+    const K1 = 'arcade.v1.g.k1', K2 = 'arcade.v1.g.k2', KDEL = 'arcade.v1.g.kdel', KNEW = 'arcade.v1.g.knew';
+    const S1 = 'arcade.v1.g.store.s1', S2 = 'arcade.v1.g.store.s2', S3 = 'arcade.v1.g.store.s3';
+    const F = 'arcade.v1.g';
+    const f1 = { name: 'f1.bin', type: '', size: 1, b64: 'AA==' };
+    const f2 = { name: 'f2.bin', type: '', size: 1, b64: 'AQ==' };
+    const f2v2 = { name: 'f2.bin', type: '', size: 2, b64: 'AQI=' };
+    const f3 = { name: 'f3.bin', type: '', size: 1, b64: 'Ag==' };
+
+    const base = await makeBundle(
+        { [K1]: '"a"', [K2]: '"b"', [KDEL]: '"gone"' },
+        { [S1]: { a: 1 }, [S2]: { b: 2 } },
+        { [F]: [f1, f2] }
+    );
+    const current = await makeBundle(
+        { [K1]: '"a"', [K2]: '"B2"', [KNEW]: '"new"' },
+        { [S1]: { a: 1 }, [S2]: { b: 99 }, [S3]: { c: 3 } },
+        { [F]: [f1, f2v2, f3] }
+    );
+    const baseInfo = { checksum: base.checksum, ...(await senderBaseInfo(base)) };
+    const doc = await buildBackupDelta(baseInfo, current);
+    ok(!!doc && doc.format === BACKUP_DELTA_FORMAT && doc.v === BACKUP_DELTA_V, 'delta document built with format + version');
+    ok(doc.from === base.checksum && doc.to === current.checksum, 'delta names base and target checksums');
+    ok(Object.keys(doc.set).sort().join() === [K2, KNEW].sort().join(), 'set carries exactly the changed + added data keys');
+    ok(doc.del.length === 1 && doc.del[0] === KDEL, 'del carries exactly the removed data key');
+    ok(Object.keys(doc.stores).sort().join() === [S2, S3].sort().join(), 'stores carries exactly the changed + added DBs (whole-DB granularity)');
+    ok(Object.keys(doc.files).sort().join() === [F + '/f2.bin', F + '/f3.bin'].sort().join(),
+        'files carries exactly the changed + added files (whole-file granularity)');
+    ok(validateBackupDelta(doc).ok, 'a built delta passes its structural validator');
+
+    const m = applyBackupDelta(base, doc);
+    ok((await checksumBundle(m.data, m.stores, m.files)) === current.checksum,
+        'MATERIALIZE-AND-VERIFY: base + delta reproduces the target bundle checksum exactly');
+    ok(m.data[KDEL] === undefined && m.data[KNEW] === '"new"', 'materialized data applied deletions and additions');
+
+    // Tampered delta ⇒ the checksum gate catches it (the engine then falls
+    // back to a full transfer — a delta can never smuggle state).
+    const evil = JSON.parse(JSON.stringify(doc));
+    evil.set[K2] = '"evil"';
+    const me = applyBackupDelta(base, evil);
+    ok((await checksumBundle(me.data, me.stores, me.files)) !== current.checksum,
+        'a tampered delta value fails the materialized-checksum gate (checksum-mismatch drop)');
+
+    // Unchanged content, reshuffled file enumeration: fileOrder makes the
+    // materialization reproduce the sender's exact array order.
+    const reordered = await makeBundle(
+        base.data,
+        base.stores,
+        { [F]: [f2, f1] } // same items, reversed enumeration
+    );
+    ok(reordered.checksum !== base.checksum, '(sanity) file array order changes the canonical checksum');
+    const doc2 = await buildBackupDelta(baseInfo, reordered);
+    const m2 = applyBackupDelta(base, doc2);
+    ok((await checksumBundle(m2.data, m2.stores, m2.files)) === reordered.checksum,
+        'fileOrder reproduces a reshuffled enumeration without reshipping file bytes');
+    ok(Object.keys(doc2.files).length === 0, '…and the reshuffle delta carries no file content at all');
+
+    // Prototype-pollution safety in the apply step. The hostile key must be
+    // constructed the way attacker JSON actually arrives — JSON.parse
+    // creates an OWN '__proto__' property (a plain `=` assignment would
+    // silently set the prototype instead and prove nothing).
+    const polluted = JSON.parse(JSON.stringify(doc));
+    polluted.set = JSON.parse('{"__proto__": "\\"owned\\""}');
+    const mp = applyBackupDelta(base, polluted);
+    ok(({}).owned === undefined && Object.prototype['__proto__2'] === undefined,
+        "a '__proto__' key in the delta never pollutes Object.prototype");
+    ok(Object.prototype.hasOwnProperty.call(mp.data, '__proto__'),
+        'the dunder key lands as a plain own property (checksum/allowlist gates then reject it)');
+}
+
+async function dataHashesTests() {
+    console.log('\ndataHashesOf / senderBaseInfo');
+    const K = 'arcade.v1.g.k', K2 = 'arcade.v1.g.meta';
+    const fakeX = 'f'.repeat(64);
+    const bundle = await makeBundle({ [K]: '"v"', [K2]: '"m"' }, {}, {}, {
+        [K]: { h: hlcPack(1, 0, DEV), x: fakeX, del: 0, t: 1 }
+    });
+    const hashes = await dataHashesOf(bundle);
+    ok(hashes[K] === fakeX, "a journal record's x is reused verbatim (no re-hash)");
+    ok(hashes[K2] === await sha256Hex('"m"'), 'a key OUTSIDE journal coverage is hashed directly (meta/global/import keys)');
+    const info = await senderBaseInfo(bundle);
+    ok(!!info && info.clock === bundle.journal.clock && !!info.dataHashes && !!info.storeHashes && !!info.fileHashes,
+        'senderBaseInfo carries clock + all three hash maps');
+    ok((await senderBaseInfo({ ...bundle, journal: undefined })) === null,
+        'a bundle without a journal section yields no base info (full transfers only)');
+}
+
+function deltaValidatorTests() {
+    console.log('\nvalidateBackupDelta (structural gate)');
+    const good = {
+        format: BACKUP_DELTA_FORMAT, v: BACKUP_DELTA_V, from: SUM, to: SUM2,
+        exportedAt: '2026', set: {}, del: [], stores: {}, delStores: [], files: {}, delFiles: {}, fileOrder: {}
+    };
+    good.delFiles = [];
+    ok(validateBackupDelta(good).ok, 'minimal well-formed delta passes');
+    ok(!validateBackupDelta({ ...good, format: 'pauls-arcade-save' }).ok, 'a full bundle is not a delta (format gate)');
+    ok(!validateBackupDelta({ ...good, v: 2 }).ok, 'unknown delta version rejected');
+    ok(!validateBackupDelta({ ...good, from: 'garbage' }).ok, 'malformed from checksum rejected');
+    ok(!validateBackupDelta({ ...good, set: { 'k': 42 } }).ok, 'non-string set value rejected');
+    ok(!validateBackupDelta({ ...good, set: { ['k'.repeat(600)]: '"v"' } }).ok, 'oversize set key rejected');
+    ok(!validateBackupDelta({ ...good, del: 'nope' }).ok, 'non-array del rejected');
+    ok(!validateBackupDelta({ ...good, stores: { s: [] } }).ok, 'array store body rejected');
+    ok(!validateBackupDelta({ ...good, files: { 'noslash': { name: 'x', b64: '' } } }).ok, 'file path without dir/name shape rejected');
+    ok(!validateBackupDelta({ ...good, files: { 'd/x': { name: 'x' } } }).ok, 'file item without b64 rejected');
+    ok(!validateBackupDelta({ ...good, fileOrder: { d: 'nope' } }).ok, 'non-array fileOrder entry rejected');
+    ok(validateBackupDelta({ ...good, fileOrder: undefined }).ok, 'fileOrder is optional');
+}
+
 validatorTests();
 chunkTests();
 genKeyTests();
 retentionTests();
+deltaEnvelopeTests();
+deltaOfferAllowedTests();
+
+await deltaRoundTripTests();
+await dataHashesTests();
+deltaValidatorTests();
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
