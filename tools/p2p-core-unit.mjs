@@ -14,7 +14,7 @@
  * connection methods, and its visibilitychange listener is `typeof document`
  * guarded. No browser, no network. Run: `npm run p2p-core-unit`.
  */
-import { PeerManager } from '../p2p/p2p-core.js';
+import { PeerManager, ConnectionUtils } from '../p2p/p2p-core.js';
 import { RendezvousManager } from '../p2p/rendezvous.js';
 
 let pass = 0, fail = 0;
@@ -205,6 +205,47 @@ function readModelTests() {
     rdv.destroy();
 }
 
+function minifySdpTests() {
+    console.log('\nminifySDP — candidate cap (QR density, field report 2026-07-17)');
+    const cand = (foundation, protocol, address, port, type) =>
+        `a=candidate:${foundation} 1 ${protocol} 2113937151 ${address} ${port} typ ${type} generation 0`;
+    const sdp = [
+        'v=0', 'm=application 9 UDP/DTLS/SCTP webrtc-datachannel',
+        cand(1, 'udp', '11111111-2222-3333-4444-555555555555.local', 50001, 'host'), // mDNS #1
+        cand(2, 'udp', '66666666-7777-8888-9999-aaaaaaaaaaaa.local', 50002, 'host'), // mDNS #2 (redundant)
+        cand(3, 'udp', '192.168.1.10', 50003, 'host'),                               // host v4
+        cand(4, 'udp', '2001:db8::1', 50004, 'host'),                                // host v6 #1
+        cand(5, 'udp', '2001:db8::2', 50005, 'host'),                                // host v6 #2 (privacy addr, redundant)
+        cand(6, 'udp', '2001:db8::3', 50006, 'host'),                                // host v6 #3 (redundant)
+        cand(7, 'udp', '203.0.113.7', 50007, 'srflx'),                               // srflx v4
+        cand(8, 'udp', '203.0.113.8', 50008, 'srflx'),                               // srflx v4 #2 (redundant)
+        cand(9, 'tcp', '192.168.1.10', 9, 'host'),                                   // tcp (always dropped)
+        cand(10, 'udp', '198.51.100.9', 50009, 'relay'),                             // relay v4 (kept — TURN path)
+        'a=ice-ufrag:abcd', 'a=ice-pwd:0123456789012345678901', ''
+    ].join('\r\n');
+
+    const kept = ConnectionUtils.minifySDP(sdp).split('\r\n').filter(l => l.startsWith('a=candidate:'));
+    ok(kept.length === 5, `one candidate per (type × family) survives (${kept.length}/10: mdns, host v4, host v6, srflx v4, relay v4)`);
+    ok(kept.some(l => l.includes('11111111-2222')) && !kept.some(l => l.includes('66666666-7777')),
+        'first mDNS kept, second dropped');
+    ok(kept.some(l => l.includes('2001:db8::1')) && !kept.some(l => l.includes('2001:db8::2')),
+        'first host IPv6 kept, privacy-address duplicates dropped');
+    ok(kept.some(l => l.includes('203.0.113.7')) && !kept.some(l => l.includes('203.0.113.8')),
+        'first srflx kept, second dropped');
+    ok(kept.some(l => l.includes('198.51.100.9')), 'relay candidate (TURN path) survives the cap');
+    ok(!kept.some(l => l.includes(' tcp ')), 'tcp candidates still dropped');
+
+    const noV6 = ConnectionUtils.minifySDP(sdp, { allowIPv6Candidates: false })
+        .split('\r\n').filter(l => l.startsWith('a=candidate:'));
+    ok(!noV6.some(l => l.includes('2001:db8')), 'allowIPv6Candidates:false still strips every IPv6');
+    const noLocal = ConnectionUtils.minifySDP(sdp, { allowLocalCandidates: false })
+        .split('\r\n').filter(l => l.startsWith('a=candidate:'));
+    ok(!noLocal.some(l => l.includes('.local')), 'allowLocalCandidates:false still strips every mDNS');
+    const nonCandLines = sdp.split('\r\n').filter(l => !l.startsWith('a=candidate:'));
+    const outLines = ConnectionUtils.minifySDP(sdp).split('\r\n');
+    ok(nonCandLines.every(l => outLines.includes(l)), 'non-candidate SDP lines pass through untouched');
+}
+
 (async () => {
     console.log('p2p-core unit tests — transport hardening (issue #21 residuals)');
     idTests();
@@ -212,6 +253,7 @@ function readModelTests() {
     resumeTests();
     frameSizeTests();
     readModelTests();
+    minifySdpTests();
     console.log('');
     if (fail) { console.log(fail + ' check(s) FAILED.'); process.exit(1); }
     console.log('All ' + pass + ' p2p-core unit checks passed.');

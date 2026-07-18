@@ -94,7 +94,8 @@ export class P2PAddon extends EventTarget {
         if (typeof data !== 'string') {
             data = JSON.stringify(data);
         }
-        this.peerNode.send(data);
+        // True when sent/queued on at least one link (see PeerManager.send).
+        return this.peerNode.send(data);
     }
 
     /**
