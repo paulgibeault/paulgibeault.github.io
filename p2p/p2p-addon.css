@@ -230,14 +230,8 @@
     font-size: 13px;
 }
 
-#p2p-qr-canvas { 
-    background: #ffffff; 
-    padding: 16px; 
-    border-radius: 12px; 
-    margin: 16px auto; 
-    width: max-content;
-    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4);
-}
+/* #p2p-qr-canvas carries .p2p-qr-frame — one rule owns the white frame
+   (below), so the quiet zone can't drift between two copies. */
 
 .p2p-diagnostics-box {
     height: 140px;
@@ -345,11 +339,21 @@ details[open] summary {
 .p2p-qr-frame {
     display: flex;
     justify-content: center;
-    padding: 14px;
+    /* The white border IS the QR quiet zone — the spec wants ≥4 modules;
+       24px keeps that true even for the large low-EC codes we render. */
+    padding: 24px;
     background: #fff;
     border-radius: 12px;
     width: fit-content;
-    margin: 0 auto;
+    margin: 16px auto;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4);
+}
+.p2p-btn-caption {
+    display: block;
+    font-size: 12px;
+    font-weight: normal;
+    opacity: 0.75;
+    margin-top: 4px;
 }
 .p2p-secondary-actions {
     margin-top: 14px;

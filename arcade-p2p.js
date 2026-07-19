@@ -1822,28 +1822,50 @@ export const ArcadeP2P = {
 
     /**
      * Live parties a game could attach to (v1.13):
-     * [{id, role, leaderName, status, peers}]. role is THIS device's role;
-     * leaderName names the party for humans ("Dana's party" — the leader's
-     * device name, ours when we lead). peers counts identity-bound seats.
+     * [{id, role, leaderName, status, peers, members}]. role is THIS
+     * device's role; leaderName names the party for humans ("Dana's party"
+     * — the leader's device name, ours when we lead). peers counts
+     * identity-bound seats. members is the launcher's render-ready
+     * hierarchy, LEADER FIRST — [{deviceId, name, status, isLeader,
+     * isSelf}] — because the vertical order IS how the UI teaches "the
+     * party happens through the leader's device". status is 'connected' |
+     * 'interrupted' for seats whose health this device can actually see
+     * (its own direct links, and itself), null for fellow members known
+     * only through the hub — their health is the hub's knowledge, not
+     * ours, and the UI shows no dot rather than a guessed one.
      */
     partiesSnapshot() {
         if (!addon) return [];
         const known = readKnownPeers();
         const roster = rosterSnapshot();
+        const self = { deviceId: getMyDeviceId(), name: getMyDeviceName(), status: 'connected', isSelf: true };
         return livePartyIds().map((partyId) => {
             const role = addon.peerNode.partyRole(partyId);
-            let leaderName;
+            const partyRoster = roster.filter((e) => e.partyId === partyId);
+            const seat = (e) => ({ deviceId: e.deviceId, name: e.name, status: e.status, isLeader: false, isSelf: false });
+            let leaderName, members;
             if (role === 'leader') {
-                leaderName = getMyDeviceName();
+                leaderName = self.name;
+                members = [{ ...self, isLeader: true }, ...partyRoster.map(seat)];
             } else {
                 const hub = addon.peerNode.hubLinkId(partyId);
-                const dev = hub ? deviceIdForPeerId(hub) : null;
-                leaderName = (dev && known[dev] && known[dev].name) || 'Unnamed device';
+                const hubDev = hub ? deviceIdForPeerId(hub) : null;
+                leaderName = (hubDev && known[hubDev] && known[hubDev].name) || 'Unnamed device';
+                const hubEntry = partyRoster.find((e) => e.deviceId === hubDev);
+                members = [
+                    { deviceId: hubDev, name: leaderName, status: hubEntry ? hubEntry.status : null, isLeader: true, isSelf: false },
+                    { ...self, isLeader: false }
+                ];
+                const im = indirectByParty.get(partyId);
+                if (im) for (const dev of im.keys()) {
+                    members.push({ deviceId: dev, name: (known[dev] && known[dev].name) || 'Unnamed device', status: null, isLeader: false, isSelf: false });
+                }
             }
             return {
                 id: partyId, role, leaderName,
                 status: partyStatusOf(partyId),
-                peers: roster.filter((e) => e.partyId === partyId).length
+                peers: partyRoster.length,
+                members
             };
         });
     },
@@ -1893,6 +1915,46 @@ export const ArcadeP2P = {
             const i = scopeListeners.indexOf(fn);
             if (i >= 0) scopeListeners.splice(i, 1);
         };
+    },
+
+    /**
+     * Leave one party on purpose (v1.13) — the party card's [Leave party] /
+     * [End party] write path. Works from either role: a member walks away
+     * from its hub link, a leader ends the party for everyone it links.
+     * Same deliberate-goodbye discipline as hangUpKnownPeer, applied per
+     * link: pause OUR pair first (so our rendezvous doesn't repair the very
+     * link we're closing), then bye (so the peer drops to quiet standby —
+     * callable — instead of burning a repair episode), then drop. The
+     * persisted party-membership records are cleared BEFORE any teardown so
+     * no restart can re-group by a party its user chose to leave. Pairings
+     * (secrets, names, sync/backup flags) all survive — a party is not a
+     * relationship.
+     */
+    async leaveParty(partyId) {
+        ArcadeDiag.log('bridge', `user action: leave party ${partyId}`);
+        await ensureAddon();
+        if (!addon.peerNode.partyRole(partyId)) return false;
+        const links = addon.peerNode.partyPeers(partyId);
+        const known = readKnownPeers();
+        let wrote = false;
+        const liveDevices = [];
+        for (const { peerId, live } of links) {
+            const dev = deviceIdForPeerId(peerId);
+            if (dev && known[dev] && known[dev].party) { delete known[dev].party; wrote = true; }
+            if (live && dev) liveDevices.push({ peerId, dev });
+        }
+        if (wrote) writeKnownPeers(known);
+        for (const { peerId, dev } of liveDevices) {
+            setKnownPeerPaused(dev, true);
+            await rdv.pausePair(dev).catch(() => {});
+            if (!rdv.sendBye(peerId)) {
+                ArcadeDiag.log('bridge', `leave party: bye to ${dev} could NOT be sent (channel not open) — that peer will see a plain link death`);
+            }
+        }
+        // Give the bye frames a beat to flush before the pcs close under them.
+        if (liveDevices.length) await new Promise((r) => setTimeout(r, 250));
+        addon.peerNode.closeParty(partyId);
+        return true;
     },
 
     /**

@@ -25,6 +25,11 @@
 //   M7  restart resume re-groups links into their pre-restart parties via
 //       the persisted knownPeers party keys (two LED parties must NOT
 //       coalesce into one — the adoptPartyId hook's whole job)
+//   M8  partiesSnapshot().members — the launcher party card's leader-first
+//       hierarchy, with gossip-known fellow members carrying NO health claim
+//   M9  leaveParty (P3 launcher UX): deliberate goodbye from either role —
+//       roster departure without a repair episode, persisted party record
+//       cleared, the leaver's other parties untouched
 //
 //   node tools/p2p-multiparty-acceptance.mjs
 //
@@ -303,6 +308,83 @@ try {
                 grouping[0].role === 'leader' && grouping[1].role === 'leader'
                 && grouping[0].partyId !== grouping[1].partyId,
                 JSON.stringify(grouping));
+
+            // ── M8: partiesSnapshot members — the launcher party card's data ──
+            // H invites B into A's party: A and B become fellow members who
+            // know each other only THROUGH H (relayed identity gossip).
+            const pA_H = grouping[0].partyId; // A's party, H's local id
+            const pC_H = grouping[1].partyId; // C's party, H's local id
+            await partyCeremony(H, B, { offerOpts: { partyId: pA_H }, answerOpts: { newParty: true } });
+            await H.waitForFunction((d) => d in window.__arcade.p2p._identityLinks(), B_dev, { timeout: 20000 });
+
+            const cardH = await H.evaluate((pid) =>
+                window.__arcade.p2p.partiesSnapshot().find(p => p.id === pid), pA_H);
+            check('M8: leader card lists itself first (leader), then both members with live health',
+                !!cardH && cardH.members.length === 3
+                && cardH.members[0].isLeader && cardH.members[0].isSelf
+                && cardH.members.slice(1).every(m => !m.isLeader && !m.isSelf && m.status === 'connected'),
+                JSON.stringify(cardH && cardH.members));
+
+            // A's card: leader H first (health visible — A's own link), then
+            // itself, then fellow member B with NO claimed health (null — a
+            // leaf can't see the hub's other links; the UI draws no dot).
+            const cardA = await A.waitForFunction(() => {
+                const p = window.__arcade.p2p.partiesSnapshot()[0];
+                return (p && p.members.length === 3) ? JSON.stringify(p) : undefined;
+            }, null, { timeout: 20000 }).then(h => h.jsonValue()).then(JSON.parse)
+                .catch(async (e) => {
+                    const dump = await A.evaluate(() => JSON.stringify({
+                        parties: window.__arcade.p2p.partiesSnapshot(),
+                        indirect: window.__arcade.p2p._indirectPeersByParty()
+                    }));
+                    throw new Error(e.message + ' — A state: ' + dump);
+                });
+            check('M8: member card = leader first, self second, gossip-known fellow member without health',
+                cardA.members[0].isLeader && !cardA.members[0].isSelf && cardA.members[0].status === 'connected'
+                && cardA.members[1].isSelf && !cardA.members[1].isLeader
+                && cardA.members[2].deviceId === B_dev && cardA.members[2].status === null,
+                JSON.stringify(cardA.members));
+
+            // ── M9: leaveParty — deliberate goodbye, both roles ───────────
+            // Member side: A walks away from its hub link. The peer must see
+            // a departure (roster drop) but burn NO repair episode — the bye
+            // drops it to quiet standby, still callable.
+            const reconnCountH = await H.evaluate(() => window.__rdvEv.filter(e => e === 'reconnecting').length);
+            check('M9: member leaveParty resolves true',
+                await A.evaluate((pid) => window.__arcade.p2p.leaveParty(pid), cardA.id));
+            await H.waitForFunction((d) =>
+                !window.__arcade.p2p.connectedPeers().some(e => e.deviceId === d), A_dev, { timeout: 15000 });
+            check('M9: H roster drops A promptly (departure, not interruption)', true);
+            check('M9: A shows no party afterwards',
+                (await A.evaluate(() => window.__arcade.p2p.partiesSnapshot())).length === 0);
+            check('M9: A cleared the persisted party record and paused the pairing',
+                await A.evaluate((d) => {
+                    const rec = JSON.parse(localStorage.getItem('arcade.v1._meta.knownPeers') || '{}')[d];
+                    return !!rec && !rec.party && rec.paused === true;
+                }, H_dev));
+            await new Promise(r => setTimeout(r, 1200));
+            check('M9: the bye spared H a repair episode',
+                (await H.evaluate(() => window.__rdvEv.filter(e => e === 'reconnecting').length)) === reconnCountH);
+            check('M9: the party survives on the leader with its other member (B)',
+                await H.evaluate((pid) => {
+                    const p = window.__arcade.p2p.partiesSnapshot().find(x => x.id === pid);
+                    return !!p && p.peers === 1 && p.members.length === 2;
+                }, pA_H));
+
+            // Leader side: H ends C's party — every member sees it end.
+            const reconnCountC = await C.evaluate(() => window.__rdvEv.filter(e => e === 'reconnecting').length);
+            check('M9: leader leaveParty resolves true',
+                await H.evaluate((pid) => window.__arcade.p2p.leaveParty(pid), pC_H));
+            await C.waitForFunction(`window.__arcade.p2p.partiesSnapshot().length === 0`, null, { timeout: 15000 });
+            check('M9: leader leaveParty ends the party — C sees it gone', true);
+            check("M9: H's OTHER party (B) is untouched",
+                await H.evaluate((pid) => {
+                    const ps = window.__arcade.p2p.partiesSnapshot();
+                    return ps.length === 1 && ps[0].id === pid;
+                }, pA_H));
+            await new Promise(r => setTimeout(r, 1200));
+            check('M9: C burned no repair episode on the deliberate goodbye',
+                (await C.evaluate(() => window.__rdvEv.filter(e => e === 'reconnecting').length)) === reconnCountC);
         }
     }
 
