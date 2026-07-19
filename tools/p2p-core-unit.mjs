@@ -246,6 +246,260 @@ function minifySdpTests() {
     ok(nonCandLines.every(l => outLines.includes(l)), 'non-candidate SDP lines pass through untouched');
 }
 
+// ==========================================
+// PARTIES (v1.13) — per-party role and relay scoping. The critical property
+// is relay ISOLATION: a frame must never cross parties, and a node that
+// leads party A while a member of party B must never re-relay B's traffic.
+// ==========================================
+
+// Minimal RTCPeerConnection/RTCSessionDescription fakes so the ceremony
+// entry points (createOffer/createAnswer success paths) run headless.
+const FAKE_SDP = 'v=0\r\na=candidate:1 1 udp 2113937151 192.168.1.10 50001 typ host generation 0\r\na=fingerprint:sha-256 AA:BB:CC\r\na=ice-ufrag:abcd\r\n';
+class FakeRTCPeerConnection {
+    constructor() {
+        this.localDescription = null;
+        this.remoteDescription = null;
+        this.iceGatheringState = 'complete';
+        this.signalingState = 'stable';
+        this.iceConnectionState = 'new';
+        this.onicecandidate = null;
+    }
+    createDataChannel() { return { readyState: 'connecting', close() {}, send() {} }; }
+    async createOffer() { return { type: 'offer', sdp: FAKE_SDP }; }
+    async createAnswer() { return { type: 'answer', sdp: FAKE_SDP }; }
+    async setLocalDescription(d) { this.localDescription = d; }
+    async setRemoteDescription(d) { this.remoteDescription = d; }
+    close() {}
+}
+const installFakeRtc = () => {
+    globalThis.RTCPeerConnection = FakeRTCPeerConnection;
+    globalThis.RTCSessionDescription = class { constructor(d) { Object.assign(this, d); } };
+};
+
+async function rejectsWith(promise, re) {
+    try { await promise; return false; } catch (e) { return re.test(e.message); }
+}
+
+// A connected link in a party, with a capturing channel so relay output is
+// observable. resyncFlushed lets _sendAppTo transmit immediately.
+const partyLink = (partyId, type, sentLog, id) => fakePeer('connected', {
+    partyId, type, outSeq: 0, lastInSeq: 0, resyncFlushed: true, lastAliveAt: 0,
+    everConnected: true,
+    dataChannel: { readyState: 'open', send(w) { if (sentLog) sentLog.push([id, w]); } },
+});
+const appFrames = (log) => log.map(([id, w]) => [id, JSON.parse(w)]).filter(([, f]) => !f.__p2pc);
+
+function relayIsolationTests() {
+    console.log('\nparties — relay isolation (a frame must never cross parties)');
+    const pm = new PeerManager();
+    const sent = [];
+    pm.parties.set('A', { role: 'leader' });
+    pm.parties.set('B', { role: 'member' });
+    pm.peers.set('a1', partyLink('A', 'client', sent, 'a1'));
+    pm.peers.set('a2', partyLink('A', 'client', sent, 'a2'));
+    pm.peers.set('b1', partyLink('B', 'host', sent, 'b1'));
+    pm.sessionStash.set('sA', { partyId: 'A', type: 'client', outSeq: 0, outbox: [] });
+    pm.sessionStash.set('sB', { partyId: 'B', type: 'client', outSeq: 0, outbox: [] });
+
+    const delivered = [];
+    pm.addEventListener('message', (e) => delivered.push(e.detail));
+
+    // Frame arrives on a led party's link → fan out inside that party only.
+    pm._onChannelMessage('a1', JSON.stringify({ text: 'x', from: 'spoofable', seq: 1 }));
+    let apps = appFrames(sent);
+    ok(apps.length === 1 && apps[0][0] === 'a2', 'leader relays an A-link frame to the other A spoke only');
+    ok(apps[0][1].relayed === true && apps[0][1].from === 'a1', 'relay stamps relayed:true and the arrival link id as from');
+    ok(pm.sessionStash.get('sA').outbox.length === 1, 'same-party stash receives the relay (repair window replay)');
+    ok(pm.sessionStash.get('sB').outbox.length === 0, 'other-party stash receives NOTHING');
+
+    // Frame arrives on the member party's hub link → no relay at all (we are
+    // a spoke there, whatever we lead elsewhere).
+    sent.length = 0;
+    pm._onChannelMessage('b1', JSON.stringify({ text: 'y', from: 'hub', seq: 1, relayed: true }));
+    apps = appFrames(sent);
+    ok(apps.length === 0, 'a frame arriving on a member link is never re-relayed (leader-elsewhere must not leak it)');
+    ok(pm.sessionStash.get('sA').outbox.length === 1 && pm.sessionStash.get('sB').outbox.length === 0,
+        'no stash gains frames from a member-link arrival');
+    ok(delivered[1].relayed === true, 'relayed stamp from OUR hub survives on a member link (host-relay attribution)');
+
+    // Forged relayed:true on a link we lead is stripped before local dispatch.
+    pm._onChannelMessage('a2', JSON.stringify({ text: 'z', from: 'a2', seq: 1, relayed: true }));
+    ok(delivered[2].relayed === false, 'inbound relayed:true on a led link is forged → stripped');
+
+    // Targeted frames still skip the fan-out entirely.
+    sent.length = 0;
+    pm._onChannelMessage('a1', JSON.stringify({ text: 'private', from: 'a1', seq: 2, noRelay: true }));
+    ok(appFrames(sent).length === 0, 'noRelay frames are never fanned out by the party leader');
+
+    // broadcast with a party filter touches only that party.
+    sent.length = 0;
+    pm.broadcast({ text: 'p', from: 'me' }, null, { partyId: 'A' });
+    apps = appFrames(sent);
+    ok(apps.length === 2 && apps.every(([id]) => id === 'a1' || id === 'a2'),
+        'broadcast({partyId}) reaches only that party\'s links');
+    ok(pm.sessionStash.get('sB').outbox.length === 0, 'broadcast({partyId}) skips other parties\' stashes');
+    sent.length = 0;
+    pm.broadcast({ text: 'q', from: 'me' });
+    ok(appFrames(sent).length === 3, 'party-less broadcast still reaches every link (device-level traffic)');
+}
+
+async function partyCeremonyTests() {
+    console.log('\nparties — ceremony guards (per-party invariants replace the role-flip guard)');
+    installFakeRtc();
+
+    // THE 2026-07-18 field-test regression: a member of one party CAN start
+    // and lead a new, independent party (was: "Cannot host while joined").
+    const pm = new PeerManager({ connectionTimeoutMs: 60 });
+    await pm.createAnswer({ peerId: 'hub1', sessionDesc: { type: 'offer', sdp: FAKE_SDP } });
+    ok(pm.partyRole(pm.partyOf('hub1')) === 'member' && pm.defaultPartyId === pm.partyOf('hub1'),
+        'legacy join forms a member party and makes it the default');
+    ok(await rejectsWith(pm.createOffer(), /Cannot host while joined/),
+        'legacy party-less createOffer still refuses while joined (v1.12 behavior preserved)');
+    const newParty = pm.createParty();
+    const offerPayload = JSON.parse(await pm.createOffer({ partyId: newParty }));
+    ok(pm.partyOf(offerPayload.peerId) === newParty && pm.partyRole(newParty) === 'leader',
+        'a joined node CAN lead a NEW party (the field-test fix) — invite link lands in it');
+    ok(pm.partyOf('hub1') !== newParty, 'the member link stays in its own party');
+
+    // Only a party's leader mints invites for it.
+    ok(await rejectsWith(pm.createOffer({ partyId: pm.partyOf('hub1') }), /Only the party leader/),
+        'createOffer into a party this node is a member of is refused');
+
+    // Legacy join guard: a leader with established links refuses a party-less
+    // join (its members would be orphaned) — but an explicit newParty join is
+    // fine, because it conflicts with nothing.
+    const host = new PeerManager({ connectionTimeoutMs: 60 });
+    const hostOffer = JSON.parse(await host.createOffer());
+    ok(host.isHost === true && host.partyRole(host.defaultPartyId) === 'leader',
+        'legacy createOffer forms a leader default party (isHost mirror set)');
+    ok(await rejectsWith(host.createAnswer({ peerId: 'h2', sessionDesc: { type: 'offer', sdp: FAKE_SDP } }),
+        /Cannot join while hosting/),
+        'legacy party-less join still refuses while leading with links (v1.12 behavior preserved)');
+    await host.createAnswer({ peerId: 'h3', sessionDesc: { type: 'offer', sdp: FAKE_SDP } }, { newParty: true });
+    ok(host.partyRole(host.partyOf('h3')) === 'member', 'explicit {newParty:true} join succeeds while leading');
+    ok(host.defaultPartyId !== host.partyOf('h3') && host.isHost === true,
+        'a newParty join leaves the default party and legacy mirror untouched');
+    ok(host.partyOf(hostOffer.peerId) === host.defaultPartyId, 'the led party still holds its invite link');
+
+    // Legacy "invite another player": repeat party-less offers share one party.
+    const host2 = new PeerManager({ connectionTimeoutMs: 60 });
+    const o1 = JSON.parse(await host2.createOffer());
+    const o2 = JSON.parse(await host2.createOffer());
+    ok(host2.partyOf(o1.peerId) === host2.partyOf(o2.peerId),
+        'legacy repeat createOffer lands every invite in the same (default) party');
+}
+
+function partyLifecycleTests() {
+    console.log('\nparties — lifecycle, GC, and read model');
+
+    // GC: a party dies with its last reference; the default pointer clears.
+    const pm = new PeerManager();
+    pm.parties.set('A', { role: 'leader' });
+    pm.defaultPartyId = 'A';
+    pm.peers.set('a1', partyLink('A', 'client', null, 'a1'));
+    pm.peers.get('a1').everConnected = false; // no stash on teardown
+    pm._teardownPeer('a1', 'disconnected');
+    ok(!pm.parties.has('A') && pm.defaultPartyId === null,
+        'tearing down a party\'s last link collects the party and clears the default pointer');
+
+    // A stashed session keeps the party alive; forgetSession collects it.
+    pm.parties.set('B', { role: 'member' });
+    pm.peers.set('b1', partyLink('B', 'host', null, 'b1'));
+    pm._teardownPeer('b1', 'disconnected'); // everConnected → stashed
+    ok(pm.parties.has('B') && pm.hasStashedSession('b1'), 'a stashed (repairing) session keeps its party alive');
+    ok(pm.partyOf('b1') === 'B' && pm.hubLinkId('B') === 'b1', 'partyOf/hubLinkId resolve through the stash during repair');
+    pm.forgetSession('b1');
+    ok(!pm.parties.has('B'), 'forgetting the stashed session collects the party');
+
+    // closeParty: live links dropped, stashes swept, other parties untouched.
+    const pm2 = new PeerManager();
+    pm2.parties.set('A', { role: 'leader' });
+    pm2.parties.set('B', { role: 'member' });
+    pm2.peers.set('a1', partyLink('A', 'client', null, 'a1'));
+    pm2.peers.set('b1', partyLink('B', 'host', null, 'b1'));
+    pm2.sessionStash.set('a2', { partyId: 'A', type: 'client', outSeq: 0, outbox: [] });
+    const terminal = [];
+    pm2.addEventListener('status', (e) => { if (e.detail.status === 'disconnected') terminal.push(e.detail.peerId); });
+    pm2.closeParty('A');
+    ok(!pm2.parties.has('A') && !pm2.hasLink('a1') && !pm2.hasStashedSession('a1') && !pm2.hasStashedSession('a2'),
+        'closeParty drops the party\'s live links and stashes — nothing lingers to repair into it');
+    ok(terminal.includes('a1'), 'closeParty routes drops through disconnectPeer (terminal status events fire)');
+    ok(pm2.parties.has('B') && pm2.hasLink('b1'), 'closeParty leaves other parties untouched');
+
+    // statusSummary per-party breakdown.
+    const pm3 = new PeerManager();
+    pm3.parties.set('A', { role: 'leader' });
+    pm3.parties.set('B', { role: 'member' });
+    pm3.defaultPartyId = 'B';
+    pm3.peers.set('a1', partyLink('A', 'client', null, 'a1'));
+    pm3.peers.set('a2', Object.assign(partyLink('A', 'client', null, 'a2'), { status: 'interrupted' }));
+    pm3.peers.set('b1', partyLink('B', 'host', null, 'b1'));
+    pm3.sessionStash.set('a3', { partyId: 'A', type: 'client', outSeq: 0, outbox: [] });
+    const sum = pm3.statusSummary();
+    const pa = sum.parties.find((p) => p.partyId === 'A');
+    const pb = sum.parties.find((p) => p.partyId === 'B');
+    ok(pa && pa.role === 'leader' && pa.connected === 1 && pa.interrupted === 1 && pa.stashed === 1 && !pa.isDefault,
+        'statusSummary breaks a led party down per status incl. its stash');
+    ok(pb && pb.role === 'member' && pb.connected === 1 && pb.isDefault === true,
+        'statusSummary marks the default party and counts the member link');
+    ok(sum.connected === 2 && sum.established === true, 'aggregate fields still cover every party (legacy consumers)');
+    const peersOfA = pm3.partyPeers('A');
+    ok(peersOfA.length === 3 && peersOfA.filter((p) => p.live).length === 2
+        && peersOfA.find((p) => p.peerId === 'a3').status === 'stashed',
+        'partyPeers lists live links and stashed sessions of exactly one party');
+    ok(pm3.hubLinkId('A') === null, 'hubLinkId is null for a party this node leads');
+
+    // abandonPending(partyId) drops only that party's unfinished ceremonies.
+    const pm4 = new PeerManager();
+    pm4.parties.set('A', { role: 'leader' });
+    pm4.parties.set('B', { role: 'leader' });
+    pm4.peers.set('a1', Object.assign(partyLink('A', 'client', null, 'a1'), { status: 'new' }));
+    pm4.peers.set('b1', Object.assign(partyLink('B', 'client', null, 'b1'), { status: 'new' }));
+    pm4.abandonPending('A');
+    ok(!pm4.hasLink('a1') && pm4.hasLink('b1'), 'abandonPending(partyId) is scoped to that party');
+}
+
+function partyAdoptionTests() {
+    console.log('\nparties — rendezvous adoption continuity');
+
+    const fakeConn = () => ({ close() {}, onicecandidate: null, remoteDescription: null });
+
+    // A repaired link rejoins the party its stashed session belonged to.
+    const pm = new PeerManager();
+    pm.parties.set('A', { role: 'leader' });
+    pm.sessionStash.set('S', { partyId: 'A', type: 'client', outSeq: 7, lastInSeq: 3, outbox: [], outboxOverflowed: false, stashedAt: Date.now(), peerFingerprint: null });
+    pm.adoptConnection('S', fakeConn());
+    ok(pm.partyOf('S') === 'A' && pm.peers.get('S').outSeq === 7,
+        'adoption restores the stashed session INTO its original party');
+
+    // No prior session (browser restart): leader-side fallbacks coalesce into
+    // ONE adopted leader party — this is what restores hub relay after a hub
+    // restart (pre-v1.13 the resumed hub never relayed again: isHost stayed
+    // false and nothing re-derived it).
+    const hub = new PeerManager();
+    hub.adoptConnection('X', fakeConn(), { readyState: 'open', send() {} });
+    hub.adoptConnection('Y', fakeConn(), { readyState: 'open', send() {} });
+    const px = hub.partyOf('X'), py = hub.partyOf('Y');
+    ok(px === py && hub.partyRole(px) === 'leader', 'restart-adopted client links coalesce into one leader party');
+    ok(hub.defaultPartyId === px && hub.isHost === true, 'the adopted leader party becomes the default (mirror restored)');
+    hub.peers.get('X').resyncFlushed = true;
+    hub.peers.get('Y').resyncFlushed = true;
+    hub._onChannelMessage('X', JSON.stringify({ text: 'post-restart', from: 'X', seq: 1 }));
+    ok(hub.peers.get('Y').outbox.length === 1, 'a restart-resumed hub RELAYS between its adopted spokes again (v1.12 regression fixed)');
+
+    // A host-typed fallback forms its own member party instead.
+    const spoke = new PeerManager();
+    spoke.adoptConnection('H', fakeConn(), null, { fallbackType: 'host' });
+    ok(spoke.partyRole(spoke.partyOf('H')) === 'member' && spoke.hubLinkId(spoke.partyOf('H')) === 'H',
+        'a restart-adopted hub link forms a member party (hubLinkId resolves it)');
+
+    // An explicit opts.partyId (persisted membership, Phase 2) wins over the fallback.
+    const pm5 = new PeerManager();
+    pm5.parties.set('P', { role: 'leader' });
+    pm5.adoptConnection('Q', fakeConn(), null, { partyId: 'P' });
+    ok(pm5.partyOf('Q') === 'P', 'adoption honors an explicit partyId from the layer above');
+}
+
 (async () => {
     console.log('p2p-core unit tests — transport hardening (issue #21 residuals)');
     idTests();
@@ -254,7 +508,12 @@ function minifySdpTests() {
     frameSizeTests();
     readModelTests();
     minifySdpTests();
+    relayIsolationTests();
+    await partyCeremonyTests();
+    partyLifecycleTests();
+    partyAdoptionTests();
     console.log('');
     if (fail) { console.log(fail + ' check(s) FAILED.'); process.exit(1); }
     console.log('All ' + pass + ' p2p-core unit checks passed.');
+    process.exit(0); // fake-RTC ceremony reap timers may still be pending
 })();

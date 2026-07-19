@@ -46,6 +46,12 @@ state machine in the stack. Implementation: `p2p-core.js`, `sdp-codec.js`,
 - **Session** — the reliability state (sequence counters, outbox) and app
   meaning attached to a `peerId`. A session may span many links over time.
 - **Inviter / joiner** — roles in a ceremony: the inviter creates the offer.
+- **Party** — a disjoint set of links sharing one hub (v1.13). A node's
+  role is per-party: the **leader** relays app frames between that party's
+  links; a **member** holds exactly one link to its leader. One node may
+  hold several parties concurrently. Party identity is local-only — it
+  never appears on the wire; a frame's party is the party of the link it
+  arrived on (§5.6).
 - **Caller / listener** — fixed roles in a *rendezvous pair* (see §7.1),
   independent of who invited whom originally.
 - **Frame** — one data-channel message (UTF-8 JSON in v1.x).
@@ -228,27 +234,39 @@ Repair escalation while interrupted:
    Restart attempts repeat every 10 s within the grace window.
 3. Rendezvous (§7), if the pair opted in.
 
-### 5.6 Multi-peer relay (star topology)
+### 5.6 Multi-peer relay (star topology, per-party since v1.13)
 
-The inviter of a multi-peer session acts as hub: app frames from one spoke
-are re-sent to every other spoke **through each destination link's own
-sequence space**, stamped `relayed: true` by the hub itself. A spoke cannot
-launder a relayed frame into looking direct (the hub always stamps), and
-identity claims (§6) MUST NOT bind through a relayed frame.
+The inviter of a multi-peer session acts as hub — the **leader** of that
+party: app frames from one spoke are re-sent to every other spoke **of the
+same party**, **through each destination link's own sequence space**,
+stamped `relayed: true` by the leader itself. A spoke cannot launder a
+relayed frame into looking direct (the leader always stamps), and identity
+claims (§6) MUST NOT bind through a relayed frame.
+
+**Party scoping (v1.13).** A node MAY hold several parties concurrently —
+leader of some, member of others. Relay authority derives from the
+**arrival link's party**, never from node-global state: a node relays a
+frame only when it leads the party of the link the frame arrived on, and
+only to that party's other links (and their §5.3 adoption stashes). A frame
+MUST NEVER be relayed across parties. Nothing about parties travels on the
+wire — a spoke cannot observe how many parties its leader holds — so v1.13
+nodes interoperate with pre-1.13 nodes unchanged.
 
 **Targeted frames (v1.11).** `sendTo(peerId, text)` is the public
 single-link send: it delivers to one peer through the same per-link outbox
 (and the adoption stash of a dead-but-repairing session, §5.3), so
 exactly-once replay applies to targeted frames unchanged. Targeted frames
-carry `noRelay: true`; the hub's relay loop MUST skip them, so a targeted
-frame sent to the hub is never fanned out to the other spokes.
+carry `noRelay: true`; the leader's relay loop MUST skip them, so a targeted
+frame sent to the leader is never fanned out to the other spokes.
 
-**Inbound `relayed` sanitization (v1.11).** Only the hub may stamp
-`relayed`, and every frame the hub receives arrives on a direct link from
-its origin — an inbound `relayed: true` at the hub is therefore always
-forged, and the hub MUST strip it before relay or local dispatch. Without
-this, a spoke could launder its frames into "arrived through the hub" and
-defeat relay-tag attribution in layers above.
+**Inbound `relayed` sanitization (v1.11, per-party since v1.13).** Only a
+party's leader may stamp `relayed`, and every frame the leader receives on
+a link it leads arrives direct from its origin — an inbound `relayed: true`
+on a led link is therefore always forged, and the leader MUST strip it
+before relay or local dispatch. Without this, a spoke could launder its
+frames into "arrived through the hub" and defeat relay-tag attribution in
+layers above. On a link where the node is a member, an inbound `relayed`
+stamp is its leader's legitimate attribution and MUST be preserved.
 
 ## 6. Identity
 
@@ -612,4 +630,5 @@ resume window 6 h.
 | 1.10 | reconnect-lifecycle hardening: self-healing carriers, standby/ring/bye, exchange nonces, quiet-phase episodes |
 | 1.11 | targeted sends: public `sendTo`, `noRelay` app-frame flag, hub strips forged inbound `relayed` |
 | 1.12 | §3.1 extras trailer on packed payloads (format-1-compatible): exchange nonce `n` now survives the packed wire path — pre-1.12 packers dropped it, leaving the §7.4 offer↔answer replay binding inert there |
+| 1.13 | parties: per-party leader role and relay scoping (§5.6) — one node may lead a party while a member of others; local-only, wire-unchanged. Session adoption re-derives the relay role from the link type, fixing the lost hub relay after a hub restart resume (isHost was never re-derived) |
 | 2.x (`RDV_BUILD` `v2.4`) | `pair-confirm` key-confirmation before persisting; serialized per-pair record writes; `MultiCarrier` fan-out across several public brokers; flap-resend. **Ratchet frozen, then removed** (see §7.5) — the sealed epoch is the fixed literal `1` and the never-reachable `+3` acceptance window was deleted (wire-identical); a per-episode decrypt rate-limit + day-topic-rollover resubscribe added |
