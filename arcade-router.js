@@ -41,12 +41,14 @@ import { KEY_PREFIX } from './arcade-storage-core.js';
 // the opaque-frame storage bridge (state.write / store.op / files.op /
 // storage.op + welcome.state snapshot). ui.bridge: this launcher services
 // arcade:ui.op (confirm/prompt/setTitle/quitHook/openFile/share — see
-// arcade-ui-bridge.js). Exported so the contract tests
+// arcade-ui-bridge.js). peer.party: this launcher services
+// arcade:peer.party.op (the v1.13 multi-party star-selection hook —
+// Arcade.peer.party()/parties()/attach()). Exported so the contract tests
 // (tools/caps-contract-unit.mjs, tools/acceptance.mjs check 11) pin the
 // list — editing it is a contract change: update GAME_INTEGRATION.md §14
 // and the pinned test literal deliberately, never casually.
 export const ARCADE_PEER_CAPS = Object.freeze(
-    ['peer.sendTo', 'peer.roster', 'peer.meta', 'storage.bridge', 'ui.bridge']);
+    ['peer.sendTo', 'peer.roster', 'peer.meta', 'peer.party', 'storage.bridge', 'ui.bridge']);
 
 export function initMessageRouter(host) {
     const pool = host.pool;
@@ -191,8 +193,10 @@ export function initMessageRouter(host) {
                 pool.postToIframe(gameId, {
                     type: 'arcade:welcome',
                     caps: ARCADE_PEER_CAPS,
-                    peerStatus: p2p ? p2p.status() : 'idle',
-                    peers: p2p ? p2p.connectedPeers() : [],
+                    // Per-game views (v1.13): a game sees its ATTACHED
+                    // party's status and seats, not the device aggregate.
+                    peerStatus: p2p ? p2p.statusForGame(gameId) : 'idle',
+                    peers: p2p ? p2p.rosterForGame(gameId) : [],
                     settings: host.currentSettings(),
                     // Opaque frames can't read localStorage — this seeds
                     // the SDK's state cache (its keys, global.*, and the
@@ -227,10 +231,38 @@ export function initMessageRouter(host) {
                     // While a repair episode runs, every queued send comes
                     // back with a fresh queue-depth reading so the game
                     // can see how close it is to the replay cap.
-                    if (p2p.status() === 'interrupted') {
+                    if (p2p.statusForGame(gameId) === 'interrupted') {
                         pool.postToIframe(gameId, { type: 'arcade:peer.queue', ...p2p.queueSnapshot() });
                     }
                 }
+                break;
+            }
+            case 'arcade:peer.party.op': {
+                // Star-selection hook (v1.13, cap 'peer.party'): a game
+                // introspects or chooses the party its peer surface binds
+                // to. Rides the generic RPC rail (one arcade:bridge.result
+                // per request, same id). `attach` resolves to the resulting
+                // party (null if refused); the per-game status/roster push
+                // that follows an accepted attach rides the bridge's own
+                // scope-change event. A pre-bridge call is answered honestly
+                // (no parties yet) rather than left to time out.
+                if (typeof data.id !== 'string' && typeof data.id !== 'number') break;
+                const p2p = host.getP2P();
+                let result = null;
+                if (p2p) {
+                    if (data.op === 'get') {
+                        result = p2p.gameParty(gameId);
+                    } else if (data.op === 'list') {
+                        result = p2p.partiesSnapshot();
+                    } else if (data.op === 'attach') {
+                        const ok = typeof data.partyId === 'string'
+                            && p2p.attachGame(gameId, data.partyId);
+                        result = ok ? p2p.gameParty(gameId) : null;
+                    }
+                } else if (data.op === 'list') {
+                    result = [];
+                }
+                pool.postToIframe(gameId, { type: 'arcade:bridge.result', id: data.id, ok: true, value: result });
                 break;
             }
             case 'arcade:state.write':

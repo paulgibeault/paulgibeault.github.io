@@ -47,12 +47,19 @@
     window.__rosterEvents = [];
     Arcade.peer.onPeersChange((peers) => window.__rosterEvents.push(peers));
 
+    // Ready (presence) events — who announced THIS game (multiparty tests).
+    window.__readyEvents = [];
+    Arcade.peer.onReady((p) => window.__readyEvents.push(p));
+
     // Test hooks
     window.__send = (payload) => Arcade.peer.send(payload);
     window.__sendTo = (payload, to) => Arcade.peer.send(payload, { to });
     window.__peerStatus = () => Arcade.peer.status();
     window.__caps = () => Arcade.peer.caps();
     window.__peers = () => Arcade.peer.peers();
+    window.__party = () => Arcade.peer.party();       // Promise
+    window.__parties = () => Arcade.peer.parties();   // Promise
+    window.__attach = (id) => Arcade.peer.attach(id); // Promise
 </script>
 </body>
 </html>
