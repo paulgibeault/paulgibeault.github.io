@@ -771,6 +771,142 @@ body.app-in-game .launcher-menu[data-open="true"] .launcher-menu__panel {
     outline: none;
 }
 
+/* Manage-on-row: the header is the toggle, the actions live in a body that
+   opens on tap. Chips (💾/🔄/🔁) surface a pairing's purpose on the closed
+   row. */
+.connections-row__toggle {
+    width: 100%;
+    background: transparent;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    text-align: left;
+    font: inherit;
+}
+.connections-row__toggle:focus-visible {
+    outline: 1px solid var(--field-gold);
+    outline-offset: 3px;
+    border-radius: 4px;
+}
+.connections-row__chips {
+    flex-shrink: 0;
+    font-size: 0.7rem;
+    letter-spacing: 2px;
+    margin-left: auto;
+}
+.connections-row__chips + .connections-row__status { margin-left: 8px; }
+.connections-row__body { display: none; }
+.connections-row--open .connections-row__body { display: block; }
+
+/* Party card (v1.13): leader-first vertical hierarchy — the indentation IS
+   the topology. */
+.party-card__member {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--snow-white);
+    padding: 2px 0;
+    margin-left: 18px;
+}
+.party-card__member--leader {
+    margin-left: 0;
+    font-size: 0.85rem;
+}
+.party-card__member-name {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.party-card__leader-tag {
+    flex-shrink: 0;
+    font-size: 0.6rem;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--field-gold);
+    border: 1px solid var(--field-gold-dim);
+    border-radius: 4px;
+    padding: 1px 5px;
+}
+.party-card__dot {
+    flex-shrink: 0;
+    margin-left: auto;
+    font-size: 0.65rem;
+}
+
+/* Game-launch party picker (v1.13): one-tap sheet over the just-launched
+   game when several live parties could claim it. */
+.party-picker {
+    position: fixed;
+    inset: 0;
+    z-index: 3600; /* over the game iframe (3000/3002), under blocking dialogs */
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.45);
+}
+.party-picker__sheet {
+    width: min(420px, 94vw);
+    margin-bottom: 28px;
+    background: var(--card-bg, #1a1a20);
+    border: 1px solid var(--field-gold-dim);
+    border-radius: 12px;
+    padding: 16px;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+}
+.party-picker__title {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    color: var(--snow-white);
+    margin-bottom: 12px;
+}
+.party-picker__option {
+    display: block;
+    width: 100%;
+    background: transparent;
+    border: 1px solid var(--card-border);
+    color: var(--snow-white);
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    text-align: left;
+    padding: 12px 14px;
+    border-radius: 8px;
+    margin-bottom: 8px;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.party-picker__option:hover,
+.party-picker__option:focus-visible {
+    background: var(--field-gold-dim);
+    border-color: var(--field-gold);
+    color: var(--field-gold);
+    outline: none;
+}
+.party-picker__who {
+    display: block;
+    font-size: 0.68rem;
+    color: var(--text-secondary);
+    margin-top: 3px;
+}
+.party-picker__skip {
+    display: block;
+    width: 100%;
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    padding: 8px;
+    cursor: pointer;
+}
+.party-picker__skip:hover,
+.party-picker__skip:focus-visible {
+    color: var(--snow-white);
+    outline: none;
+}
+
 /* ---- TOAST ---- */
 .launcher-toast {
     position: fixed;

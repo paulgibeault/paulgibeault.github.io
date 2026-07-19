@@ -376,7 +376,12 @@
         <button type="button" class="connections-dialog__new" id="connections-dialog-new">
             <span aria-hidden="true">⚇</span> New connection
         </button>
-        <div class="launcher-menu__heading connections-dialog__list-heading" id="connections-dialog-list-heading" hidden>Saved connections</div>
+        <!-- Live parties (v1.13): the leader-first hierarchy IS the topology
+             lesson — no diagrams, no transport vocabulary. Rendered only
+             while the bridge is loaded (no bridge → nothing can be live). -->
+        <div class="launcher-menu__heading connections-dialog__list-heading" id="connections-dialog-parties-heading" hidden>Parties</div>
+        <div class="connections-dialog__list" id="connections-dialog-parties"></div>
+        <div class="launcher-menu__heading connections-dialog__list-heading" id="connections-dialog-list-heading" hidden>Linked devices</div>
         <div class="connections-dialog__list" id="connections-dialog-list"></div>
         <!-- Self-hosted infrastructure overrides (see SELF_HOSTING.md). Writes
              arcade.v1._meta.rdvBrokers / .iceServers; validation is borrowed
@@ -1234,6 +1239,63 @@
             if (e.persisted) tryResumeOnLaunch();
         });
 
+        // Game-launch party picker (v1.13): with SEVERAL live parties a
+        // launching game stays unattached (reads 'idle') until someone
+        // decides which table it's for — the bridge deliberately won't
+        // guess. One tap here, named by each party's leader, remembered
+        // while the party lives (ArcadeP2P.attachGame). With zero or one
+        // party the bridge auto-attaches and this never appears.
+        function maybeOfferPartyPicker(gameId, gameName) {
+            if (!p2pBridge) return; // bridge cold → nothing live to pick from
+            let parties;
+            try { parties = p2pBridge.partiesSnapshot(); } catch (_) { return; }
+            if (parties.length < 2) return;
+            if (p2pBridge.gameParty(gameId)) return; // already attached (or decided)
+            document.getElementById('party-picker')?.remove();
+            const overlay = document.createElement('div');
+            overlay.id = 'party-picker';
+            overlay.className = 'party-picker';
+            const sheet = document.createElement('div');
+            sheet.className = 'party-picker__sheet';
+            sheet.setAttribute('role', 'dialog');
+            sheet.setAttribute('aria-label', 'Choose a party');
+            const title = document.createElement('div');
+            title.className = 'party-picker__title';
+            title.textContent = 'Which party is ' + (gameName || 'this game') + ' for?';
+            sheet.appendChild(title);
+            for (const p of parties) {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'party-picker__option';
+                // peers counts the REMOTE seats; +1 shows the human total.
+                const label = p.role === 'leader' ? 'Your party' : p.leaderName + "'s party";
+                btn.textContent = '👑 ' + label + ' — ' + (p.peers + 1) + ' players';
+                // Same-named options are real (one device can lead several
+                // parties) — the member names are what tells them apart.
+                const others = (p.members || []).filter((m) => !m.isSelf).map((m) => m.name).join(', ');
+                if (others) {
+                    const who = document.createElement('span');
+                    who.className = 'party-picker__who';
+                    who.textContent = 'with ' + others;
+                    btn.appendChild(who);
+                }
+                btn.addEventListener('click', () => {
+                    p2pBridge.attachGame(gameId, p.id);
+                    overlay.remove();
+                });
+                sheet.appendChild(btn);
+            }
+            const skip = document.createElement('button');
+            skip.type = 'button';
+            skip.className = 'party-picker__skip';
+            skip.textContent = 'Not now — play solo';
+            skip.addEventListener('click', () => overlay.remove());
+            sheet.appendChild(skip);
+            overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+            overlay.appendChild(sheet);
+            document.body.appendChild(overlay);
+        }
+
         // Event delegation: the grid is fetch-rendered from catalog.json after
         // this classic script runs, so per-button listeners can't be attached
         // at parse time. One listener on the container covers every button,
@@ -1250,6 +1312,7 @@
             // which happens after the POOL + ROUTER block wires showGame —
             // the null-check is belt and braces.
             if (window.__arcade.showGame) window.__arcade.showGame(btn.dataset.gameId, href, name);
+            maybeOfferPartyPicker(btn.dataset.gameId, name);
         });
 
         // ---- postMessage protocol (extracted) ----
@@ -1746,9 +1809,16 @@
         const dialogNew = document.getElementById('connections-dialog-new');
         const listHeading = document.getElementById('connections-dialog-list-heading');
         const list = document.getElementById('connections-dialog-list');
+        const partiesHeading = document.getElementById('connections-dialog-parties-heading');
+        const partiesList = document.getElementById('connections-dialog-parties');
         if (!nameInput || !menuBtn || !dialog || !list) return;
 
         let unsubStatus = null;
+        let unsubScope = null;
+        // Linked-device rows are the manage surface: compact by default, tap
+        // to open the actions. Remember which are open across the re-renders
+        // every live status change triggers.
+        const openRows = new Set();
 
         function toast(msg, opts) {
             if (window.__arcade.showToast) window.__arcade.showToast(msg, opts);
@@ -1794,6 +1864,118 @@
             idle: ['', '']
         };
 
+        // ---- Parties (v1.13) ----
+        // The card's vertical hierarchy — leader first, members indented —
+        // IS the topology lesson; no diagrams, no transport vocabulary.
+        // Health is the existing dots only (🟢 live / 🟡 reconnecting; no
+        // dot when this device can't see that seat's health). Relay paths,
+        // fingerprints and the rest stay in the Connection log.
+        const MEMBER_DOT = { connected: '🟢', interrupted: '🟡' };
+        function buildPartyCard(party) {
+            const bridge = window.__arcade.p2p;
+            const card = document.createElement('div');
+            card.className = 'connections-row party-card';
+
+            for (const m of party.members) {
+                const row = document.createElement('div');
+                row.className = 'party-card__member' + (m.isLeader ? ' party-card__member--leader' : '');
+                const nameEl = document.createElement('span');
+                nameEl.className = 'party-card__member-name';
+                nameEl.textContent = (m.isLeader ? '👑 ' : '') + (m.isSelf ? 'This device' : (m.name || 'Unnamed device'));
+                row.appendChild(nameEl);
+                if (m.isLeader) {
+                    const tag = document.createElement('span');
+                    tag.className = 'party-card__leader-tag';
+                    tag.textContent = 'Party leader';
+                    row.appendChild(tag);
+                }
+                const dot = m.isSelf ? '🟢' : MEMBER_DOT[m.status];
+                if (dot) {
+                    const dotEl = document.createElement('span');
+                    dotEl.className = 'party-card__dot';
+                    dotEl.textContent = dot;
+                    row.appendChild(dotEl);
+                }
+                card.appendChild(row);
+            }
+
+            // Teaching moment: a member whose leader link is repairing
+            // learns WHY the party stalls — it runs through their device.
+            if (party.role === 'member' && party.status === 'interrupted') {
+                const note = document.createElement('div');
+                note.className = 'connections-row__meta';
+                note.textContent = 'Reconnecting to ' + party.leaderName + ' — the party runs through their device.';
+                card.appendChild(note);
+            }
+
+            // "Playing: …" — mounted games attached to THIS party.
+            const pool = window.__arcade.pool;
+            if (pool && bridge) {
+                const names = [];
+                for (const gid of pool.mountedGameIds()) {
+                    const gp = bridge.gameParty(gid);
+                    if (gp && gp.id === party.id) {
+                        const info = pool.getGameInfo(gid);
+                        names.push((info && info.name) || gid);
+                    }
+                }
+                if (names.length) {
+                    const playing = document.createElement('div');
+                    playing.className = 'connections-row__meta';
+                    playing.textContent = 'Playing: ' + names.join(', ');
+                    card.appendChild(playing);
+                }
+            }
+
+            const actions = document.createElement('div');
+            actions.className = 'connections-row__actions';
+            if (party.role === 'leader') {
+                // Only the leader's device can mint invites for this party —
+                // the caption teaches fact #2: new players scan the LEADER's
+                // screen.
+                const invite = document.createElement('button');
+                invite.type = 'button';
+                invite.className = 'connections-row__btn';
+                invite.textContent = '➕ Invite another player';
+                invite.title = 'New players scan your screen';
+                invite.addEventListener('click', () => {
+                    if (window.__arcade.openMultiplayerPanel) {
+                        window.__arcade.openMultiplayerPanel({ mode: 'host', partyId: party.id });
+                    }
+                });
+                actions.appendChild(invite);
+            }
+            const leave = document.createElement('button');
+            leave.type = 'button';
+            leave.className = 'connections-row__btn';
+            leave.textContent = party.role === 'leader' ? 'End party' : 'Leave party';
+            leave.addEventListener('click', async () => {
+                const msg = party.role === 'leader'
+                    ? "You're the party leader — leaving ends the party for everyone. End it?"
+                    : 'Leave the party? The others keep playing.';
+                if (!window.confirm(msg)) return;
+                leave.disabled = true;
+                try {
+                    const b = await window.__arcade.loadP2P();
+                    await b.leaveParty(party.id);
+                    toast(party.role === 'leader' ? 'Party ended.' : 'You left the party.');
+                } catch (e) {} finally { render(); }
+            });
+            actions.appendChild(leave);
+            card.appendChild(actions);
+            return card;
+        }
+
+        function renderParties() {
+            // Bridge not loaded → nothing can be live; the section hides.
+            const bridge = window.__arcade.p2p;
+            const parties = bridge ? bridge.partiesSnapshot() : [];
+            if (partiesHeading) partiesHeading.hidden = parties.length === 0;
+            if (!partiesList) return;
+            partiesList.innerHTML = '';
+            for (const p of parties) partiesList.appendChild(buildPartyCard(p));
+        }
+
         function buildRow(id, peer) {
             const displayName = peer.name || 'Unnamed device';
             // A revoked device (#32) renders quarantined: no call/reconnect/
@@ -1805,14 +1987,38 @@
             const isLive = !revoked && (state === 'connected' || state === 'interrupted' || state === 'connecting');
 
             const row = document.createElement('div');
-            row.className = 'connections-row' + (revoked ? ' connections-row--revoked' : '');
+            row.className = 'connections-row' + (revoked ? ' connections-row--revoked' : '')
+                + (openRows.has(id) ? ' connections-row--open' : '');
 
-            const top = document.createElement('div');
-            top.className = 'connections-row__top';
+            // The row is the manage surface: the header is a toggle, the
+            // actions live in a body that opens on tap. Purpose chips
+            // (💾 backup / 🔄 sync / 🔁 auto-reconnect) stay visible on the
+            // closed row — what a pairing is FOR shouldn't need a tap.
+            const top = document.createElement('button');
+            top.type = 'button';
+            top.className = 'connections-row__top connections-row__toggle';
+            top.setAttribute('aria-expanded', openRows.has(id) ? 'true' : 'false');
+            top.addEventListener('click', () => {
+                if (openRows.has(id)) openRows.delete(id); else openRows.add(id);
+                render();
+            });
             const nameEl = document.createElement('span');
             nameEl.className = 'connections-row__name';
             nameEl.textContent = displayName;
             top.appendChild(nameEl);
+            if (!revoked) {
+                const chipText = [
+                    peer.backupTarget === true ? '💾' : '',
+                    peer.syncEnabled === true ? '🔄' : '',
+                    peer.autoReconnect === true ? '🔁' : ''
+                ].filter(Boolean).join(' ');
+                if (chipText) {
+                    const chips = document.createElement('span');
+                    chips.className = 'connections-row__chips';
+                    chips.textContent = chipText;
+                    top.appendChild(chips);
+                }
+            }
             const [label, cls] = revoked
                 ? ['🚫 Revoked', 'revoked']
                 : (STATUS_LABEL[state] || STATUS_LABEL.idle);
@@ -1824,13 +2030,17 @@
             }
             row.appendChild(top);
 
+            const body = document.createElement('div');
+            body.className = 'connections-row__body';
+            row.appendChild(body);
+
             const meta = document.createElement('div');
             meta.className = 'connections-row__meta';
             meta.textContent = revoked
                 ? 'Revoked — your devices refuse this one until you undo it here'
                 : ('Last connected ' + relativeTime(peer.lastConnectedAt)
                     + (state === 'idle' && peer.autoReconnect ? ' · listening — Call reaches them while their arcade is open' : ''));
-            row.appendChild(meta);
+            body.appendChild(meta);
 
             const actions = document.createElement('div');
             actions.className = 'connections-row__actions';
@@ -2058,11 +2268,12 @@
             icons.appendChild(deleteBtn);
 
             actions.appendChild(icons);
-            row.appendChild(actions);
+            body.appendChild(actions);
             return row;
         }
 
         function render() {
+            renderParties();
             const known = readKnownPeers();
             const ids = Object.keys(known).sort((a, b) =>
                 Date.parse(known[b].lastConnectedAt || 0) - Date.parse(known[a].lastConnectedAt || 0));
@@ -2093,6 +2304,10 @@
                     if (dialog.hidden) return; // closed before it finished loading
                     render();
                     if (!unsubStatus) unsubStatus = b.onStatus(() => render());
+                    // Parties/attachments shift without an aggregate status
+                    // change (game attach, second party forming) — the scope
+                    // event covers those.
+                    if (!unsubScope) unsubScope = b.onScopeChange(() => render());
                 }).catch(() => {});
             }
             setTimeout(() => {
@@ -2103,6 +2318,7 @@
         function closeDialog() {
             dialog.hidden = true;
             if (unsubStatus) { unsubStatus(); unsubStatus = null; }
+            if (unsubScope) { unsubScope(); unsubScope = null; }
             hideRecoveryReveal(); // never leave the recovery code in the DOM
             closeLogDialog(); // never leave the log overlay orphaned on top
         }

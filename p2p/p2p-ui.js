@@ -204,6 +204,7 @@ export class P2PUIManager {
                 //       completes automatically without any scanning.
                 // -------------------------------------------------------
                 this.ui.choice.style.display = 'none';
+                this._ceremonyRole = 'joiner';
                 this._initStages('joiner');
                 this._setStage(0, 'done'); // their invite arrived (via link)
 
@@ -221,7 +222,9 @@ export class P2PUIManager {
                 }
 
                 this.logDiag('info', 'Invite link received. Preparing your reply code...');
-                const answerData = await this.peerNode.createAnswer(data);
+                // Joining always forms a FRESH member party (v1.13) — being
+                // connected elsewhere no longer blocks accepting an invite.
+                const answerData = await this.peerNode.createAnswer(data, { newParty: true });
                 // This join ceremony owns the host's link — without this, the
                 // 'connected' status event is filtered as "not my ceremony"
                 // and the modal never auto-closes on the link path (the QR
@@ -231,7 +234,7 @@ export class P2PUIManager {
                 // QR-first even on the link path: show OUR code for them to
                 // scan. Replying by link stays available as the fallback.
                 await this.displayQRCode(answerData,
-                    "One more step: have the host tap Scan their code and scan this. (Or send a reply link back in the same chat.)");
+                    "Now have the party leader tap Scan their code and scan this code. (Or send a reply link back in the same chat.)");
                 this._setStage(1, 'done'); // your code is showing
                 this.ui.btnShareSdp.textContent = 'Send a reply link back';
 
@@ -346,11 +349,11 @@ export class P2PUIManager {
 
     // ==========================================
     // CONNECTION-STATE RENDERING (single source of truth)
-    // Badge text and the Host/Join buttons are derived from the peers map in
-    // ONE place, so every entry point (restore, start-over, live status events)
-    // agrees. The transport has one global role and one relay loop, so the
-    // buttons must respect it: only a host can invite more players, and Join is
-    // offered only when no link is live or stashed.
+    // Badge text is derived from the peers map in ONE place, so every entry
+    // point (restore, start-over, live status events) agrees. The choice
+    // screen itself is stateless (v1.13 multi-party): starting a NEW party is
+    // always allowed, and joining always forms a fresh party — so "New
+    // connection" is a verb that always offers both, never a status screen.
     // ==========================================
 
     /** Snapshot of the transport's connection inventory (transport owns it). */
@@ -372,31 +375,18 @@ export class P2PUIManager {
     }
 
     /**
-     * Show the Host/Join buttons consistent with the transport's role.
-     * No established links → both (fresh start). Host node with links → Host
-     * only (invite another player). Joiner with links → neither (a joiner is a
-     * leaf of the star and cannot add players itself).
+     * Show the Start/Join choice. Both actions are ALWAYS available (v1.13):
+     * starting a party mints a fresh one regardless of existing roles, and
+     * joining always forms a fresh member party — the old connected dead-end
+     * ("only the host can add more players") is gone with the node-global
+     * role. Inviting into an EXISTING party is the party card's job (the
+     * launcher opens this modal with {mode:'host', partyId}), not this
+     * screen's.
      */
     _renderChoiceButtons() {
-        const s = this._connectionState();
         this.ui.choice.style.display = 'block';
-        const guide = this.ui.choice.querySelector('.p2p-guide');
-        if (!s.established) {
-            this.ui.btnHost.style.display = 'block';
-            this.ui.btnJoin.style.display = 'block';
-            this.ui.btnHost.textContent = 'Host';
-            if (guide) guide.textContent = "Scan each other's screens to connect.";
-        } else if (s.isHost) {
-            this.ui.btnHost.style.display = 'block';
-            this.ui.btnHost.textContent = 'Invite another player';
-            this.ui.btnJoin.style.display = 'none';
-            if (guide) guide.textContent = 'Add another player, or close this to keep playing.';
-        } else {
-            // A joiner is a leaf of the star — it can't add players itself.
-            this.ui.btnHost.style.display = 'none';
-            this.ui.btnJoin.style.display = 'none';
-            if (guide) guide.textContent = "You're connected. Only the host can add more players.";
-        }
+        this.ui.btnHost.style.display = 'block';
+        this.ui.btnJoin.style.display = 'block';
     }
 
     /**
@@ -414,7 +404,7 @@ export class P2PUIManager {
             this.ui.workArea.style.display = 'block';
             this.ui.scannerContainer.style.display = 'none';
             this.ui.qrContainer.style.display = 'block';
-            if (this.peerNode.isHost) this.ui.btnScanAns.style.display = 'block';
+            if (this._ceremonyRole === 'host') this.ui.btnScanAns.style.display = 'block';
             this._renderBadge();
             return;
         }
@@ -433,6 +423,8 @@ export class P2PUIManager {
     /** Abandon any unfinished attempt and return to the first screen. */
     _startOver(log = true) {
         this._ceremonyPeerId = null;
+        this._ceremonyPartyId = null;
+        this._ceremonyRole = null;
         // Abandon unfinished ceremonies only — the transport keeps established
         // sessions (connected or mid-repair) and routes each drop through a
         // terminal 'status' event so the bridge never wedges.
@@ -459,12 +451,13 @@ export class P2PUIManager {
         this._restoreUIState();
         this.ui.overlay.style.display = 'flex';
         if (options.mode === 'host') {
-            // One-tap (re)connect entry: skip the choice screen and put a
-            // FRESH invite code on screen immediately. Used by "Reconnect"
-            // actions — WebRTC signaling is one-time-use by design (fresh ICE
-            // credentials every session), so reconnecting means a fresh code,
-            // just with zero navigation to reach it.
-            this.startHostCeremony();
+            // One-tap invite entry: skip the choice screen and put a FRESH
+            // invite code on screen immediately. Used by "New invite code"
+            // (reconnect — WebRTC signaling is one-time-use by design, so
+            // reconnecting means a fresh code with zero navigation) and by
+            // the party card's "Invite another player", which passes the
+            // party the new player should land in (options.partyId).
+            this.startHostCeremony({ partyId: options.partyId });
             return;
         }
         setTimeout(() => {
@@ -476,16 +469,23 @@ export class P2PUIManager {
 
     /**
      * Begins the inviter flow: create a fresh offer and show its QR/link.
-     * Reused by the Host button and show({mode:'host'}). Each ceremony is a
-     * fresh, standalone connection — it never touches existing peers.
+     * Reused by the Start-a-party button and show({mode:'host'}). Each
+     * ceremony is a fresh, standalone connection — it never touches existing
+     * peers. Without opts.partyId the invite starts a NEW party this device
+     * leads (always allowed, even while a member elsewhere — v1.13); with it,
+     * the new player is invited into that existing party (leader only — the
+     * transport enforces it).
      */
-    async startHostCeremony() {
+    async startHostCeremony(opts = {}) {
         this.logDiag('info', '--- INVITE SEQUENCE ---');
         this.ui.choice.style.display = 'none';
+        this._ceremonyRole = 'host';
         this._initStages('host');
 
         try {
-            const offerData = await this.peerNode.createOffer();
+            const partyId = opts.partyId || this.peerNode.createParty();
+            this._ceremonyPartyId = partyId;
+            const offerData = await this.peerNode.createOffer({ partyId });
             // Remember which link THIS ceremony is minting so a status event from
             // an unrelated (already-live) peer can't close this modal on us.
             try { this._ceremonyPeerId = JSON.parse(offerData).peerId; } catch (_) { this._ceremonyPeerId = null; }
@@ -493,13 +493,13 @@ export class P2PUIManager {
 
             // QR-first: the code IS the invite. Links are the fallback.
             await this.displayQRCode(offerData,
-                "Have the other player tap Join and scan this code.");
+                "Have your friend tap Join a party and scan this code.");
             this.ui.btnScanAns.style.display = 'block';
             this.ui.btnShareSdp.textContent = 'Send a link instead';
         } catch (e) {
             this._setStage(0, 'error');
-            // A role-flip guard rejection (hosting while joined) lands here — tell
-            // the user why rather than silently failing.
+            // Inviting into an existing party as a non-leader lands here —
+            // tell the user why rather than silently failing.
             this.logDiag('error', e && e.message ? e.message : 'Could not create your invite code.');
             this.ui.statusBadge.textContent = e && e.message ? e.message : 'Could not create your invite code.';
             this.ui.statusBadge.className = 'p2p-status-disconnected';
@@ -523,9 +523,10 @@ export class P2PUIManager {
                 <div id="p2p-stages" style="display:none; flex-wrap:wrap; align-items:center; gap:6px; font-size:12px; color:#aaa; margin:10px 0; padding:8px 10px; background:#181818; border-radius:8px;"></div>
                 
                 <div id="p2p-choice" class="p2p-panel" style="margin-bottom:15px;">
-                    <p class="p2p-guide">Scan each other's screens to connect.</p>
-                    <button id="p2p-btn-host" class="p2p-btn p2p-btn-primary p2p-btn-big">Host</button>
-                    <button id="p2p-btn-join" class="p2p-btn p2p-btn-primary p2p-btn-big">Join</button>
+                    <button id="p2p-btn-host" class="p2p-btn p2p-btn-primary p2p-btn-big">Start a party
+                        <span class="p2p-btn-caption">friends join by scanning your screen</span></button>
+                    <button id="p2p-btn-join" class="p2p-btn p2p-btn-primary p2p-btn-big">Join a party
+                        <span class="p2p-btn-caption">scan the party leader's screen</span></button>
                 </div>
 
                 <div id="p2p-work-area" class="p2p-panel" style="margin-bottom: 15px; display:none;">
@@ -676,10 +677,13 @@ export class P2PUIManager {
         // ---- Copy full diagnostics transcript (for bug reports / remote debugging) ----
         this.ui.btnCopyTranscript.addEventListener('click', async () => {
             const lines = Array.from(this.ui.diagnosticsOut.children).map(el => el.textContent);
+            const parties = (this.peerNode.statusSummary().parties || [])
+                .map((p) => `${p.role}:${p.connected}/${p.connected + p.interrupted + p.finalizing + p.pending}`)
+                .join(' ') || 'none';
             const transcript = [
                 `# P2P transcript ${new Date().toISOString()}`,
                 `# UA: ${navigator.userAgent}`,
-                `# Mode: ${this.peerNode.getConfig().iceMode}, role: ${this.peerNode.isHost ? 'host' : 'joiner'}`,
+                `# Mode: ${this.peerNode.getConfig().iceMode}, parties: ${parties}`,
                 ...lines
             ].join('\n');
             try {
@@ -764,6 +768,8 @@ export class P2PUIManager {
             if (status === 'connected') {
                 this._setStage(2, 'done');
                 this._ceremonyPeerId = null;
+                this._ceremonyPartyId = null;
+                this._ceremonyRole = null;
                 this.cleanupUI();
                 this._renderChoiceButtons();
                 this.ui.btnScanAns.style.display = 'none';
@@ -798,22 +804,25 @@ export class P2PUIManager {
         this.ui.btnJoin.addEventListener('click', () => {
             this.logDiag('info', '--- JOIN SEQUENCE ---');
             this.ui.choice.style.display = 'none';
+            this._ceremonyRole = 'joiner';
             this._initStages('joiner');
             this.ui.scanGuide.textContent =
-                'Point your camera at the code on the other player’s screen.';
+                'Point your camera at the code on the party leader’s screen.';
 
             this.startScanner(async (offerData) => {
                 this.logDiag('info', 'Code scanned! Preparing your reply code...');
                 this._setStage(0, 'done'); // scanned their code
                 try {
-                    const answerData = await this.peerNode.createAnswer(offerData);
+                    // Joining always forms a FRESH member party (v1.13) —
+                    // being connected elsewhere no longer blocks joining.
+                    const answerData = await this.peerNode.createAnswer(offerData, { newParty: true });
                     // The answer is keyed by the host's peerId — that's the link
                     // this join ceremony owns.
                     try { this._ceremonyPeerId = JSON.parse(answerData).peerId; } catch (_) { this._ceremonyPeerId = null; }
 
                     // Their turn to scan: show OUR code big and clear.
                     await this.displayQRCode(answerData,
-                        "Now have the host tap Scan their code and scan this.");
+                        "Now have the party leader tap Scan their code and scan this code.");
                     this._setStage(1, 'done'); // your code is showing
                     this.ui.btnShareSdp.textContent = 'Send a reply link back';
 
@@ -832,7 +841,7 @@ export class P2PUIManager {
             this.cleanupUI();
 
             const s = this._connectionState();
-            const hasPendingOffer = s.isHost &&
+            const hasPendingOffer = this._ceremonyRole === 'host' &&
                 (s.interrupted + s.finalizing + s.pending) > 0;
 
             if (hasPendingOffer) {
@@ -853,7 +862,10 @@ export class P2PUIManager {
 
         // ---- Share / Copy buttons ----
         this.ui.btnShareSdp.addEventListener('click', async () => {
-            const type = this.peerNode.isHost ? 'offer' : 'answer';
+            // The on-screen code's direction follows the CEREMONY's role, not
+            // any node-global state (one node can lead and member concurrently
+            // — v1.13): an inviter shares an offer, a joiner shares an answer.
+            const type = this._ceremonyRole === 'host' ? 'offer' : 'answer';
             const instructions = type === 'offer'
                 ? 'Open this link to join my game! After joining, tap "Send reply link" and send it back to me here.'
                 : 'Tap this link to complete the connection.';
@@ -861,7 +873,7 @@ export class P2PUIManager {
             if (shared) {
                 // A sent link fulfills the same step as a scanned code:
                 // inviter step 1 (code delivered) / joiner step 2 (reply sent).
-                this._setStage(this.peerNode.isHost ? 0 : 1, 'done');
+                this._setStage(type === 'offer' ? 0 : 1, 'done');
             }
         });
 
@@ -925,7 +937,14 @@ export class P2PUIManager {
             //   EC   — level M's 15% redundancy costs ~2 QR versions on big
             //          payloads; screen-to-camera is high-contrast, so L is
             //          the better trade once the payload is large.
-            const size = Math.round(Math.max(240, Math.min(360, (window.innerWidth || 360) * 0.8)));
+            // Sizing keys on the SMALLER viewport dimension — a landscape
+            // phone/tablet sizes by height, not a width the modal can't
+            // show — and is additionally clamped to the modal's own content
+            // width (frame padding excluded) so the code never overflows it.
+            const vmin = Math.min(window.innerWidth || 360, window.innerHeight || 640);
+            const frameWidth = this.ui.qrContainer.clientWidth;
+            const fitCap = frameWidth > 96 ? frameWidth - 48 : 480;
+            const size = Math.round(Math.max(240, Math.min(480, fitCap, vmin * 0.8)));
             const dpr = Math.min(Math.max(window.devicePixelRatio || 1, 1), 3);
             const correctLevel = this.rawSDPPayload.length > 160
                 ? QRCode.CorrectLevel.L : QRCode.CorrectLevel.M;
