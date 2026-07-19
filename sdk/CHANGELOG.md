@@ -30,6 +30,24 @@ semver is for humans and URLs, never checked on the wire.
 
 ---
 
+## 3.1.0 — 2026-07-18
+
+Multi-party star selection (`plans/multi-party-2026-07.md` Phase 2). A device
+can now hold several concurrent parties (independent connection stars); a
+running game is attached to exactly one, and its whole `Arcade.peer.*`
+surface reflects only that party. Additive API, gated by the new
+`peer.party` welcome cap:
+
+- `Arcade.peer.party()` — the attached party (`{id, role, leaderName,
+  status, peers}`) or null.
+- `Arcade.peer.parties()` — every party this game could attach to.
+- `Arcade.peer.attach(partyId)` — request re-attachment; resolves to the
+  resulting party or null if refused.
+
+With a single party the launcher auto-attaches and existing games keep
+working unchanged — these calls are only for games that want to choose.
+Roster entries now also carry a session-scoped `partyId` field (additive).
+
 ## 3.0.0 — 2026-07-17
 
 First versioned release. Establishes the `/sdk/v3/` pinned path, the evergreen

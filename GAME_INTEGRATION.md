@@ -579,10 +579,10 @@ links, no signaling server. Games never touch any of that; the whole surface is:
 
 ```js
 Arcade.peer.status();              // 'unavailable' | 'idle' | 'connecting' | 'connected' | 'interrupted'
-Arcade.peer.onStatus(s => ...);    // gate multiplayer UI on this (AGGREGATE across all links)
+Arcade.peer.onStatus(s => ...);    // gate multiplayer UI on this (your game's ATTACHED PARTY — see below)
 Arcade.peer.caps();                // launcher capability flags: feature-detect additive features
-                                   // ('peer.sendTo', 'peer.roster', 'peer.meta', 'storage.bridge',
-                                   // 'ui.bridge'); [] standalone or on an older launcher
+                                   // ('peer.sendTo', 'peer.roster', 'peer.meta', 'peer.party',
+                                   // 'storage.bridge', 'ui.bridge'); [] standalone or older launcher
 Arcade.peer.send({ move: 'e4' });  // broadcast; JSON-safe payload; false unless connected/interrupted
 Arcade.peer.send(hand, { to });    // targeted: only deviceId `to` receives it (cap 'peer.sendTo')
 Arcade.peer.onMessage((payload, fromPeer, meta) => ...);  // fromPeer = sender's stable deviceId;
@@ -606,6 +606,15 @@ Arcade.peer.onBlobError(({ id, name, reason, received, total }) => ...);
 
 Arcade.peer.queue();               // { depth, limit, overflowed } — replay-queue visibility
 Arcade.peer.onQueue(q => ...);     // pushed while 'interrupted'; overflowed ⇒ resync after recovery
+
+// Parties (cap 'peer.party') — a device can hold several concurrent
+// connection stars ("parties"); your game is attached to exactly ONE, and
+// every peer API above reflects only that party. With a single party the
+// launcher auto-attaches — you never need these. All resolve async.
+Arcade.peer.party();               // attached party { id, role: 'leader'|'member', leaderName,
+                                   //   status, peers } or null. id is session-scoped — never persist it.
+Arcade.peer.parties();             // parties this game could attach to (possibly [])
+Arcade.peer.attach(partyId);       // request re-attachment → resulting party, or null if refused
 ```
 
 Rules of the road:
@@ -953,14 +962,17 @@ parent → child:  arcade:settings.changed   { settings }
 parent → child:  arcade:state.replaced     { state }                // after file import (fresh snapshot)
 parent → child:  arcade:lifecycle.suspend  { }                      // iframe hidden, or about to be evicted
 parent → child:  arcade:lifecycle.resume   { }                      // iframe shown
-parent → child:  arcade:peer.status        { status }               // aggregate across links
+parent → child:  arcade:peer.status        { status }               // this game's attached party
 parent → child:  arcade:peer.message       { payload, fromPeer, meta }  // fromPeer = sender deviceId;
                                            // meta = { relayed, to: 'me'|'all' }
-parent → child:  arcade:peer.roster        { peers }                // full roster on any change
+parent → child:  arcade:peer.roster        { peers }                // attached party's roster on any change
 parent → child:  arcade:peer.identity      { deviceId, name }       // roster update (legacy single-peer)
 parent → child:  arcade:peer.ready         { deviceId, name }       // remote same-game listening
 parent → child:  arcade:peer.queue         { depth, limit, overflowed }
 child  → parent: arcade:peer.send          { payload, to? }         // to = target deviceId (targeted)
+child  → parent: arcade:peer.party.op      { op: 'get'|'list'|'attach', id, partyId? }
+                                           // cap 'peer.party'; answered via arcade:bridge.result
+                                           // (value: party entry | entry list | null)
 child  → parent: arcade:ui.toast           { message, kind, duration }
 
 — ui chrome bridge (§7; the SDK speaks this for you) —

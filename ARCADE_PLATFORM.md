@@ -91,7 +91,8 @@ Arcade.peer.status()                  // 'unavailable' | 'idle' | 'connecting' |
 Arcade.peer.onStatus(fn)              // aggregate status (all links folded into one value)
 Arcade.peer.caps()                    // launcher capability flags (frozen array; [] standalone
                                       // or on an older launcher) — feature-detect additive
-                                      // features: 'peer.sendTo', 'peer.roster', 'peer.meta'
+                                      // features: 'peer.sendTo', 'peer.roster', 'peer.meta',
+                                      // 'peer.party'
 Arcade.peer.send(payload)             // broadcast to every connected peer
 Arcade.peer.send(payload, { to })     // targeted: only that deviceId receives it; returns
                                       // false (never broadcasts) when the launcher lacks the
@@ -115,6 +116,9 @@ Arcade.peer.sendBlob(blob, { onProgress, to })   // chunked large payload; paced
                                       // progress, no outbox spike); { to } sends privately
 Arcade.peer.onBlob(fn)                // fn(blob, { name, size, mime, fromPeer, id })
 Arcade.peer.queue() / onQueue(fn)     // replay-queue { depth, limit, overflowed }
+Arcade.peer.party() / parties()       // multi-party star selection (cap 'peer.party'):
+Arcade.peer.attach(partyId)           // a game binds to ONE party; auto-attached when a
+                                      // single party is live — see GAME_INTEGRATION.md
 
 // DETERMINISM — shared seeded RNG for lockstep/turn-based games (identical
 // sequences on both devices from the same seed; never Math.random for shared state)
@@ -176,7 +180,7 @@ All messages namespaced `arcade:` to avoid collision.
 ```
 child → parent:  { type: 'arcade:hello',   gameId }
 parent → child:  { type: 'arcade:welcome', peerStatus: 'idle',
-                   caps: ['peer.sendTo', 'peer.roster', 'peer.meta', 'storage.bridge', 'ui.bridge'],  // capability flags (absent ⇒ [])
+                   caps: ['peer.sendTo', 'peer.roster', 'peer.meta', 'peer.party', 'storage.bridge', 'ui.bridge'],  // capability flags (absent ⇒ [])
                    peers: [{ deviceId, name, status, direct }, ...],   // live remote devices (roster seed)
                    settings: { fontScale, theme, reducedMotion, audioVolume, handedness },
                    state: { '<fullKey>': '<raw string>', ... } }       // storage-bridge snapshot: the app's own

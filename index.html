@@ -908,15 +908,49 @@
                 import('./arcade-p2p.js'),
                 import('./arcade-known-peers.js')
             ]).then(([{ ArcadeP2P }, { readKnownPeers }]) => {
+                // Per-game delivery (v1.13 multi-party): each mounted,
+                // handshaken game gets ITS attached party's status and
+                // roster — never another table's — deduped per game (the
+                // SDK dedupes too; this just keeps the postMessage traffic
+                // quiet). With a single party this reduces exactly to the
+                // old broadcast behavior.
+                const perGameScopes = new Map(); // gameId → { status, rosterJson }
+                function pushGameScopes() {
+                    const fp = framePool();
+                    if (!fp) return;
+                    const mounted = new Set(fp.mountedGameIds());
+                    for (const gid of perGameScopes.keys()) {
+                        if (!mounted.has(gid)) perGameScopes.delete(gid);
+                    }
+                    for (const gid of mounted) {
+                        if (!fp.isHelloed(gid)) continue;
+                        const status = ArcadeP2P.statusForGame(gid);
+                        const roster = ArcadeP2P.rosterForGame(gid);
+                        const rosterJson = JSON.stringify(roster);
+                        let last = perGameScopes.get(gid);
+                        if (!last) { last = {}; perGameScopes.set(gid, last); }
+                        if (last.status !== status) {
+                            last.status = status;
+                            postToIframe(gid, { type: 'arcade:peer.status', status });
+                            // Queue visibility rides along with status
+                            // transitions — games mostly care as an
+                            // 'interrupted' episode starts (depth begins
+                            // growing) and ends (did it overflow?).
+                            if (status === 'connected' || status === 'interrupted') {
+                                postToIframe(gid, { type: 'arcade:peer.queue', ...ArcadeP2P.queueSnapshot() });
+                            }
+                        }
+                        if (last.rosterJson !== rosterJson) {
+                            last.rosterJson = rosterJson;
+                            postToIframe(gid, { type: 'arcade:peer.roster', peers: roster });
+                        }
+                    }
+                }
+                ArcadeP2P.onScopeChange(pushGameScopes);
                 let prevPeerStatus = 'idle';
                 ArcadeP2P.onStatus((status) => {
-                    broadcast({ type: 'arcade:peer.status', status });
-                    // Queue visibility rides along with status transitions —
-                    // games mostly care as an 'interrupted' episode starts
-                    // (depth begins growing) and ends (did it overflow?).
-                    if (status === 'connected' || status === 'interrupted') {
-                        broadcast({ type: 'arcade:peer.queue', ...ArcadeP2P.queueSnapshot() });
-                    }
+                    // Games get their own party's view, not this aggregate.
+                    pushGameScopes();
                     const tag = document.getElementById('menu-multiplayer-status');
                     if (tag) {
                         tag.hidden = status === 'idle';
@@ -953,10 +987,11 @@
                     // signals it quietly.
                     prevPeerStatus = status;
                 });
-                ArcadeP2P.onRosterChange((peers) => {
-                    // Per-peer roster for multi-seat games — one coarse event
-                    // with the full roster (arcade:welcome.peers seeds it).
-                    broadcast({ type: 'arcade:peer.roster', peers });
+                ArcadeP2P.onRosterChange(() => {
+                    // Per-peer roster for multi-seat games — re-derived PER
+                    // GAME (each sees only its attached party's seats;
+                    // arcade:welcome.peers seeds it the same way).
+                    pushGameScopes();
                 });
                 ArcadeP2P.onPresence(({ gameId, deviceId, name, kind }) => {
                     // The remote launcher has <gameId> mounted and listening.

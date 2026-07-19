@@ -88,6 +88,8 @@
  *                                 reason: 'timeout'|'aborted'|'integrity'
  *                                 |'malformed'|'oversize'|'too-many', ... }
  *   Arcade.peer.queue() / onQueue(fn)             replay-queue visibility
+ *   Arcade.peer.party() / parties() / attach(id)  multi-party star selection
+ *                                 (cap 'peer.party'; auto-attached otherwise)
  *
  *   // Launcher-mediated UI (#35 — real modals despite the sandbox no-oping
  *   // window.confirm/prompt; framed ops need the launcher's 'ui.bridge' cap
@@ -157,7 +159,7 @@
     // tools/sdk-version-unit.mjs enforces all three. Launcher↔SDK compat is
     // still negotiated by welcome.caps, never by this number; it exists for
     // humans (bug reports, CHANGELOG) and for the pinned-URL publish scheme.
-    var SDK_SEMVER = '3.0.0';
+    var SDK_SEMVER = '3.1.0';
     var HANDSHAKE_TIMEOUT_MS = 300;
     // Opaque-origin (sandboxed, no allow-same-origin) frames have no storage
     // to fall back to, so waiting longer for the launcher costs nothing and
@@ -1870,6 +1872,39 @@
         // sides announce); treat it as an idempotent "peer is ready" signal.
         // Replaces the hand-rolled hello/echo handshake games used to need.
         onReady: makeSubscriber(listeners.peerReady),
+
+        // ─── Parties (star-selection hook; cap 'peer.party') ────────────
+        // A device can hold several concurrent parties (independent
+        // connection stars); a running game is attached to exactly ONE, and
+        // its whole peer surface — status/send/peers/onReady — reflects
+        // only that party. With a single party the launcher auto-attaches
+        // and games never need these; a game that cares can introspect and
+        // choose instead of relying on the launcher's picker. All three
+        // resolve async (launcher round-trip). Party entries look like
+        // { id, role: 'leader'|'member', leaderName, status, peers } — id is
+        // launcher-local and session-scoped: compare and pass it back, never
+        // persist or show it.
+        //
+        // party()  → the attached party entry, or null when unattached.
+        // parties()→ every party this game could attach to (possibly []).
+        // attach(partyId) → request re-attachment; resolves to the
+        //   resulting party entry, or null if the launcher refused.
+        party: function () {
+            if (!framed || peerCaps.indexOf('peer.party') === -1) return Promise.resolve(null);
+            return bridgeRpc('arcade:peer.party.op', { op: 'get' }).catch(function () { return null; });
+        },
+        parties: function () {
+            if (!framed || peerCaps.indexOf('peer.party') === -1) return Promise.resolve([]);
+            return bridgeRpc('arcade:peer.party.op', { op: 'list' }).then(function (v) {
+                return Array.isArray(v) ? v : [];
+            }).catch(function () { return []; });
+        },
+        attach: function (partyId) {
+            if (typeof partyId !== 'string' || !partyId) return Promise.resolve(null);
+            if (!framed || peerCaps.indexOf('peer.party') === -1) return Promise.resolve(null);
+            return bridgeRpc('arcade:peer.party.op', { op: 'attach', partyId: partyId })
+                .catch(function () { return null; });
+        },
 
         // Send a Blob/File to the peer(s), chunked over the ordered channel.
         // Resolves { id, chunks, size } after the last chunk is handed to

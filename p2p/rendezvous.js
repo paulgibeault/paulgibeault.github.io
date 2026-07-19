@@ -268,12 +268,19 @@ export class RendezvousManager extends EventTarget {
      * @param {number} [options.answerStallMs=30000]    - retire an exchange that never connects
      * @param {number} [options.rearmDelayMs=60000]     - retry delay after a hard episode error
      * @param {number} [options.standbyMaxAgeMs]        - standbyAll() skips pairs unseen this long (30d)
+     * @param {(pairId: string) => string|null} [options.adoptPartyId] - resolves
+     *        the partyId a reconnected pair's link should be adopted into when
+     *        NO prior session exists (v1.13 multi-party restart resume). With a
+     *        prior live/stashed session its own partyId always wins; returning
+     *        null falls back to PeerManager.adoptConnection's built-in party
+     *        derivation, which is correct for the single-party world.
      */
     constructor(peerManager, options = {}) {
         super();
         this.pm = peerManager;
         this.options = {
             carrierFactory: options.carrierFactory || null,
+            adoptPartyId: typeof options.adoptPartyId === 'function' ? options.adoptPartyId : null,
             listenerDelayMs: options.listenerDelayMs ?? 15000,
             callerDelayMs: options.callerDelayMs ?? 30000,
             episodeTimeoutMs: options.episodeTimeoutMs ?? 600000,
@@ -376,6 +383,24 @@ export class RendezvousManager extends EventTarget {
      * record (or null) and returns the record to store, or falsy to store
      * nothing. Resolves to the record now in force (or null).
      */
+    /**
+     * Adoption options for one pair's reconnected link: fallbackType plus —
+     * when the app supplied an adoptPartyId resolver — the party the link
+     * should land in if no prior session survives to decide it (v1.13).
+     * Resolver failures degrade to the core's own party fallback, never
+     * block the adoption itself.
+     */
+    _adoptOpts(pairId, fallbackType) {
+        const opts = { fallbackType };
+        if (this.options.adoptPartyId) {
+            try {
+                const partyId = this.options.adoptPartyId(pairId);
+                if (typeof partyId === 'string' && partyId) opts.partyId = partyId;
+            } catch (e) {}
+        }
+        return opts;
+    }
+
     _updateRec(pairId, mutate, opts) {
         return this._serial(this._recWrites, pairId, async () => {
             // A pair the user forgot via disablePair() must stay forgotten: a
@@ -1088,7 +1113,7 @@ export class RendezvousManager extends EventTarget {
                     // in-band) was untouched until this very moment.
                     const ep = this.episodes.get(pairId);
                     if (!ep || !ep.shadow) break;
-                    this.pm.adoptConnection(ep.peerId, ep.shadow.pc, ep.shadow.dc, { fallbackType: 'client' });
+                    this.pm.adoptConnection(ep.peerId, ep.shadow.pc, ep.shadow.dc, this._adoptOpts(pairId, 'client'));
                     ep.shadow.adopted = true;
                     break;
                 }
@@ -1116,7 +1141,7 @@ export class RendezvousManager extends EventTarget {
                     if (!ep || ep.settled) { try { built.pc.close(); } catch (e) {} break; }
                     const { pc, payload } = built;
                     try {
-                        this.pm.adoptConnection(payload.peerId, pc, null, { fallbackType: 'host' });
+                        this.pm.adoptConnection(payload.peerId, pc, null, this._adoptOpts(pairId, 'host'));
                         const answerPayload = JSON.stringify({
                             peerId: payload.peerId,
                             n: payload.n || undefined,
