@@ -45,6 +45,10 @@ try {
     // populated (a leaderboard whose 2nd entry name is an XSS payload, plus a
     // duration record and an untouchable state key); C is pure garbage.
     await page.addInitScript(({ A, C }) => {
+        // addInitScript runs in every document, including the opaque-origin game
+        // frames mounted later — where localStorage throws. Only seed the top
+        // launcher window.
+        try { if (window.top !== window) return; } catch (e) { return; }
         const set = (k, v) => localStorage.setItem(k, JSON.stringify(v));
         set(`arcade.v1.${A}.scores.high`, [
             { score: 100, name: 'Ada', ts: 1700000000000 },
@@ -135,6 +139,38 @@ try {
     check('reset wiped scores / _scoreOrders / records', afterReset.scores === null && afterReset.orders === null && afterReset.records === null);
     check('reset spared the game’s state key', afterReset.state !== null);
     check('active tab flips to empty after reset', afterReset.activeEmpty === true);
+
+    // ── live update (R3): a bridged game write repaints the open sheet ──
+    // Mount game B (the bridge-test fixture inits the SDK as `bridge-test` in
+    // bridged mode) and select its (empty) tab, then write a record from inside
+    // the frame. The write rides the storage bridge to launcher localStorage,
+    // whose onStateWritten hook fans out to the open sheet — same-window storage
+    // events never fire, so this hook is the whole live-update mechanism.
+    const GAME_PATH = `/tools/fixtures/${B}/`;
+    await page.evaluate(([id, src]) => window.__arcade.showGame(id, src, id), [B, GAME_PATH]);
+    let frame = null;
+    for (let i = 0; i < 100 && !frame; i++) {
+        frame = page.frames().find((f) => f.url().includes(GAME_PATH));
+        if (!frame) await page.waitForTimeout(50);
+    }
+    if (!frame) throw new Error('game frame never appeared');
+    await frame.evaluate(() => window.Arcade.ready);
+    await page.evaluate(() => window.__arcade.records.open());
+    await page.click(`#records-dialog-tabs .records-tab[data-game-id="${B}"]`); // make B the active tab
+    const beforeLive = await page.evaluate(() => document.getElementById('records-dialog-body').textContent);
+    check('sheet tab is empty before the live write', !beforeLive.includes('Speedrun'));
+
+    await frame.evaluate(() => window.Arcade.records.set('speedrun', { value: 55000, direction: 'lower', format: 'duration-ms', label: 'Speedrun' }));
+    let repainted = true;
+    try {
+        await page.waitForFunction(() => document.getElementById('records-dialog-body').textContent.includes('0:55.00'), null, { timeout: 4000 });
+    } catch (e) { repainted = false; }
+    const liveView = await page.evaluate((B) => ({
+        body: document.getElementById('records-dialog-body').textContent,
+        badge: (document.querySelector(`.records-tab[data-game-id="${B}"] .records-tab__badge`) || {}).textContent || ''
+    }), B);
+    check('bridged records.set repaints the active tab live', repainted && liveView.body.includes('Speedrun'));
+    check('the written game’s tab badge updates live', liveView.badge === '1', liveView.badge);
 } catch (e) {
     check('run completed', false, e.message);
 } finally {

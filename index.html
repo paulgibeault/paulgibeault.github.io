@@ -1663,8 +1663,13 @@
         broadcastSettings: () => window.__arcade.broadcastSettings(),
         replayPendingStorageMessages: router.replayPendingStorageMessages,
         // Sync engine hooks (arcade-sync.js) — no-ops until module block D
-        // wires window.__arcade.sync.
-        onStateWritten: (gameId, key, value) => { if (window.__arcade.sync) window.__arcade.sync.noteLocalWrite(key, value); },
+        // wires window.__arcade.sync. The Records sheet (arcade-records.js)
+        // rides the same hook: same-window storage events never fire, so a
+        // bridged game write is the only signal an open sheet gets to refresh.
+        onStateWritten: (gameId, key, value) => {
+            if (window.__arcade.sync) window.__arcade.sync.noteLocalWrite(key, value);
+            if (window.__arcade.records) window.__arcade.records.noteStateWritten(gameId, key, value);
+        },
         onImportCommitted: (keys, journal) => { if (window.__arcade.sync) window.__arcade.sync.noteImportCommitted(keys, journal); },
         // Bundle provenance (durability design §4): buildBundle stamps the
         // journal section from the sync engine's merged record classes.
