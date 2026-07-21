@@ -310,6 +310,9 @@ Ground rules:
 
 - [ ] Use `Arcade.player.name()` / `Arcade.player.setName(s)` for the sticky display name. It lives at `arcade.v1.global.playerName` so every game shares it.
 - [ ] If your game has a leaderboard, use `Arcade.scores.add(category, { score, name?, key?, meta? }, opts?)` and `Arcade.scores.list(category, { limit })`. The SDK keeps the top 100 sorted and stamps `name` (from `Arcade.player.name()`) and `ts` automatically. Higher-is-better is the default; time/move-count games pass `{ order: 'asc' }` on every add so lower scores rank first.
+  - **Leaderboards are shared across a player's linked devices.** When two devices are paired and have per-peer sync turned on (Multiplayer → 🔄), the launcher union-merges each device's board into the other's — so `Arcade.scores.list` transparently returns everyone's entries, deduped and re-sorted, capped at 100. Your game does nothing extra: keep calling `add`/`list` as normal. (The SDK stamps a hidden `dev`/`eid` on each entry so merges never drop or double-count a play; don't rely on those fields.)
+- [ ] For a **single personal best per category** (best time for a mode, fewest moves, high percentage) — one value, not a ranked list — use `Arcade.records` rather than bending `scores`. `Arcade.records.best(category, { value, direction, format?, label? })` writes only when the value improves; `direction` is `'higher'` (scores) or `'lower'` (times, move counts), so the record is self-describing and the launcher's **Records** sheet can render it with no per-game code. This is the first-class replacement for the `scores.add(cat, { score: -timeMs })`-then-re-negate trick. `format` is `'duration-ms' | 'integer' | 'percentage'`. Read back with `Arcade.records.get(category)` / `Arcade.records.list()`.
+  - **Which of the three?** `scores` = a sorted leaderboard with many entrants (top-N, names). `records` = one best-ever value per category, self-describing. `stats` = mutable counters/blobs (games played, streaks) that you own the formatting of.
 - [ ] For best-per-thing records (best time per board code, best score per level), stamp each entry with `key` and read back with `Arcade.scores.best(category, key)`. If you need a full keyed map rather than a ranked list, `Arcade.stats` is the blessed home — `Arcade.stats.update(category, prev => ({ ...prev, [boardCode]: bestMs }))`.
 - [ ] If your game tracks counters (games played / won / streak / best time), use `Arcade.stats.update(category, prev => next)` for atomic-style updates and `Arcade.stats.get(category)` to read. When adding a new field to an existing stats category, use `Arcade.stats.getOrInit(category, DEFAULTS)` instead of `get` — it deep-merges defaults under the stored value so saves from older versions pick up newly-added fields without a migration.
 
@@ -582,7 +585,7 @@ Arcade.peer.status();              // 'unavailable' | 'idle' | 'connecting' | 'c
 Arcade.peer.onStatus(s => ...);    // gate multiplayer UI on this (your game's ATTACHED PARTY — see below)
 Arcade.peer.caps();                // launcher capability flags: feature-detect additive features
                                    // ('peer.sendTo', 'peer.roster', 'peer.meta', 'peer.party',
-                                   // 'storage.bridge', 'ui.bridge'); [] standalone or older launcher
+                                   // 'storage.bridge', 'ui.bridge', 'configs.bridge'); [] standalone or older launcher
 Arcade.peer.send({ move: 'e4' });  // broadcast; JSON-safe payload; false unless connected/interrupted
 Arcade.peer.send(hand, { to });    // targeted: only deviceId `to` receives it (cap 'peer.sendTo')
 Arcade.peer.onMessage((payload, fromPeer, meta) => ...);  // fromPeer = sender's stable deviceId;
@@ -743,6 +746,45 @@ if (parsed && parsed.v === 2) load(parsed.data);
 variant; prefer `Arcade.rng`. Feature-detect on older launcher-served SDKs
 with `typeof Arcade.rng === 'function'` — everything here is purely local
 (no launcher messages involved).
+
+---
+
+## 7d. Config exchange — `Arcade.configs` (share game configs, packs, variants)
+
+Let players share and load a **named game configuration** — a sowduku pack, a
+cardstock card-game variant, a puzzle seed — over any channel (a link/code) or
+straight to a linked device. The launcher handles transport and consent; your
+game defines the config's shape.
+
+```js
+// Receive: register a handler per config type. `data` is HOSTILE cross-device
+// input — semantic-validate every field and render only via textContent /
+// Arcade.html.escape, never innerHTML. (Feature-detect: typeof Arcade.configs.)
+Arcade.configs.register('pack', ({ type, v, data }) => {
+    if (!isValidPack(data)) return;           // YOUR validation — never trust it
+    installPack(data);
+});
+
+// Share as a code + deep link (framed: opens the OS share sheet / copies a
+// link; standalone: resolves { ok, code } so you can show/copy it yourself).
+const { ok, url, code } = await Arcade.configs.share('pack', myPack);
+
+// Or push directly to a linked device (the user picks the peer + the receiver
+// is prompted before your handler ever runs).
+const { ok, sent } = await Arcade.configs.send('pack', myPack);
+```
+
+- **Types** match `^[a-z0-9_-]{1,32}$`. The payload's `data` must serialize to
+  ≤ 8 KB (a share code caps at ~4 KB); for anything larger use `Arcade.store` +
+  save export.
+- **The launcher validates transport shape only** (code charset/size, type,
+  that the game id is in the catalog) and always prompts the user before
+  delivery. It never interprets `data`. **Security is on you:** treat inbound
+  `data` as an attacker's input — the exact stored-XSS class that bit hand-rolled
+  "paste this pack" sharing. Validate types/lengths, and escape before render.
+- **Delivery timing:** a config can arrive before your `register()` runs (e.g. a
+  cold-launch from a link) — the SDK queues a few and drains them on register,
+  so registering early at startup is enough.
 
 ---
 
@@ -974,6 +1016,14 @@ child  → parent: arcade:peer.party.op      { op: 'get'|'list'|'attach', id, pa
                                            // cap 'peer.party'; answered via arcade:bridge.result
                                            // (value: party entry | entry list | null)
 child  → parent: arcade:ui.toast           { message, kind, duration }
+
+— config exchange (§7d; cap 'configs.bridge'; the SDK speaks this for you) —
+child  → parent: arcade:configs.op         { op: 'share', id, code } | { op: 'send', id, t, d }
+                                           // RPC; answered via arcade:bridge.result
+                                           // (value: { ok, url?, shared? } | { ok, sent })
+parent → child:  arcade:config             { t, v, d }               // a config the launcher accepted +
+                                                                    // prompted the user about — data is HOSTILE
+child  → parent: arcade:config.ack         { t, ok }                 // your handler accepted it (cancels a toast)
 
 — ui chrome bridge (§7; the SDK speaks this for you) —
 child  → parent: arcade:ui.op              { op: 'confirm'|'prompt'|'openFile'|'share', id, ... }

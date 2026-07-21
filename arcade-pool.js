@@ -44,6 +44,7 @@ export function initIframePool(host) {
     // SDK is actually listening. Presence announcements to the remote
     // launcher are made only for these.
     const helloedGames = new Set();
+    const helloListeners = []; // fn(gameId) — fired when a game completes hello (config delivery seam)
     let activeGameId = null;
     const POOL_CAP_DEFAULT = 2;
 
@@ -294,7 +295,13 @@ export function initIframePool(host) {
         mountedGameIds: () => [...pool.keys()],
         has: (gameId) => pool.has(gameId),
         isHelloed: (gameId) => helloedGames.has(gameId),
-        markHelloed: (gameId) => { helloedGames.add(gameId); },
+        markHelloed: (gameId) => {
+            helloedGames.add(gameId);
+            for (const fn of helloListeners) { try { fn(gameId); } catch (e) {} }
+        },
+        // Subscribe to "a game completed its hello handshake" — the config
+        // engine uses it to deliver a stashed config once the frame is live.
+        onHelloed: (fn) => { helloListeners.push(fn); return () => { const i = helloListeners.indexOf(fn); if (i >= 0) helloListeners.splice(i, 1); }; },
         getActiveGameId: () => activeGameId,
         getGameName: (gameId) => { const e = pool.get(gameId); return e ? (e.name || '') : ''; },
         // name + src for toast/relaunch affordances — never the entry itself,

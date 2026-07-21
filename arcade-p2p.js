@@ -31,6 +31,18 @@
  *     host-forwarded — and dispatched to onSyncEnvelope(fn) listeners as
  *     fn(fromDeviceId, env). Sent with sendSyncEnvelope(deviceId, env), which
  *     targets exactly that device's direct link.
+ *   { arcade: 1, kind: 'leaderboard', op: 'boards', entries: [{k,order,list}] }
+ *     — shared-leaderboard board push (see arcade-leaderboard.js). Union-merge,
+ *     NOT LWW: scores keys are carved out of 'sync' and replicated here so both
+ *     devices keep every entry. Same delivery rules as 'sync' (direct link +
+ *     identity binding); carries NO top-level gameId (game identity is inside
+ *     each entry's key). onLeaderboardEnvelope(fn) / sendLeaderboardEnvelope.
+ *   { arcade: 1, kind: 'config', v, g, t, d } — a direct game-config push
+ *     (#config-exchange): send `d` of type `t` for game `g` to a linked device.
+ *     Same delivery rules as 'sync' (direct link + identity binding) but NOT
+ *     gated on the sync opt-in — it's an explicit user action and the receiver
+ *     is prompted. NO top-level gameId (game id rides in `g`).
+ *     onConfigEnvelope(fn) / sendConfigEnvelope(deviceId, env).
  *   { arcade: 1, kind: 'backup', ... }    — backup-to-trusted-peer transfer
  *     frames (offer/accept/decline/chunk/ack; see arcade-backup.js). Same
  *     delivery rules as 'sync': direct links with a completed identity
@@ -1068,6 +1080,8 @@ let sdkStatus = 'idle';
 const statusListeners = [];
 const messageListeners = []; // fn(gameId, payload, fromDeviceId, meta)
 const syncListeners = []; // fn(fromDeviceId, env)
+const leaderboardListeners = []; // fn(fromDeviceId, env)
+const configListeners = []; // fn(fromDeviceId, env)
 const backupListeners = []; // fn(fromDeviceId, env)
 
 function setStatus(next) {
@@ -1284,6 +1298,29 @@ async function ensureAddon() {
                 const syncDev = deviceIdForPeerId(d.peerId);
                 if (!syncDev) return;
                 for (const fn of syncListeners) { try { fn(syncDev, env); } catch (err) {} }
+                return;
+            }
+            if (shape.kind === 'leaderboard') {
+                // Shared-leaderboard board frames: same delivery rules as 'sync'
+                // (direct links only, identity binding required). Game identity
+                // rides inside each entry's key — this frame carries NO top-level
+                // gameId, so a legacy launcher drops it instead of misrouting it.
+                if (d.relayed) return;
+                const lbDev = deviceIdForPeerId(d.peerId);
+                if (!lbDev) return;
+                for (const fn of leaderboardListeners) { try { fn(lbDev, env); } catch (err) {} }
+                return;
+            }
+            if (shape.kind === 'config') {
+                // Direct game-config push (#config-exchange): direct link +
+                // identity binding only (like 'sync'), but NOT gated on
+                // syncEnabled — it's an explicit user action, and the receiver
+                // is prompted before anything reaches a game. No top-level
+                // gameId (the game id rides inside `g`).
+                if (d.relayed) return;
+                const cfgDev = deviceIdForPeerId(d.peerId);
+                if (!cfgDev) return;
+                for (const fn of configListeners) { try { fn(cfgDev, env); } catch (err) {} }
                 return;
             }
             if (shape.kind === 'backup') {
@@ -1681,6 +1718,50 @@ export const ArcadeP2P = {
         const pid = deviceIndex.get(deviceId);
         if (pid === undefined || !seatReachable(pid)) return false;
         return addon.sendTo(pid, { ...env, arcade: 1, kind: 'sync' });
+    },
+
+    /** Subscribe to launcher-level leaderboard envelopes: fn(fromDeviceId, env). Direct links only. */
+    onLeaderboardEnvelope(fn) {
+        leaderboardListeners.push(fn);
+        return () => {
+            const i = leaderboardListeners.indexOf(fn);
+            if (i >= 0) leaderboardListeners.splice(i, 1);
+        };
+    },
+
+    /**
+     * Send a launcher-level leaderboard (shared-board) envelope to one paired
+     * device over its DIRECT link only — same contract as sendSyncEnvelope
+     * (see the transport listener's `kind:'leaderboard'` branch). Carries NO
+     * top-level gameId. Returns false when unreachable.
+     */
+    sendLeaderboardEnvelope(deviceId, env) {
+        if (!addon || (sdkStatus !== 'connected' && sdkStatus !== 'interrupted')) return false;
+        const pid = deviceIndex.get(deviceId);
+        if (pid === undefined || !seatReachable(pid)) return false;
+        return addon.sendTo(pid, { ...env, arcade: 1, kind: 'leaderboard' });
+    },
+
+    /** Subscribe to launcher-level config-push envelopes: fn(fromDeviceId, env). Direct links only. */
+    onConfigEnvelope(fn) {
+        configListeners.push(fn);
+        return () => {
+            const i = configListeners.indexOf(fn);
+            if (i >= 0) configListeners.splice(i, 1);
+        };
+    },
+
+    /**
+     * Push a game-config envelope to one paired device over its DIRECT link
+     * only — same contract as sendSyncEnvelope (see the `kind:'config'` branch).
+     * Carries NO top-level gameId (game id rides in `g`). Returns false when
+     * unreachable.
+     */
+    sendConfigEnvelope(deviceId, env) {
+        if (!addon || (sdkStatus !== 'connected' && sdkStatus !== 'interrupted')) return false;
+        const pid = deviceIndex.get(deviceId);
+        if (pid === undefined || !seatReachable(pid)) return false;
+        return addon.sendTo(pid, { ...env, arcade: 1, kind: 'config' });
     },
 
     /** Subscribe to launcher-level backup envelopes: fn(fromDeviceId, env). Direct links only. */

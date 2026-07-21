@@ -126,6 +126,131 @@ try {
     check('share.decode(oversize) → null', r.oversizeNull);
     check('share.decode(tampered) never throws', r.tamperNoThrow && r.tamperNullOrValid);
     check('share.decode strips prototype-polluting keys', r.noPollution && r.protoKeyStripped);
+
+    // ── Arcade.records — personal-bests API (#9) ──
+    const rec = await page.evaluate(() => {
+        const out = {};
+        const warns = [];
+        const origWarn = console.warn;
+        console.warn = (...a) => { warns.push(a.join(' ')); };
+        try {
+            const R = Arcade.records;
+            out.isObj = !!R && typeof R.set === 'function' && typeof R.best === 'function';
+
+            // set/get roundtrip + ts auto-stamp
+            const before = Date.now();
+            const stored = R.set('lvl1', { value: 1500, direction: 'higher', label: 'High Score', format: 'integer', meta: { moves: 12 } });
+            const got = R.get('lvl1');
+            out.roundTrip = !!got && got.value === 1500 && got.direction === 'higher'
+                && got.label === 'High Score' && got.format === 'integer'
+                && !!got.meta && got.meta.moves === 12;
+            out.tsStamped = typeof got.ts === 'number' && got.ts >= before;
+            out.setReturnsStored = !!stored && stored.value === 1500;
+
+            // set throws on the load-bearing fields
+            const threw = (fn) => { try { fn(); return false; } catch (e) { return true; } };
+            out.throwsEmptyCat = threw(() => R.set('', { value: 1, direction: 'higher' }));
+            out.throwsBadValue = threw(() => R.set('c', { value: 'nope', direction: 'higher' }));
+            out.throwsNaN = threw(() => R.set('c', { value: NaN, direction: 'higher' }));
+            out.throwsMissingDir = threw(() => R.set('c', { value: 1 }));
+            out.throwsBadDir = threw(() => R.set('c', { value: 1, direction: 'up' }));
+
+            // oversized meta dropped (record still stored), warn emitted
+            warns.length = 0;
+            const bm = R.set('metatest', { value: 5, direction: 'higher', meta: { blob: 'x'.repeat(5000) } });
+            out.metaDropped = bm.meta === undefined && R.get('metatest').meta === undefined && R.get('metatest').value === 5;
+            out.metaWarned = warns.some(w => /meta dropped/.test(w));
+            // non-object meta dropped too
+            out.nonObjMetaDropped = R.set('metatest2', { value: 5, direction: 'higher', meta: 'nope' }).meta === undefined;
+
+            // best(): first write / better / worse / tie / direction mismatch
+            const b1 = R.best('time', { value: 5000, direction: 'lower', format: 'duration-ms' });
+            out.bestFirst = b1.improved === true && b1.record.value === 5000;
+            const b2 = R.best('time', { value: 4000, direction: 'lower' });
+            out.bestBetter = b2.improved === true && R.get('time').value === 4000;
+            const b3 = R.best('time', { value: 9000, direction: 'lower' });
+            out.bestWorse = b3.improved === false && R.get('time').value === 4000;
+            // tie does not write — original ts preserved
+            const tieTsBefore = R.get('time').ts;
+            const b4 = R.best('time', { value: 4000, direction: 'lower' });
+            out.bestTie = b4.improved === false && R.get('time').ts === tieTsBefore;
+            // direction mismatch warns; stored direction ('lower') decides, so a
+            // 'higher' candidate with a lower value still improves
+            warns.length = 0;
+            const b5 = R.best('time', { value: 3000, direction: 'higher' });
+            out.bestMismatchWarned = warns.some(w => /direction/.test(w) && /ignored/.test(w));
+            out.bestMismatchStoredWins = b5.improved === true
+                && R.get('time').direction === 'lower' && R.get('time').value === 3000;
+
+            // list() skips corrupt + wrong-shape, includes valid own-game records
+            const prefix = 'arcade.v1.store-test.records.';
+            localStorage.setItem(prefix + 'corrupt', '{not json');
+            localStorage.setItem(prefix + 'wrongshape', JSON.stringify({ value: 'x', direction: 'higher' }));
+            localStorage.setItem(prefix + 'nodir', JSON.stringify({ value: 5 }));
+            const list = R.list();
+            out.listHasValid = !!list.lvl1 && !!list.time && !!list.metatest;
+            out.listSkipsBad = !('corrupt' in list) && !('wrongshape' in list) && !('nodir' in list);
+
+            // clear → get null
+            R.clear('lvl1');
+            out.cleared = R.get('lvl1') === null;
+
+            // get returns a fresh object (mutating it does not touch storage)
+            R.set('fresh', { value: 10, direction: 'higher' });
+            R.get('fresh').value = 999;
+            out.getFresh = R.get('fresh').value === 10;
+        } finally {
+            console.warn = origWarn;
+        }
+        return out;
+    });
+
+    check('Arcade.records exposes set/best/get/list/clear', rec.isObj);
+    check('records.set/get round-trips all fields, ts auto-stamped', rec.roundTrip && rec.tsStamped);
+    check('records.set returns the stored record', rec.setReturnsStored);
+    check('records.set throws on empty category', rec.throwsEmptyCat);
+    check('records.set throws on non-finite value', rec.throwsBadValue && rec.throwsNaN);
+    check('records.set throws on missing/invalid direction', rec.throwsMissingDir && rec.throwsBadDir);
+    check('records.set drops oversized meta (record kept) with a warn', rec.metaDropped && rec.metaWarned);
+    check('records.set drops non-object meta', rec.nonObjMetaDropped);
+    check('records.best first write improves', rec.bestFirst);
+    check('records.best writes a better value', rec.bestBetter);
+    check('records.best rejects a worse value', rec.bestWorse);
+    check('records.best tie does not write (ts preserved)', rec.bestTie);
+    check('records.best warns on direction mismatch, stored direction decides', rec.bestMismatchWarned && rec.bestMismatchStoredWins);
+    check('records.list returns valid own records', rec.listHasValid);
+    check('records.list skips corrupt / wrong-shape entries', rec.listSkipsBad);
+    check('records.clear removes the record', rec.cleared);
+    check('records.get returns a fresh object each call', rec.getFresh);
+
+    // ── Arcade.configs — config-exchange SDK surface (standalone) ──
+    const cfg = await page.evaluate(async () => {
+        const out = {};
+        const C = Arcade.configs;
+        out.hasApi = !!C && typeof C.register === 'function' && typeof C.share === 'function' && typeof C.send === 'function';
+        const threw = (fn) => { try { fn(); return false; } catch (e) { return true; } };
+        out.regThrowsBadType = threw(() => C.register('BAD TYPE', () => {}));
+        out.regThrowsBadHandler = threw(() => C.register('pack', 'nope'));
+        const unreg = C.register('pack', () => {});
+        out.regReturnsUnsub = typeof unreg === 'function';
+        const shared = await C.share('pack', { name: 'Weekend' });
+        out.shareStandalone = !!shared && shared.ok === true && typeof shared.code === 'string' && shared.url === null;
+        const dec = Arcade.share.decode(shared.code);
+        out.shareCodeDecodes = !!dec && !!dec.data && dec.data.g === 'store-test' && dec.data.t === 'pack' && dec.data.d.name === 'Weekend';
+        let rejected = false;
+        try { await C.share('pack', { big: 'x'.repeat(9000) }); } catch (e) { rejected = true; }
+        out.shareOversizeRejects = rejected;
+        const sent = await C.send('pack', { x: 1 });
+        out.sendStandalone = !!sent && sent.ok === false;
+        unreg();
+        return out;
+    });
+    check('Arcade.configs exposes register/share/send', cfg.hasApi);
+    check('configs.register validates type + handler', cfg.regThrowsBadType && cfg.regThrowsBadHandler);
+    check('configs.register returns an unsubscribe fn', cfg.regReturnsUnsub);
+    check('configs.share (standalone) returns a decodable code, no url', cfg.shareStandalone && cfg.shareCodeDecodes);
+    check('configs.share rejects an oversized config', cfg.shareOversizeRejects);
+    check('configs.send (standalone) resolves { ok:false }', cfg.sendStandalone);
 } catch (e) {
     check('run completed', false, e.message);
 } finally {

@@ -310,6 +310,10 @@
         </div>
         <div class="launcher-menu__section">
             <div class="launcher-menu__heading">Game Data</div>
+            <button type="button" class="launcher-menu__item" id="menu-records" title="View leaderboards and personal records across every game on this device">
+                <span class="launcher-menu__item-icon" aria-hidden="true">🏆</span>
+                <span class="launcher-menu__item-label">Records</span>
+            </button>
             <button type="button" class="launcher-menu__item" id="btn-save" title="Export all arcade save data to a JSON file">
                 <span class="launcher-menu__item-icon" aria-hidden="true">↧</span>
                 <span class="launcher-menu__item-label">Export to File</span>
@@ -467,6 +471,31 @@
     </div>
 </div>
 
+<!-- ========== RECORDS DIALOG ========== -->
+<!-- Leaderboards + personal records aggregated across every catalog game
+     (issues #9 / #12). The launcher reads each game's arcade.v1.<id>.scores.*
+     / .records.* keys straight from its own localStorage (games are
+     opaque-origin frames that can't touch it), so there is no per-game code
+     here — the tabs come from catalog.json and records are self-describing.
+     Rendered entirely by arcade-records.js; this is just the shell. -->
+<div class="records-dialog" id="records-dialog" hidden>
+    <div class="records-dialog__panel" role="dialog" aria-modal="true" aria-labelledby="records-dialog-title">
+        <div class="records-dialog__watermark" id="records-dialog-watermark" aria-hidden="true"></div>
+        <header class="records-dialog__header">
+            <div class="records-dialog__titlewrap">
+                <h2 id="records-dialog-title">🏆 Records</h2>
+                <p class="records-dialog__subtitle">Your best across every game</p>
+            </div>
+            <button type="button" class="records-dialog__close" id="records-dialog-close" aria-label="Close">✕</button>
+        </header>
+        <div class="records-dialog__tabs" id="records-dialog-tabs" role="tablist" aria-label="Games"></div>
+        <div class="records-dialog__body" id="records-dialog-body" role="tabpanel" aria-live="polite"></div>
+        <footer class="records-dialog__footer">
+            <button type="button" class="records-dialog__reset" id="records-dialog-reset" hidden>Reset all records for this game</button>
+        </footer>
+    </div>
+</div>
+
 <div class="page-wrapper">
 
     <!-- ========== LAUNCHER HEADER ========== -->
@@ -493,21 +522,6 @@
         <span class="net-watermark__label" id="net-watermark-label"></span>
     </div>
     <div class="visually-hidden" id="net-activity-live" role="status" aria-live="polite"></div>
-
-    <!-- Non-blocking confirm/prompt. window.confirm/prompt freeze the event
-         loop — fired right after a P2P channel opens (naming a new connection,
-         the auto-reconnect opt-in) that stalls heartbeats and the peer sees the
-         fresh link flap to 'interrupted'. This modal keeps the loop running. -->
-    <div id="arcade-dialog" class="arcade-dialog-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="arcade-dialog-msg">
-        <div class="arcade-dialog">
-            <p class="arcade-dialog__msg" id="arcade-dialog-msg"></p>
-            <input type="text" class="arcade-dialog__input hidden" id="arcade-dialog-input" autocomplete="off">
-            <div class="arcade-dialog__actions">
-                <button type="button" class="topbar-btn arcade-dialog__btn" id="arcade-dialog-cancel">Cancel</button>
-                <button type="button" class="topbar-btn arcade-dialog__btn" id="arcade-dialog-ok">OK</button>
-            </div>
-        </div>
-    </div>
 
     <!-- ========== GAME VIEW ========== -->
     <div id="view-game" class="hidden">
@@ -544,6 +558,24 @@
         </div>
     </div>
 
+</div>
+
+<!-- Non-blocking confirm/prompt. window.confirm/prompt freeze the event loop —
+     fired right after a P2P channel opens (naming a new connection, the
+     auto-reconnect opt-in) that stalls heartbeats and the peer sees the fresh
+     link flap to 'interrupted'. This modal keeps the loop running. Lives at
+     body level (not inside .page-wrapper, which is a z-index:2 stacking context)
+     so its z-index:5000 is honoured above every dialog — otherwise a confirm
+     opened from a sibling modal (Multiplayer, Records) renders behind it. -->
+<div id="arcade-dialog" class="arcade-dialog-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="arcade-dialog-msg">
+    <div class="arcade-dialog">
+        <p class="arcade-dialog__msg" id="arcade-dialog-msg"></p>
+        <input type="text" class="arcade-dialog__input hidden" id="arcade-dialog-input" autocomplete="off">
+        <div class="arcade-dialog__actions">
+            <button type="button" class="topbar-btn arcade-dialog__btn" id="arcade-dialog-cancel">Cancel</button>
+            <button type="button" class="topbar-btn arcade-dialog__btn" id="arcade-dialog-ok">OK</button>
+        </div>
+    </div>
 </div>
 
 <script>
@@ -1157,6 +1189,8 @@
                 p2pBridge = ArcadeP2P;
                 window.__arcade.p2p = ArcadeP2P; // debug + acceptance tests
                 if (window.__arcade.sync) window.__arcade.sync.attachP2P(ArcadeP2P);
+                if (window.__arcade.leaderboard) window.__arcade.leaderboard.attachP2P(ArcadeP2P);
+                if (window.__arcade.configs) window.__arcade.configs.attachP2P(ArcadeP2P);
                 if (window.__arcade.backup) window.__arcade.backup.attachP2P(ArcadeP2P);
                 return ArcadeP2P;
             }).catch((e) => {
@@ -1523,6 +1557,7 @@
             getP2P: () => p2pBridge,
             getStorage: () => window.__arcade.storage,
             getUi: () => window.__arcade.ui,
+            getConfigs: () => window.__arcade.configs,
             getEnvelope: () => window.__arcade.envelope
         };
     })();
@@ -1635,8 +1670,16 @@
         broadcastSettings: () => window.__arcade.broadcastSettings(),
         replayPendingStorageMessages: router.replayPendingStorageMessages,
         // Sync engine hooks (arcade-sync.js) — no-ops until module block D
-        // wires window.__arcade.sync.
-        onStateWritten: (gameId, key, value) => { if (window.__arcade.sync) window.__arcade.sync.noteLocalWrite(key, value); },
+        // wires window.__arcade.sync. The Records sheet (arcade-records.js)
+        // rides the same hook: same-window storage events never fire, so a
+        // bridged game write is the only signal an open sheet gets to refresh.
+        onStateWritten: (gameId, key, value) => {
+            if (window.__arcade.sync) window.__arcade.sync.noteLocalWrite(key, value);
+            if (window.__arcade.records) window.__arcade.records.noteStateWritten(gameId, key, value);
+            // Shared leaderboards: a local scores write pushes that game's boards
+            // to eligible peers (arcade-leaderboard.js debounces internally).
+            if (window.__arcade.leaderboard) window.__arcade.leaderboard.noteStateWritten(gameId, key, value);
+        },
         onImportCommitted: (keys, journal) => { if (window.__arcade.sync) window.__arcade.sync.noteImportCommitted(keys, journal); },
         // Bundle provenance (durability design §4): buildBundle stamps the
         // journal section from the sync engine's merged record classes.
@@ -1666,23 +1709,32 @@
     // useless without its grid — fail loudly, not blank).
     // ==========================================
     import { loadCatalog, renderLauncherGrid, renderCatalogError, gameHref } from './arcade-catalog.js';
+    import { parseAppFragment } from './arcade-configs-core.js';
 
     const gridContainer = document.getElementById('launcher-grid-container');
 
-    // Deep links (#36): `#app=<id>` boots straight into a game. Resolved ONLY
-    // through the catalog — the fragment names an id, never a URL, so nothing
-    // attacker-shaped can pick the iframe src. #p2p-(offer|answer) fragments
-    // own the boot fragment channel (see tryResumeOnLaunch's sibling check)
-    // and the anchored regex can't match them anyway.
+    // Deep links (#36): `#app=<id>` boots straight into a game, and an optional
+    // `&cfg=<code>` carries a game-config share (#config-exchange). Resolved
+    // ONLY through the catalog — the fragment names an id, never a URL, so
+    // nothing attacker-shaped can pick the iframe src; the cfg code is
+    // re-validated launcher-side and the user is prompted before it reaches the
+    // game. #p2p-(offer|answer) fragments own the boot fragment channel (handled
+    // earlier) and the anchored regex can't match them anyway.
     function openDeepLink(games) {
-        const m = /^#app=([A-Za-z0-9_-]+)$/.exec(location.hash);
-        if (!m) return;
-        const game = games.find((g) => g.id === decodeURIComponent(m[1]));
-        if (game) {
-            window.__arcade.showGame(game.id, gameHref(game), game.name);
-        } else {
+        const parsed = parseAppFragment(location.hash);
+        if (!parsed) return;
+        const game = games.find((g) => g.id === parsed.app);
+        if (!game) {
             if (window.__arcade.showToast) window.__arcade.showToast('That game link doesn’t match anything here.');
             try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
+            return;
+        }
+        window.__arcade.showGame(game.id, gameHref(game), game.name);
+        // Config link: prompt + deliver after the game opens (declining still
+        // leaves the player in the game). The pool rewrites the hash to bare
+        // #app=<id> on show, consuming the one-shot cfg.
+        if (parsed.cfg && window.__arcade.configs) {
+            window.__arcade.configs.ingestLink(parsed.app, parsed.cfg).catch(() => {});
         }
     }
 
@@ -1716,6 +1768,7 @@
     import { initStorageBridge } from './arcade-storage-bridge.js';
     import { initSaveLoad } from './arcade-save.js';
     import { initSyncEngine } from './arcade-sync.js';
+    import { initLeaderboards } from './arcade-leaderboard.js';
     import { initBackupEngine } from './arcade-backup.js';
     import { initLocalBackupEngine } from './arcade-local-backup.js';
     import { initUiBridge } from './arcade-ui-bridge.js';
@@ -1736,6 +1789,16 @@
     window.__arcade.uiHost.replayPendingUiMessages();
     window.__arcade.save = initSaveLoad(storageHost);
     window.__arcade.sync = initSyncEngine(storageHost);
+    // Shared leaderboards (#leaderboards): union-merges peer score boards into
+    // the real scores.* keys (carved out of the LWW sync engine above). Rides
+    // the same per-peer sync opt-in; refreshes an open Records sheet and any
+    // mounted frame on a merge-write.
+    window.__arcade.leaderboard = initLeaderboards({
+        postToIframe: storageHost.postToIframe,
+        showToast: storageHost.showToast,
+        notifyRecords: (gameId, key, value) => { if (window.__arcade.records) window.__arcade.records.noteStateWritten(gameId, key, value); },
+        noteJournal: (key, value) => { if (window.__arcade.sync) window.__arcade.sync.noteLocalWrite(key, value); }
+    });
     // Backup-to-trusted-peer (#31): rides the save module's bundle API for
     // both directions. The consent hook reads window.__arcade.dialog at CALL
     // time — it's only ever invoked once a P2P offer arrives, long after the
@@ -2153,12 +2216,14 @@
             const syncOn = peer.syncEnabled === true;
             syncBtn.textContent = syncOn ? '🔄' : '⛔';
             syncBtn.title = syncOn
-                ? 'App-data sync is ON — tap to turn off (both devices must turn it on)'
-                : 'App-data sync is OFF — tap to turn on (both devices must turn it on)';
+                ? 'App-data sync is ON (includes shared leaderboards) — tap to turn off (both devices must turn it on)'
+                : 'App-data sync is OFF — tap to turn on for app-data sync and shared leaderboards (both devices must turn it on)';
             syncBtn.setAttribute('aria-label', (syncOn ? 'Disable' : 'Enable') + ' app-data sync for ' + displayName);
             syncBtn.addEventListener('click', () => {
                 setKnownPeerSyncEnabled(id, !syncOn);
                 if (!syncOn && window.__arcade.sync) window.__arcade.sync.kick(id);
+                // Flipping sync ON also shares leaderboards immediately.
+                if (!syncOn && window.__arcade.leaderboard) window.__arcade.leaderboard.kick(id);
                 render();
             });
             if (!revoked) icons.appendChild(syncBtn);
@@ -2694,6 +2759,110 @@
         window.__arcade.renderKnownPeers = render; // live-refresh hook for the P2P bridge
         window.__arcade.renamePeer = renamePeer;    // used to accept/edit a new-connection's suggested name
     })();
+</script>
+
+<script type="module">
+    // ==========================================
+    // RECORDS SHEET — the "Records" menu item (issues #9 / #12). Reads every
+    // game's leaderboards/records straight from launcher-origin localStorage
+    // (no bridge round-trip: game frames are opaque-origin and can't touch it)
+    // and renders them tabbed by catalog game. Wired last so window.__arcade
+    // .{catalog,pool,sync,dialog,showToast} all exist; the host object is the
+    // same capability-injection contract the storage modules use.
+    // ==========================================
+    import { initRecords } from './arcade-records.js';
+    import { initConfigs } from './arcade-configs.js';
+    import { gameHref } from './arcade-catalog.js';
+
+    const recordsHost = {
+        getCatalog: () => window.__arcade.catalog,
+        dialog: (opts) => window.__arcade.dialog(opts),
+        showToast: (msg, opts) => { if (window.__arcade.showToast) window.__arcade.showToast(msg, opts); },
+        closeLauncherMenu: () => { if (window.__arcade.closeLauncherMenu) window.__arcade.closeLauncherMenu(); },
+        openGame: (game) => { if (window.__arcade.showGame) window.__arcade.showGame(game.id, gameHref(game), game.name); },
+        isGameMounted: (id) => {
+            const pool = window.__arcade.pool;
+            return !!pool && pool.mountedGameIds().indexOf(id) !== -1;
+        },
+        // Push the deletion into a mounted frame's cache so its next save can't
+        // resurrect the wiped keys from stale lsCache.
+        notifyGameKeyRemoved: (id, key) => {
+            const pool = window.__arcade.pool;
+            if (pool) pool.postToIframe(id, { type: 'arcade:state.changed', key, value: null });
+        },
+        // Tombstone sync-opted keys so a paired peer doesn't replicate them
+        // back after a reset; and stamp a leaderboard reset watermark so a peer
+        // can't union-merge this game's pre-reset scores back in here.
+        onKeysRemoved: (id, keys) => {
+            if (window.__arcade.sync) {
+                for (const k of keys) window.__arcade.sync.noteLocalWrite(k, null);
+            }
+            if (window.__arcade.leaderboard) window.__arcade.leaderboard.noteReset(id);
+        }
+    };
+
+    const records = initRecords(recordsHost);
+    window.__arcade.records = records;
+    const recordsBtn = document.getElementById('menu-records');
+    if (recordsBtn) recordsBtn.addEventListener('click', () => records.open());
+
+    // Config exchange (#config-exchange): ingests config share-links at boot
+    // (openDeepLink above) and, when a game frame requests it, shares a config
+    // as a link or pushes it to a peer. Delivers a stashed config once the
+    // target frame completes its hello handshake (pool.onHelloed seam).
+    window.__arcade.configs = initConfigs({
+        getCatalog: () => window.__arcade.catalog,
+        dialog: (opts) => window.__arcade.dialog(opts),
+        showToast: (msg) => { if (window.__arcade.showToast) window.__arcade.showToast(msg); },
+        postToIframe: (id, msg) => { const p = window.__arcade.pool; if (p) p.postToIframe(id, msg); },
+        // "Ready to receive" = the frame completed its hello handshake.
+        isGameMounted: (id) => { const p = window.__arcade.pool; return !!p && p.isHelloed(id); },
+        openGame: (game) => { if (window.__arcade.showGame) window.__arcade.showGame(game.id, gameHref(game), game.name); },
+        // Launcher-side share (no ui-bridge 500-char url cap): OS share sheet,
+        // then clipboard fallback with a toast.
+        shareLink: async (url, title) => {
+            try { if (navigator.share) { await navigator.share({ title: title + ' configuration', text: url }); return 'shared'; } } catch (e) {}
+            try { await navigator.clipboard.writeText(url); if (window.__arcade.showToast) window.__arcade.showToast('Configuration link copied — paste it to share.'); return 'copied'; } catch (e) {}
+            return null;
+        },
+        // Peer picker for Arcade.configs.send when more than one device is
+        // connected. Reuses the arcade-dialog chrome; peer names via textContent.
+        pickPeer: (peers) => new Promise((resolve) => {
+            const overlay = document.createElement('div');
+            overlay.className = 'arcade-dialog-overlay';
+            const box = document.createElement('div');
+            box.className = 'arcade-dialog';
+            const msg = document.createElement('p');
+            msg.className = 'arcade-dialog__msg';
+            msg.textContent = 'Send this configuration to…';
+            box.appendChild(msg);
+            const actions = document.createElement('div');
+            actions.className = 'arcade-dialog__actions';
+            actions.style.flexDirection = 'column';
+            let done = false;
+            const finish = (v) => { if (done) return; done = true; overlay.remove(); resolve(v); };
+            for (const p of peers) {
+                const b = document.createElement('button');
+                b.className = 'topbar-btn arcade-dialog__btn';
+                b.textContent = p.name;
+                b.addEventListener('click', () => finish(p));
+                actions.appendChild(b);
+            }
+            const cancel = document.createElement('button');
+            cancel.className = 'topbar-btn arcade-dialog__btn';
+            cancel.textContent = 'Cancel';
+            cancel.addEventListener('click', () => finish(null));
+            actions.appendChild(cancel);
+            box.appendChild(actions);
+            overlay.appendChild(box);
+            overlay.addEventListener('click', (e) => { if (e.target === overlay) finish(null); });
+            document.body.appendChild(overlay);
+        })
+    });
+    // Deliver a stashed config the moment its game checks in.
+    if (window.__arcade.pool && window.__arcade.pool.onHelloed) {
+        window.__arcade.pool.onHelloed((id) => window.__arcade.configs.onHelloed(id));
+    }
 </script>
 
 </body>
