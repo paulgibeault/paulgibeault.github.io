@@ -328,8 +328,17 @@ every change. The SDK applies the visual ones to the game's `<html>` for free:
 | `fontScale`      | `Arcade.settings.fontScale()`       | `style="--font-scale: <n>"`                        |
 | `theme`          | `Arcade.settings.theme()`           | `data-theme="light"` or `data-theme="dark"`        |
 | `reducedMotion`  | `Arcade.settings.reducedMotion()`   | `data-reduced-motion="true|false"` + `style="--motion-scale: 0"` (1 otherwise) |
-| `audioVolume`    | `Arcade.settings.audioVolume()`     | `style="--audio-volume: <0..1>"` (read in JS)      |
+| `audioVolume`    | `Arcade.settings.audioVolume()`     | `style="--audio-volume: <0..1>"` (read in JS) — or just use `Arcade.audio` (below), which honours it for you |
 | `handedness`     | `Arcade.settings.handedness()`      | `data-handedness="left"` or `data-handedness="right"` |
+
+- [ ] **Sound effects → `Arcade.audio`.** Don't hand-roll an AudioContext — the SDK owns the foot-guns (lazy ctx, first-gesture unlock, master gain wired to `audioVolume`, suspend-on-hide/resume-on-return, and the exponentialRamp-from-zero crash). Register cues and play them:
+  ```js
+  Arcade.audio.cue('blip', { type: 'square', freq: 660, dur: 0.08, gain: 0.3 });
+  Arcade.audio.play('blip');                 // or play('blip', { freq: 880 }) to override
+  Arcade.audio.play({ type: 'noise', dur: 0.2, gain: 0.15 });          // inline spec
+  Arcade.audio.play([{ freq: 523, dur: 0.1 }, { freq: 784, dur: 0.1 }]); // timed sequence
+  ```
+  spec = `{ type:'sine'|'square'|'sawtooth'|'triangle'|'noise', freq, toFreq?, dur, gain, attack?, release? }`. Fire-and-forget; silent + cheap when the user has muted (`audioVolume` 0). `Arcade.audio.context()` exposes the managed AudioContext if you need a custom node graph. (Feature-detect on older launcher-served SDKs with `typeof Arcade.audio !== 'undefined'`.)
 
 **Reduced motion is handled for you by default:** the SDK's injected base
 style includes a kill-switch rule — when `data-reduced-motion="true"`, every
