@@ -30,6 +30,24 @@ semver is for humans and URLs, never checked on the wire.
 
 ---
 
+## 3.3.0 — 2026-07-20
+
+Score entry attribution for shared leaderboards (#leaderboards). `Arcade.scores.add`
+now stamps two internal fields on each entry so peer boards can be union-merged
+across linked devices without dropping distinct plays or double-counting:
+
+- `dev` — the device id that set the score (read from the paired-device
+  identity; omitted on a standalone page that never paired). Never minted here.
+- `eid` — a random per-entry id (8 base64url chars), so two entries in the same
+  millisecond stay distinct.
+
+Games don't set these and don't need to change: `scores.add(category, { score, … })`
+is unchanged, and `scores.list/best` ignore the extra fields. The launcher's new
+shared-leaderboard engine merges boards from peers (with the per-peer sync opt-in
+on both sides) into the real `scores.*` keys — so a game just keeps reading its
+own leaderboard and sees everyone's entries. Scores are carved out of `Arcade.sync`
+(which is last-writer-wins and would clobber a board wholesale).
+
 ## 3.2.0 — 2026-07-20
 
 Personal records API (`Arcade.records`, issue #9). A self-describing per-category

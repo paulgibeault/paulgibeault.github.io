@@ -80,6 +80,11 @@ import {
 import { readKnownPeers } from './arcade-known-peers.js';
 import { ArcadeDiag } from './arcade-diag.js';
 import { DEVICE_ID_RE } from './arcade-envelope.js';
+// Scores keys (arcade.v1.<app>.scores.<cat>) are carved OUT of LWW sync: they
+// replicate via the union-merge leaderboard engine instead (arcade-leaderboard.js).
+// Whole-key LWW would clobber one device's board with another's; the two engines
+// must not both write the same key. Every carve-out point below cites this.
+import { isLeaderboardKey } from './arcade-leaderboard-core.js';
 
 // Mirrors arcade-p2p.js's device-id minting exactly (same key, same shape):
 // whichever module runs first mints it, the other just reads it back.
@@ -152,6 +157,7 @@ export function initSyncEngine(host) {
                                        // until every req'd diff has arrived (see reconcileDigest)
     const inFlightExchange = new Map(); // deviceId -> ms timestamp of last exchange start
     const oversizeLogged = new Set();   // keys already logged as "too big to sync" (log once)
+    let leaderboardDiffLogged = false;  // one-shot: a legacy peer pushed a carved-out scores diff
     const digestOverflowLogged = new Set(); // deviceIds already warned about over-cap digests (log once)
     let tombstoneHashPromise = null;    // cached sha256Hex of the tombstone sentinel
 
@@ -175,6 +181,7 @@ export function initSyncEngine(host) {
     }
 
     function isKeySynced(fullKey) {
+        if (isLeaderboardKey(fullKey)) return false; // carve-out: leaderboard engine owns scores keys
         if (!syncEligibleKey(fullKey)) return false;
         const s = syncable.get(appIdOfKey(fullKey));
         if (!s) return false;
@@ -202,6 +209,15 @@ export function initSyncEngine(host) {
             else if (row.key.charAt(0) === 'j' && row.key.charAt(1) === '|') localRecords.set(row.key.slice(2), row.value);
             else if (row.key.charAt(0) === 'p' && row.key.charAt(1) === '|') cursors.set(row.key.slice(2), row.value);
             else if (row.key.charAt(0) === 'w' && row.key.charAt(1) === '|') watermarks.set(row.key.slice(2), row.value);
+        }
+        // Migration sweep: devices that previously opted scores.* into Arcade.sync
+        // have stamped sync records for them. Now that the leaderboard engine owns
+        // those keys, purge the stale records so they never appear in a digest.
+        for (const k of Array.from(records.keys())) {
+            if (isLeaderboardKey(k)) {
+                records.delete(k);
+                try { await idbDel(db, 'k|' + k); } catch (e) {}
+            }
         }
     }
 
@@ -374,6 +390,9 @@ export function initSyncEngine(host) {
 
     // ---- inbound: digest reassembly + reconciliation ----
     async function reconcileDigest(fromDeviceId, remoteEntries) {
+        // Carve-out: drop any leaderboard keys a legacy peer's digest declares —
+        // never request or adopt them (the leaderboard engine owns scores).
+        remoteEntries = remoteEntries.filter((e) => !(Array.isArray(e) && isLeaderboardKey(e[0])));
         for (const e of remoteEntries) {
             if (Array.isArray(e) && typeof e[1] === 'string') clock = hlcRecv(clock, e[1], Date.now(), getMyDeviceId());
         }
@@ -485,7 +504,9 @@ export function initSyncEngine(host) {
 
     async function handleInboundReq(fromDeviceId, env) {
         const keys = Array.isArray(env.keys) ? env.keys : [];
-        sendDiffTo(fromDeviceId, keys.filter((k) => records.has(k)));
+        // records never holds leaderboard keys (carve-out), so the has() filter
+        // already excludes them; the explicit guard documents the invariant.
+        sendDiffTo(fromDeviceId, keys.filter((k) => !isLeaderboardKey(k) && records.has(k)));
     }
 
     function adoptIntoSyncList(appId, key) {
@@ -508,6 +529,13 @@ export function initSyncEngine(host) {
 
     async function applyInboundDiffEntry(fromDeviceId, e) {
         const key = e.k;
+        // Carve-out: a legacy peer computes its send-set from our (scores-free)
+        // digest and pushes scores diffs unsolicited. Dropping them here stops a
+        // whole-array LWW write from clobbering a union-merged board.
+        if (isLeaderboardKey(key)) {
+            if (!leaderboardDiffLogged) { leaderboardDiffLogged = true; ArcadeDiag.log('sync', 'dropped a leaderboard-key diff (scores replicate via the leaderboard engine, not LWW sync)'); }
+            return;
+        }
         clock = hlcRecv(clock, e.h, Date.now(), getMyDeviceId());
         try { await idbPut(db, 'clock', clock); } catch (err) {}
 
@@ -702,6 +730,14 @@ export function initSyncEngine(host) {
         if (typeof key !== 'string') return;
         if (SYNC_LIST_RE.test(key)) {
             onSyncListWrite(key).catch((e) => ArcadeDiag.log('sync', `sync-list refresh failed: ${(e && e.message) || e}`));
+            return;
+        }
+        // Carve-out: leaderboard keys journal (local class, for export
+        // provenance) but never stamp/replicate, even if a game opted them into
+        // Arcade.sync — the leaderboard engine union-merges them instead.
+        if (isLeaderboardKey(key)) {
+            journalQueue.set(key, (value === undefined) ? null : value);
+            scheduleJournalFlush();
             return;
         }
         if (!syncEligibleKey(key)) return;

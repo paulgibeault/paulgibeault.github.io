@@ -112,6 +112,10 @@ function peerEnvelopeTests() {
         'presence-ack classified as presence');
     ok(validatePeerEnvelope({ arcade: 1, kind: 'sync' }).kind === 'sync',
         'sync passes structurally (body owned by validateSyncEnvelope)');
+    ok(validatePeerEnvelope({ arcade: 1, kind: 'leaderboard' }).kind === 'leaderboard',
+        'leaderboard passes structurally (body owned by validateLeaderboardEnvelope)');
+    ok(validatePeerEnvelope({ arcade: 1, kind: 'leaderboard', gameId: 'g' }).kind === 'leaderboard',
+        'leaderboard with a smuggled gameId still classifies as leaderboard, never game');
     ok(validatePeerEnvelope({ arcade: 1, kind: 'backup' }).kind === 'backup',
         'backup passes structurally (body owned by validateBackupEnvelope)');
     ok(validatePeerEnvelope({ arcade: 1, kind: 'backup', gameId: 'g' }).kind === 'backup',

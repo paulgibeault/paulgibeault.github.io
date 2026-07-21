@@ -1188,6 +1188,7 @@
                 p2pBridge = ArcadeP2P;
                 window.__arcade.p2p = ArcadeP2P; // debug + acceptance tests
                 if (window.__arcade.sync) window.__arcade.sync.attachP2P(ArcadeP2P);
+                if (window.__arcade.leaderboard) window.__arcade.leaderboard.attachP2P(ArcadeP2P);
                 if (window.__arcade.backup) window.__arcade.backup.attachP2P(ArcadeP2P);
                 return ArcadeP2P;
             }).catch((e) => {
@@ -1672,6 +1673,9 @@
         onStateWritten: (gameId, key, value) => {
             if (window.__arcade.sync) window.__arcade.sync.noteLocalWrite(key, value);
             if (window.__arcade.records) window.__arcade.records.noteStateWritten(gameId, key, value);
+            // Shared leaderboards: a local scores write pushes that game's boards
+            // to eligible peers (arcade-leaderboard.js debounces internally).
+            if (window.__arcade.leaderboard) window.__arcade.leaderboard.noteStateWritten(gameId, key, value);
         },
         onImportCommitted: (keys, journal) => { if (window.__arcade.sync) window.__arcade.sync.noteImportCommitted(keys, journal); },
         // Bundle provenance (durability design §4): buildBundle stamps the
@@ -1752,6 +1756,7 @@
     import { initStorageBridge } from './arcade-storage-bridge.js';
     import { initSaveLoad } from './arcade-save.js';
     import { initSyncEngine } from './arcade-sync.js';
+    import { initLeaderboards } from './arcade-leaderboard.js';
     import { initBackupEngine } from './arcade-backup.js';
     import { initLocalBackupEngine } from './arcade-local-backup.js';
     import { initUiBridge } from './arcade-ui-bridge.js';
@@ -1772,6 +1777,16 @@
     window.__arcade.uiHost.replayPendingUiMessages();
     window.__arcade.save = initSaveLoad(storageHost);
     window.__arcade.sync = initSyncEngine(storageHost);
+    // Shared leaderboards (#leaderboards): union-merges peer score boards into
+    // the real scores.* keys (carved out of the LWW sync engine above). Rides
+    // the same per-peer sync opt-in; refreshes an open Records sheet and any
+    // mounted frame on a merge-write.
+    window.__arcade.leaderboard = initLeaderboards({
+        postToIframe: storageHost.postToIframe,
+        showToast: storageHost.showToast,
+        notifyRecords: (gameId, key, value) => { if (window.__arcade.records) window.__arcade.records.noteStateWritten(gameId, key, value); },
+        noteJournal: (key, value) => { if (window.__arcade.sync) window.__arcade.sync.noteLocalWrite(key, value); }
+    });
     // Backup-to-trusted-peer (#31): rides the save module's bundle API for
     // both directions. The consent hook reads window.__arcade.dialog at CALL
     // time — it's only ever invoked once a P2P offer arrives, long after the
@@ -2195,6 +2210,8 @@
             syncBtn.addEventListener('click', () => {
                 setKnownPeerSyncEnabled(id, !syncOn);
                 if (!syncOn && window.__arcade.sync) window.__arcade.sync.kick(id);
+                // Flipping sync ON also shares leaderboards immediately.
+                if (!syncOn && window.__arcade.leaderboard) window.__arcade.leaderboard.kick(id);
                 render();
             });
             if (!revoked) icons.appendChild(syncBtn);
@@ -2761,11 +2778,13 @@
             if (pool) pool.postToIframe(id, { type: 'arcade:state.changed', key, value: null });
         },
         // Tombstone sync-opted keys so a paired peer doesn't replicate them
-        // back after a reset.
+        // back after a reset; and stamp a leaderboard reset watermark so a peer
+        // can't union-merge this game's pre-reset scores back in here.
         onKeysRemoved: (id, keys) => {
             if (window.__arcade.sync) {
                 for (const k of keys) window.__arcade.sync.noteLocalWrite(k, null);
             }
+            if (window.__arcade.leaderboard) window.__arcade.leaderboard.noteReset(id);
         }
     };
 

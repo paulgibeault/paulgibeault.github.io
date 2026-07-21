@@ -389,6 +389,34 @@ lives with the other storage allowlists in `arcade-storage-core.js`.
   `Arcade.sync.onConflict` on the losing side). Cross-device wall-clock skew
   biases ties toward the faster clock — acceptable for save-style data.
 
+### Shared leaderboards (union-merge, not LWW)
+
+Score boards (`arcade.v1.<gameId>.scores.<cat>`) need set-union, not
+last-writer-wins — one device's whole board must never clobber another's. So
+they are **carved out of the LWW sync engine** and replicated by a separate
+engine (`arcade-leaderboard.js`, pure merge core in `arcade-leaderboard-core.js`,
+`tools/leaderboard-unit.mjs`) over a `{ arcade:1, kind:'leaderboard', op:'boards',
+entries:[{k,order,list}] }` envelope. It rides the **same** per-peer opt-in and
+trust posture as `kind:'sync'` (direct link, identity-bound, both sides' 🔄,
+not fingerprint-suspect), and carries **no top-level `gameId`** so a legacy
+launcher drops it rather than misrouting it as a game frame.
+
+- **Merge:** `top-100(union under a total order: score → ts → per-entry
+  identity)`. That join is commutative/associative/idempotent, so N devices
+  gossiping in any order converge to the byte-identical board (property-tested).
+  Entries dedupe on the SDK-stamped `dev:eid` (or a content fingerprint for
+  legacy unattributed entries). Merged boards write straight into the real
+  `scores.*` keys, so games see everyone's entries with no code change.
+- **Reset:** the Records-sheet per-game reset stamps a launcher-local watermark
+  (`arcade.v1.global.lbResetAt`); a peer can't resurrect pre-reset entries here,
+  though peers keep their own copies.
+- **Mixed fleet:** a launcher that predates this feature keeps LWW-syncing scores
+  with other *legacy* launchers if a game opted them into `Arcade.sync`; a new
+  launcher neither sends nor accepts scores over the sync channel (and drops a
+  legacy peer's unsolicited scores diffs) — it shares boards only with other new
+  launchers via `kind:'leaderboard'`. On upgrade it also purges any stale scores
+  records left in the local sync store.
+
 Verified by `tools/sync-acceptance.mjs` (two launchers, real WebRTC: live
 replication, converge-after-reconnect, restart survival, conflict surfacing,
 exclusion + hostile-frame refusal, tombstones) plus the Node unit matrix in

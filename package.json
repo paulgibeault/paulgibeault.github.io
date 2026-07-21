@@ -14,6 +14,7 @@
     "p2p-multiparty": "node tools/p2p-multiparty-acceptance.mjs",
     "p2p-reconnect": "node tools/p2p-reconnect-acceptance.mjs",
     "sync-acceptance": "node tools/sync-acceptance.mjs",
+    "leaderboard-acceptance": "node tools/leaderboard-acceptance.mjs",
     "backup-acceptance": "node tools/backup-acceptance.mjs",
     "backup-unit": "node tools/backup-unit.mjs",
     "local-backup-acceptance": "node tools/local-backup-acceptance.mjs",

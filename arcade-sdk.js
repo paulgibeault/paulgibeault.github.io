@@ -168,7 +168,7 @@
     // tools/sdk-version-unit.mjs enforces all three. Launcher↔SDK compat is
     // still negotiated by welcome.caps, never by this number; it exists for
     // humans (bug reports, CHANGELOG) and for the pinned-URL publish scheme.
-    var SDK_SEMVER = '3.2.0';
+    var SDK_SEMVER = '3.3.0';
     var HANDSHAKE_TIMEOUT_MS = 300;
     // Opaque-origin (sandboxed, no allow-same-origin) frames have no storage
     // to fall back to, so waiting longer for the launcher costs nothing and
@@ -2239,6 +2239,27 @@
 
     // ─── Scores (per category) ────────────────────────────────────
     function scoresKey(category) { return gameKey('scores.' + category); }
+    // This device's stable id (for cross-device leaderboard attribution).
+    // null on a standalone page that never paired — such boards never reach
+    // the launcher's leaderboard exchange anyway, so an unattributed entry is
+    // fine; NEVER mint one here (minting is owned by the launcher's P2P layer).
+    function myScoreDeviceId() {
+        try {
+            var id = rawGet(KEY_PREFIX + '_meta.deviceId');
+            return (id && DEVICE_ID_RE.test(id)) ? id : null;
+        } catch (e) { return null; }
+    }
+    // Per-entry random id: 6 bytes → 8 base64url chars. dev+ts can collide in
+    // the same millisecond; eid makes every entry uniquely dedupable across
+    // devices without a shape change.
+    function makeEntryId() {
+        var bytes = new Uint8Array(6);
+        try { crypto.getRandomValues(bytes); }
+        catch (e) { for (var i = 0; i < 6; i++) bytes[i] = Math.floor(Math.random() * 256); }
+        var bin = '';
+        for (var j = 0; j < 6; j++) bin += String.fromCharCode(bytes[j]);
+        return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
     var scoresApi = {
         // opts.order: 'desc' (default — higher is better) or 'asc' (lower is
         // better: times, move counts). Pass the same order on every add for a
@@ -2287,6 +2308,12 @@
             if (entry.meta && typeof entry.meta === 'object') {
                 record.meta = entry.meta;
             }
+            // Cross-device attribution (#leaderboards): dev = which device set
+            // it (omitted standalone), eid = unique per entry so a shared
+            // leaderboard can union-merge without dropping distinct plays.
+            var dev = myScoreDeviceId();
+            if (dev) record.dev = dev;
+            record.eid = makeEntryId();
             var k = scoresKey(category);
             var list = readJSON(k);
             if (!Array.isArray(list)) list = [];
