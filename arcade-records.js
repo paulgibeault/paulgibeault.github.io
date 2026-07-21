@@ -26,6 +26,7 @@ export function initRecords(host) {
     const bodyEl = document.getElementById('records-dialog-body');
     const closeBtn = document.getElementById('records-dialog-close');
     const resetBtn = document.getElementById('records-dialog-reset');
+    const watermarkEl = document.getElementById('records-dialog-watermark');
     // Degrade to inert no-ops if the shell markup is missing — never throw at
     // wire time and break the rest of the launcher module block.
     if (!dialog || !tabsEl || !bodyEl) {
@@ -167,7 +168,20 @@ export function initRecords(host) {
         }
     }
 
-    function renderAll() { renderTabs(); renderBody(); }
+    // The active game's icon as the panel watermark. Catalog icons are trusted
+    // (not game-written); still strip characters that could break the CSS url().
+    function updateWatermark(game) {
+        if (!watermarkEl) return;
+        const icon = game && game.icon;
+        if (typeof icon === 'string' && icon) {
+            const safe = icon.replace(/["'()\\]/g, '');
+            watermarkEl.style.backgroundImage = 'url("' + safe + '")';
+        } else {
+            watermarkEl.style.backgroundImage = 'none';
+        }
+    }
+
+    function renderAll() { renderTabs(); renderBody(); updateWatermark(gameById(activeId)); }
 
     function selectTab(id) {
         activeId = id;
@@ -221,6 +235,7 @@ export function initRecords(host) {
             bodyEl.textContent = '';
             bodyEl.appendChild(el('p', 'records-empty', 'No games available.'));
             resetBtn.hidden = true;
+            updateWatermark(null);
         } else {
             renderAll();
         }
