@@ -65,11 +65,11 @@ export function isCappedString(v, max) {
  *
  * Mirrors the router's historical accepts exactly, including the deliberate
  * fall-through: any kind other than presence/presence-ack/sync/leaderboard/
- * backup/revoke/identity is a game frame and needs a string gameId. New
+ * config/backup/revoke/identity is a game frame and needs a string gameId. New
  * launcher-level kinds MUST classify here (and carry NO top-level gameId) —
  * otherwise a legacy launcher's fall-through misroutes them as game frames.
  *
- * @returns {{ok:true, kind:'presence'|'sync'|'leaderboard'|'backup'|'revoke'|'identity'|'game'} |
+ * @returns {{ok:true, kind:'presence'|'sync'|'leaderboard'|'config'|'backup'|'revoke'|'identity'|'game'} |
  *           {ok:false, reason:'not-arcade'|'bad-gameId'|'bad-deviceId'}}
  */
 export function validatePeerEnvelope(env) {
@@ -80,6 +80,7 @@ export function validatePeerEnvelope(env) {
     }
     if (env.kind === 'sync') return { ok: true, kind: 'sync' };
     if (env.kind === 'leaderboard') return { ok: true, kind: 'leaderboard' }; // body owned by validateLeaderboardEnvelope
+    if (env.kind === 'config') return { ok: true, kind: 'config' }; // body owned by validateConfigEnvelope
     if (env.kind === 'backup') return { ok: true, kind: 'backup' }; // body owned by validateBackupEnvelope
     if (env.kind === 'revoke') return { ok: true, kind: 'revoke' }; // body owned by validateRevocationEntry
     if (env.kind === 'identity') {

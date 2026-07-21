@@ -1189,6 +1189,7 @@
                 window.__arcade.p2p = ArcadeP2P; // debug + acceptance tests
                 if (window.__arcade.sync) window.__arcade.sync.attachP2P(ArcadeP2P);
                 if (window.__arcade.leaderboard) window.__arcade.leaderboard.attachP2P(ArcadeP2P);
+                if (window.__arcade.configs) window.__arcade.configs.attachP2P(ArcadeP2P);
                 if (window.__arcade.backup) window.__arcade.backup.attachP2P(ArcadeP2P);
                 return ArcadeP2P;
             }).catch((e) => {
@@ -2822,7 +2823,40 @@
             try { if (navigator.share) { await navigator.share({ title: title + ' configuration', text: url }); return 'shared'; } } catch (e) {}
             try { await navigator.clipboard.writeText(url); if (window.__arcade.showToast) window.__arcade.showToast('Configuration link copied — paste it to share.'); return 'copied'; } catch (e) {}
             return null;
-        }
+        },
+        // Peer picker for Arcade.configs.send when more than one device is
+        // connected. Reuses the arcade-dialog chrome; peer names via textContent.
+        pickPeer: (peers) => new Promise((resolve) => {
+            const overlay = document.createElement('div');
+            overlay.className = 'arcade-dialog-overlay';
+            const box = document.createElement('div');
+            box.className = 'arcade-dialog';
+            const msg = document.createElement('p');
+            msg.className = 'arcade-dialog__msg';
+            msg.textContent = 'Send this configuration to…';
+            box.appendChild(msg);
+            const actions = document.createElement('div');
+            actions.className = 'arcade-dialog__actions';
+            actions.style.flexDirection = 'column';
+            let done = false;
+            const finish = (v) => { if (done) return; done = true; overlay.remove(); resolve(v); };
+            for (const p of peers) {
+                const b = document.createElement('button');
+                b.className = 'topbar-btn arcade-dialog__btn';
+                b.textContent = p.name;
+                b.addEventListener('click', () => finish(p));
+                actions.appendChild(b);
+            }
+            const cancel = document.createElement('button');
+            cancel.className = 'topbar-btn arcade-dialog__btn';
+            cancel.textContent = 'Cancel';
+            cancel.addEventListener('click', () => finish(null));
+            actions.appendChild(cancel);
+            box.appendChild(actions);
+            overlay.appendChild(box);
+            overlay.addEventListener('click', (e) => { if (e.target === overlay) finish(null); });
+            document.body.appendChild(overlay);
+        })
     });
     // Deliver a stashed config the moment its game checks in.
     if (window.__arcade.pool && window.__arcade.pool.onHelloed) {

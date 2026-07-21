@@ -37,6 +37,7 @@
     "catalog-acceptance": "node tools/catalog-acceptance.mjs",
     "records-acceptance": "node tools/records-acceptance.mjs",
     "configs-acceptance": "node tools/configs-acceptance.mjs",
+    "configs-p2p-acceptance": "node tools/configs-p2p-acceptance.mjs",
     "acceptance:pool": "node tools/acceptance.mjs --pool --serve --catalog tools/fixtures/ci-catalog.json"
   },
   "devDependencies": {
