@@ -180,7 +180,7 @@ All messages namespaced `arcade:` to avoid collision.
 ```
 child → parent:  { type: 'arcade:hello',   gameId }
 parent → child:  { type: 'arcade:welcome', peerStatus: 'idle',
-                   caps: ['peer.sendTo', 'peer.roster', 'peer.meta', 'peer.party', 'storage.bridge', 'ui.bridge'],  // capability flags (absent ⇒ [])
+                   caps: ['peer.sendTo', 'peer.roster', 'peer.meta', 'peer.party', 'storage.bridge', 'ui.bridge', 'configs.bridge'],  // capability flags (absent ⇒ [])
                    peers: [{ deviceId, name, status, direct }, ...],   // live remote devices (roster seed)
                    settings: { fontScale, theme, reducedMotion, audioVolume, handedness },
                    state: { '<fullKey>': '<raw string>', ... } }       // storage-bridge snapshot: the app's own

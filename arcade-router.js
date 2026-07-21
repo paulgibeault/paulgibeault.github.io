@@ -48,7 +48,7 @@ import { KEY_PREFIX } from './arcade-storage-core.js';
 // list — editing it is a contract change: update GAME_INTEGRATION.md §14
 // and the pinned test literal deliberately, never casually.
 export const ARCADE_PEER_CAPS = Object.freeze(
-    ['peer.sendTo', 'peer.roster', 'peer.meta', 'peer.party', 'storage.bridge', 'ui.bridge']);
+    ['peer.sendTo', 'peer.roster', 'peer.meta', 'peer.party', 'storage.bridge', 'ui.bridge', 'configs.bridge']);
 
 export function initMessageRouter(host) {
     const pool = host.pool;
@@ -263,6 +263,24 @@ export function initMessageRouter(host) {
                     result = [];
                 }
                 pool.postToIframe(gameId, { type: 'arcade:bridge.result', id: data.id, ok: true, value: result });
+                break;
+            }
+            case 'arcade:configs.op': {
+                // Game config exchange (cap 'configs.bridge'): share a config as
+                // a code/link, or push it to a peer. Rides the generic RPC rail.
+                // share/send open UI or send over the wire, so only the ACTIVE
+                // frame may invoke them (same discipline as ui-bridge dialogs).
+                if (typeof data.id !== 'string' && typeof data.id !== 'number') break;
+                const reply = (value) => pool.postToIframe(gameId, { type: 'arcade:bridge.result', id: data.id, ok: true, value });
+                const C = host.getConfigs && host.getConfigs();
+                if (!C || pool.getActiveGameId() !== gameId) { reply({ ok: false }); break; }
+                Promise.resolve(C.handleOp(gameId, data)).then(reply).catch(() => reply({ ok: false }));
+                break;
+            }
+            case 'arcade:config.ack': {
+                // The game accepted a delivered config — cancel its ack timeout.
+                const C = host.getConfigs && host.getConfigs();
+                if (C && typeof data.t === 'string') C.onConfigAck(gameId, data.t);
                 break;
             }
             case 'arcade:state.write':

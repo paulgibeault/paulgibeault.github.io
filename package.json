@@ -36,6 +36,7 @@
     "export-advanced-acceptance": "node tools/export-advanced-acceptance.mjs",
     "catalog-acceptance": "node tools/catalog-acceptance.mjs",
     "records-acceptance": "node tools/records-acceptance.mjs",
+    "configs-acceptance": "node tools/configs-acceptance.mjs",
     "acceptance:pool": "node tools/acceptance.mjs --pool --serve --catalog tools/fixtures/ci-catalog.json"
   },
   "devDependencies": {

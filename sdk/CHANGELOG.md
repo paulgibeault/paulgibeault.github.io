@@ -30,6 +30,29 @@ semver is for humans and URLs, never checked on the wire.
 
 ---
 
+## 3.4.0 — 2026-07-20
+
+Game-config exchange (`Arcade.configs`, #config-exchange). Games can share and
+load a named configuration — a sowduku pack, a cardstock variant, a puzzle seed
+— over any channel or straight to a linked device. New `configs.bridge` welcome
+cap; feature-detect via `Arcade.peer.caps()` (standalone/older launchers fall
+back to returning the code):
+
+- `Arcade.configs.register(type, ({type,v,data}) => {…})` — register a handler.
+  Inbound `data` is HOSTILE cross-device input; the game must semantic-validate
+  and render via textContent/`Arcade.html.escape`, never innerHTML. A config
+  that arrives before register() is queued (capped) and drained on register.
+- `Arcade.configs.share(type, data)` → `{ ok, code, url? }` — export as a share
+  code; framed, the launcher builds a `#app=<id>&cfg=<code>` deep link and opens
+  the share sheet.
+- `Arcade.configs.send(type, data)` → `{ ok, sent }` — push directly to a linked
+  device the user picks (the receiver is prompted before your handler runs).
+
+The launcher validates transport shape only (type charset, ≤4 KB code / ≤8 KB
+data, game-in-catalog) and always prompts before delivery; it never interprets
+`data`. `Arcade.share.encode/decode` is unchanged; its internals are now shared
+with `Arcade.configs`.
+
 ## 3.3.0 — 2026-07-20
 
 Score entry attribution for shared leaderboards (#leaderboards). `Arcade.scores.add`

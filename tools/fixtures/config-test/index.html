@@ -1,0 +1,13 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>config-exchange acceptance fixture</title>
+<!-- Minimal game: loads the SDK, registers an Arcade.configs handler that
+     records the received config so the acceptance suite can assert delivery.
+     Mounted opaque-origin inside the launcher pool. -->
+<script src="/arcade-sdk.js"></script>
+<script>
+  Arcade.init({ gameId: 'config-test' });
+  window.__configReceived = null;
+  Arcade.configs.register('pack', function (c) { window.__configReceived = c; });
+</script>
+<body>config-test</body>

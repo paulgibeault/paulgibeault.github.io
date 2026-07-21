@@ -1555,6 +1555,7 @@
             getP2P: () => p2pBridge,
             getStorage: () => window.__arcade.storage,
             getUi: () => window.__arcade.ui,
+            getConfigs: () => window.__arcade.configs,
             getEnvelope: () => window.__arcade.envelope
         };
     })();
@@ -1706,23 +1707,32 @@
     // useless without its grid — fail loudly, not blank).
     // ==========================================
     import { loadCatalog, renderLauncherGrid, renderCatalogError, gameHref } from './arcade-catalog.js';
+    import { parseAppFragment } from './arcade-configs-core.js';
 
     const gridContainer = document.getElementById('launcher-grid-container');
 
-    // Deep links (#36): `#app=<id>` boots straight into a game. Resolved ONLY
-    // through the catalog — the fragment names an id, never a URL, so nothing
-    // attacker-shaped can pick the iframe src. #p2p-(offer|answer) fragments
-    // own the boot fragment channel (see tryResumeOnLaunch's sibling check)
-    // and the anchored regex can't match them anyway.
+    // Deep links (#36): `#app=<id>` boots straight into a game, and an optional
+    // `&cfg=<code>` carries a game-config share (#config-exchange). Resolved
+    // ONLY through the catalog — the fragment names an id, never a URL, so
+    // nothing attacker-shaped can pick the iframe src; the cfg code is
+    // re-validated launcher-side and the user is prompted before it reaches the
+    // game. #p2p-(offer|answer) fragments own the boot fragment channel (handled
+    // earlier) and the anchored regex can't match them anyway.
     function openDeepLink(games) {
-        const m = /^#app=([A-Za-z0-9_-]+)$/.exec(location.hash);
-        if (!m) return;
-        const game = games.find((g) => g.id === decodeURIComponent(m[1]));
-        if (game) {
-            window.__arcade.showGame(game.id, gameHref(game), game.name);
-        } else {
+        const parsed = parseAppFragment(location.hash);
+        if (!parsed) return;
+        const game = games.find((g) => g.id === parsed.app);
+        if (!game) {
             if (window.__arcade.showToast) window.__arcade.showToast('That game link doesn’t match anything here.');
             try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
+            return;
+        }
+        window.__arcade.showGame(game.id, gameHref(game), game.name);
+        // Config link: prompt + deliver after the game opens (declining still
+        // leaves the player in the game). The pool rewrites the hash to bare
+        // #app=<id> on show, consuming the one-shot cfg.
+        if (parsed.cfg && window.__arcade.configs) {
+            window.__arcade.configs.ingestLink(parsed.app, parsed.cfg).catch(() => {});
         }
     }
 
@@ -2759,6 +2769,7 @@
     // same capability-injection contract the storage modules use.
     // ==========================================
     import { initRecords } from './arcade-records.js';
+    import { initConfigs } from './arcade-configs.js';
     import { gameHref } from './arcade-catalog.js';
 
     const recordsHost = {
@@ -2792,6 +2803,31 @@
     window.__arcade.records = records;
     const recordsBtn = document.getElementById('menu-records');
     if (recordsBtn) recordsBtn.addEventListener('click', () => records.open());
+
+    // Config exchange (#config-exchange): ingests config share-links at boot
+    // (openDeepLink above) and, when a game frame requests it, shares a config
+    // as a link or pushes it to a peer. Delivers a stashed config once the
+    // target frame completes its hello handshake (pool.onHelloed seam).
+    window.__arcade.configs = initConfigs({
+        getCatalog: () => window.__arcade.catalog,
+        dialog: (opts) => window.__arcade.dialog(opts),
+        showToast: (msg) => { if (window.__arcade.showToast) window.__arcade.showToast(msg); },
+        postToIframe: (id, msg) => { const p = window.__arcade.pool; if (p) p.postToIframe(id, msg); },
+        // "Ready to receive" = the frame completed its hello handshake.
+        isGameMounted: (id) => { const p = window.__arcade.pool; return !!p && p.isHelloed(id); },
+        openGame: (game) => { if (window.__arcade.showGame) window.__arcade.showGame(game.id, gameHref(game), game.name); },
+        // Launcher-side share (no ui-bridge 500-char url cap): OS share sheet,
+        // then clipboard fallback with a toast.
+        shareLink: async (url, title) => {
+            try { if (navigator.share) { await navigator.share({ title: title + ' configuration', text: url }); return 'shared'; } } catch (e) {}
+            try { await navigator.clipboard.writeText(url); if (window.__arcade.showToast) window.__arcade.showToast('Configuration link copied — paste it to share.'); return 'copied'; } catch (e) {}
+            return null;
+        }
+    });
+    // Deliver a stashed config the moment its game checks in.
+    if (window.__arcade.pool && window.__arcade.pool.onHelloed) {
+        window.__arcade.pool.onHelloed((id) => window.__arcade.configs.onHelloed(id));
+    }
 </script>
 
 </body>

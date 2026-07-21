@@ -136,6 +136,29 @@ export function validateToast(data) {
  * launcher's own passphrase prompts use (dialog spoofing, see #29/#35).
  * @returns {{op:string, id?:string, ...} | null} null = drop the message.
  */
+/**
+ * Shape gate for an arcade:configs.op RPC (Arcade.configs, #config-exchange):
+ * a game asks the launcher to share a config code/link ('share') or push it to
+ * a peer ('send'). Transport shape + caps ONLY — the engine re-decodes/validates
+ * the payload and prompts the user; the game owns the semantics of `d`.
+ * Returns a normalized op or null.
+ */
+const CONFIG_TYPE_RE = /^[a-z0-9_-]{1,32}$/;
+export function validateConfigsOp(data) {
+    if (!isPlainObject(data)) return null;
+    if (typeof data.id !== 'string' && typeof data.id !== 'number') return null;
+    if (data.op === 'share') {
+        if (!isCappedString(data.code, 4096) || !/^[A-Za-z0-9_-]+$/.test(data.code)) return null;
+        return { id: data.id, op: 'share', code: data.code };
+    }
+    if (data.op === 'send') {
+        if (typeof data.t !== 'string' || !CONFIG_TYPE_RE.test(data.t)) return null;
+        if (!('d' in data)) return null;
+        return { id: data.id, op: 'send', t: data.t, d: data.d };
+    }
+    return null;
+}
+
 const UI_RPC_OPS = { confirm: 1, prompt: 1, openFile: 1, share: 1 };
 const UI_FF_OPS = { setTitle: 1, quitHook: 1 };
 const clip = (v, max) => (typeof v === 'string' ? v.slice(0, max) : null);

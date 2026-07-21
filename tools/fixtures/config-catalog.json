@@ -1,0 +1,11 @@
+{
+  "catalogVersion": 1,
+  "games": [
+    {
+      "id": "config-test",
+      "name": "Config Test",
+      "subtitle": "CI fixture",
+      "url": "/tools/fixtures/config-test/"
+    }
+  ]
+}

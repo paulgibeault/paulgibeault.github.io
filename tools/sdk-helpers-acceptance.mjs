@@ -222,6 +222,35 @@ try {
     check('records.list skips corrupt / wrong-shape entries', rec.listSkipsBad);
     check('records.clear removes the record', rec.cleared);
     check('records.get returns a fresh object each call', rec.getFresh);
+
+    // ── Arcade.configs — config-exchange SDK surface (standalone) ──
+    const cfg = await page.evaluate(async () => {
+        const out = {};
+        const C = Arcade.configs;
+        out.hasApi = !!C && typeof C.register === 'function' && typeof C.share === 'function' && typeof C.send === 'function';
+        const threw = (fn) => { try { fn(); return false; } catch (e) { return true; } };
+        out.regThrowsBadType = threw(() => C.register('BAD TYPE', () => {}));
+        out.regThrowsBadHandler = threw(() => C.register('pack', 'nope'));
+        const unreg = C.register('pack', () => {});
+        out.regReturnsUnsub = typeof unreg === 'function';
+        const shared = await C.share('pack', { name: 'Weekend' });
+        out.shareStandalone = !!shared && shared.ok === true && typeof shared.code === 'string' && shared.url === null;
+        const dec = Arcade.share.decode(shared.code);
+        out.shareCodeDecodes = !!dec && !!dec.data && dec.data.g === 'store-test' && dec.data.t === 'pack' && dec.data.d.name === 'Weekend';
+        let rejected = false;
+        try { await C.share('pack', { big: 'x'.repeat(9000) }); } catch (e) { rejected = true; }
+        out.shareOversizeRejects = rejected;
+        const sent = await C.send('pack', { x: 1 });
+        out.sendStandalone = !!sent && sent.ok === false;
+        unreg();
+        return out;
+    });
+    check('Arcade.configs exposes register/share/send', cfg.hasApi);
+    check('configs.register validates type + handler', cfg.regThrowsBadType && cfg.regThrowsBadHandler);
+    check('configs.register returns an unsubscribe fn', cfg.regReturnsUnsub);
+    check('configs.share (standalone) returns a decodable code, no url', cfg.shareStandalone && cfg.shareCodeDecodes);
+    check('configs.share rejects an oversized config', cfg.shareOversizeRejects);
+    check('configs.send (standalone) resolves { ok:false }', cfg.sendStandalone);
 } catch (e) {
     check('run completed', false, e.message);
 } finally {

@@ -25,7 +25,7 @@ function ok(cond, label) {
 
 // The contract, spelled out. Order is part of the pin only to keep diffs
 // honest — the SDK treats caps as a set.
-const EXPECTED_CAPS = ['peer.sendTo', 'peer.roster', 'peer.meta', 'peer.party', 'storage.bridge', 'ui.bridge'];
+const EXPECTED_CAPS = ['peer.sendTo', 'peer.roster', 'peer.meta', 'peer.party', 'storage.bridge', 'ui.bridge', 'configs.bridge'];
 
 console.log('caps contract — welcome.caps is the launcher↔SDK compat contract');
 

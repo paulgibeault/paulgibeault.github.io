@@ -109,6 +109,11 @@
  *   Arcade.html.escape(str)                       → HTML-escaped string
  *   Arcade.html`<b>${userText}</b>`               auto-escapes interpolations
  *
+ *   // Config exchange — share/receive a named game config (packs, variants)
+ *   Arcade.configs.register(type, ({type,v,data}) => {…})  data is HOSTILE
+ *   Arcade.configs.share(type, data)   → { ok, code, url? }   code/deep link
+ *   Arcade.configs.send(type, data)    → { ok, sent }         push to a peer
+ *
  *   // Storage durability
  *   Arcade.state.set(key, value)                  → true | false (quota)
  *   Arcade.onStorageError(fn)                      fired when a write is dropped
@@ -168,7 +173,7 @@
     // tools/sdk-version-unit.mjs enforces all three. Launcher↔SDK compat is
     // still negotiated by welcome.caps, never by this number; it exists for
     // humans (bug reports, CHANGELOG) and for the pinned-URL publish scheme.
-    var SDK_SEMVER = '3.3.0';
+    var SDK_SEMVER = '3.4.0';
     var HANDSHAKE_TIMEOUT_MS = 300;
     // Opaque-origin (sandboxed, no allow-same-origin) frames have no storage
     // to fall back to, so waiting longer for the launcher costs nothing and
@@ -624,34 +629,128 @@
     // oversize, bad charset, bad base64, bad JSON, bad envelope) — codes
     // cross devices, so decode must never throw and never let a crafted code
     // smuggle prototype-polluting keys into the parsed object.
-    var shareApi = {
-        encode: function (obj, opts) {
-            var v = (opts && typeof opts.v === 'number' && isFinite(opts.v)) ? (opts.v >>> 0) : 1;
-            var json = JSON.stringify({ v: v, d: obj === undefined ? null : obj });
-            var bytes = new TextEncoder().encode(json);
-            var bin = '';
-            for (var i = 0; i < bytes.length; i += 0x8000) {
-                bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    // Versioned base64url share codec — internal fns so Arcade.configs can reuse
+    // the exact encode/decode (same envelope, same prototype-pollution guard).
+    function shareEncode(obj, opts) {
+        var v = (opts && typeof opts.v === 'number' && isFinite(opts.v)) ? (opts.v >>> 0) : 1;
+        var json = JSON.stringify({ v: v, d: obj === undefined ? null : obj });
+        var bytes = new TextEncoder().encode(json);
+        var bin = '';
+        for (var i = 0; i < bytes.length; i += 0x8000) {
+            bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+        }
+        return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+    function shareDecode(code) {
+        if (typeof code !== 'string' || !code || code.length > 8192) return null;
+        if (!/^[A-Za-z0-9_-]+$/.test(code)) return null;
+        try {
+            var b64 = code.replace(/-/g, '+').replace(/_/g, '/');
+            while (b64.length % 4) b64 += '=';
+            var bin = atob(b64);
+            var bytes = new Uint8Array(bin.length);
+            for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            var env = JSON.parse(new TextDecoder().decode(bytes), function (k, v) {
+                if (k === '__proto__' || k === 'constructor' || k === 'prototype') return undefined;
+                return v;
+            });
+            if (!env || typeof env !== 'object' || Array.isArray(env)
+                || typeof env.v !== 'number' || !('d' in env)) return null;
+            return { v: env.v >>> 0, data: env.d };
+        } catch (e) { return null; }
+    }
+    var shareApi = { encode: shareEncode, decode: shareDecode };
+
+    // ─── Config exchange (Arcade.configs) ─────────────────────────
+    // Share/receive named game-config payloads (sowduku packs, cardstock
+    // variants, …) as share codes/deep links or via a direct push to a linked
+    // peer. The launcher validates transport shape + prompts the user; the GAME
+    // MUST treat inbound `data` as HOSTILE — semantic-validate every field and
+    // render only via textContent / Arcade.html.escape, never innerHTML.
+    var CONFIG_TYPE_RE = /^[a-z0-9_-]{1,32}$/;
+    var CONFIG_PENDING_CAP = 4;
+    var configHandlers = {};
+    var pendingInboundConfigs = []; // {type, v, data} that arrived before register()
+    function deliverConfig(entry) {
+        var h = configHandlers[entry.type];
+        if (typeof h !== 'function') return false;
+        try { h({ type: entry.type, v: entry.v, data: entry.data }); }
+        catch (e) { logListenerError(e); }
+        return true;
+    }
+    function postConfigAck(type, ok) {
+        if (!framed) return;
+        try { postToParent({ type: 'arcade:config.ack', t: type, ok: !!ok }); } catch (e) {}
+    }
+    function handleInboundConfig(data) {
+        if (!data || typeof data.t !== 'string' || !CONFIG_TYPE_RE.test(data.t)) return;
+        var entry = { type: data.t, v: (typeof data.v === 'number') ? data.v : 1, data: data.d };
+        if (configHandlers[entry.type]) {
+            deliverConfig(entry);
+            postConfigAck(entry.type, true);
+        } else {
+            // Delivery can beat register() — queue a few (capped), drained when
+            // the game registers. No ack yet: the launcher's timeout toasts if a
+            // handler never appears.
+            if (pendingInboundConfigs.length >= CONFIG_PENDING_CAP) pendingInboundConfigs.shift();
+            pendingInboundConfigs.push(entry);
+        }
+    }
+    var configsApi = {
+        // Register a handler for one config type. Drains any queued inbound
+        // configs of that type. Returns an unsubscribe fn.
+        register: function (type, handler) {
+            ensureGameId();
+            if (typeof type !== 'string' || !CONFIG_TYPE_RE.test(type)) {
+                throw new Error('Arcade.configs.register: type must match ' + CONFIG_TYPE_RE);
             }
-            return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+            if (typeof handler !== 'function') {
+                throw new Error('Arcade.configs.register: handler must be a function');
+            }
+            configHandlers[type] = handler;
+            var kept = [];
+            for (var i = 0; i < pendingInboundConfigs.length; i++) {
+                var p = pendingInboundConfigs[i];
+                if (p.type === type) { deliverConfig(p); postConfigAck(type, true); }
+                else kept.push(p);
+            }
+            pendingInboundConfigs = kept;
+            return function () { if (configHandlers[type] === handler) delete configHandlers[type]; };
         },
-        decode: function (code) {
-            if (typeof code !== 'string' || !code || code.length > 8192) return null;
-            if (!/^[A-Za-z0-9_-]+$/.test(code)) return null;
-            try {
-                var b64 = code.replace(/-/g, '+').replace(/_/g, '/');
-                while (b64.length % 4) b64 += '=';
-                var bin = atob(b64);
-                var bytes = new Uint8Array(bin.length);
-                for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-                var env = JSON.parse(new TextDecoder().decode(bytes), function (k, v) {
-                    if (k === '__proto__' || k === 'constructor' || k === 'prototype') return undefined;
-                    return v;
-                });
-                if (!env || typeof env !== 'object' || Array.isArray(env)
-                    || typeof env.v !== 'number' || !('d' in env)) return null;
-                return { v: env.v >>> 0, data: env.d };
-            } catch (e) { return null; }
+        // Export `data` as a share code (+ a deep link when framed). Framed with
+        // the configs.bridge cap: the launcher builds the link and opens its
+        // share sheet, resolving { ok, url }. Standalone / no cap: resolves
+        // { ok:true, code, url:null } — the game shows/copies the code itself.
+        share: function (type, data) {
+            ensureGameId();
+            if (typeof type !== 'string' || !CONFIG_TYPE_RE.test(type)) {
+                return Promise.reject(new Error('Arcade.configs.share: bad type'));
+            }
+            var code = shareEncode({ g: gameId, t: type, d: data }, { v: 1 });
+            if (code.length > 4096) {
+                return Promise.reject(new Error('Arcade.configs.share: config too large (code > 4096 chars)'));
+            }
+            if (!framed || peerCaps.indexOf('configs.bridge') === -1) {
+                return Promise.resolve({ ok: true, code: code, url: null });
+            }
+            return bridgeRpc('arcade:configs.op', { op: 'share', code: code }, 0)
+                .then(function (r) { return r || { ok: false, code: code, url: null }; })
+                .catch(function () { return { ok: false, code: code, url: null }; });
+        },
+        // Push `data` directly to a linked peer the user picks (launcher shows a
+        // picker + the receiver a prompt). Resolves { ok, sent }. Standalone /
+        // no cap → { ok:false }.
+        send: function (type, data) {
+            ensureGameId();
+            if (typeof type !== 'string' || !CONFIG_TYPE_RE.test(type)) {
+                return Promise.reject(new Error('Arcade.configs.send: bad type'));
+            }
+            if (!framed || peerCaps.indexOf('configs.bridge') === -1) {
+                return Promise.resolve({ ok: false });
+            }
+            return bridgeRpc('arcade:configs.op', { op: 'send', t: type, d: data }, 0)
+                .then(function (r) { return r || { ok: false }; })
+                .catch(function () { return { ok: false }; });
         }
     };
 
@@ -1295,6 +1394,12 @@
                     if (raw !== null) { try { parsed = JSON.parse(raw); } catch (err) { parsed = null; } }
                     fireKeyChange(data.key, parsed);
                 }
+                break;
+            case 'arcade:config':
+                // A game config the launcher accepted (from a deep link or a
+                // peer push) and already prompted the user about. Deliver to the
+                // registered handler, or queue until register() runs.
+                handleInboundConfig(data);
                 break;
             case 'arcade:sync.conflict':
                 // A concurrent local edit lost LWW to a remote replica write.
@@ -3139,6 +3244,7 @@
         rng: rngApi,     // stateful mulberry32 (.int/.pick/.shuffle/.getState/.setState); rng.hash = FNV-1a
         daily: dailyApi, // dateStr() = device-LOCAL YYYY-MM-DD (the platform rule); seed(salt) per-game daily rng
         share: shareApi, // versioned base64url codes; decode validates, returns null on any garbage
+        configs: configsApi, // share/receive named game-config payloads (codes/links + peer push)
         loop: function (fn) { ensureGameId(); return createLoop(fn); },
         onSuspend: makeSubscriber(listeners.suspend),
         onResume: makeSubscriber(listeners.resume),
