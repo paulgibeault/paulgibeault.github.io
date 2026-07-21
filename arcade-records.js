@@ -12,7 +12,7 @@
  * interpolated into innerHTML.
  */
 import {
-    collectGameData, countPopulated, resetKeysFor, relevantKey,
+    collectGameData, countPopulated, resetKeysFor, relevantKey, isRemoteEntry,
     formatRecordValue, formatScore, formatDate, prettifyCategory
 } from './arcade-records-core.js';
 
@@ -42,6 +42,9 @@ export function initRecords(host) {
     }
     function gameById(id) { return games.find((g) => g.id === id) || null; }
     function gameName(game) { return (game && (game.name || game.id)) || ''; }
+    function myDeviceId() {
+        try { return store.getItem('arcade.v1._meta.deviceId'); } catch (e) { return null; }
+    }
 
     function el(tag, className, text) {
         const node = document.createElement(tag);
@@ -136,14 +139,25 @@ export function initRecords(host) {
         }
         if (data.scores.length) {
             bodyEl.appendChild(sectionHeading('📊', 'Leaderboards'));
+            const myDev = myDeviceId();
+            const anyShared = data.scores.some((b) => b.entries.some((e) => isRemoteEntry(e, myDev)));
+            if (anyShared) bodyEl.appendChild(el('p', 'records-shared-note', '🔗 Shared across your linked devices'));
             const grid = el('div', 'records-boards');
             for (const board of data.scores) {
                 const wrap = el('div', 'records-board');
                 wrap.appendChild(el('h4', 'records-board__title', prettifyCategory(board.category)));
                 board.entries.forEach((entry, i) => {
-                    const row = el('div', 'records-board__row' + (i === 0 ? ' records-board__row--top' : ''));
+                    const remote = isRemoteEntry(entry, myDev);
+                    const row = el('div', 'records-board__row' + (i === 0 ? ' records-board__row--top' : '') + (remote ? ' records-board__row--linked' : ''));
                     row.appendChild(el('span', 'records-board__rank', rankLabel(i)));
-                    row.appendChild(el('span', 'records-board__name', entry.name || '—'));
+                    const nameCell = el('span', 'records-board__name');
+                    nameCell.appendChild(el('span', 'records-board__name-text', entry.name || '—'));
+                    if (remote) {
+                        const g = el('span', 'records-board__linked', '🔗');
+                        g.title = 'From a linked device';
+                        nameCell.appendChild(g);
+                    }
+                    row.appendChild(nameCell);
                     row.appendChild(el('span', 'records-board__score', formatScore(entry.score)));
                     wrap.appendChild(row);
                 });
@@ -173,7 +187,7 @@ export function initRecords(host) {
         const game = gameById(activeId);
         if (!game) return;
         const ok = await confirmReset('Delete all leaderboards and records for “' + gameName(game)
-            + '” on this device? This can’t be undone.');
+            + '” on this device? This can’t be undone. Linked devices keep their own copies.');
         if (!ok) return;
         const keys = resetKeysFor(store, game.id);
         for (const k of keys) { try { store.removeItem(k); } catch (e) {} }

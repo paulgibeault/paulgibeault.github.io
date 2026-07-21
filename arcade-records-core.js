@@ -86,7 +86,10 @@ export function collectGameData(store, gameId) {
                     score: e.score,
                     name: (typeof e.name === 'string' && e.name) ? e.name.slice(0, NAME_MAX) : '',
                     ts: isFiniteNum(e.ts) ? e.ts : null,
-                    key: (typeof e.key === 'string') ? e.key.slice(0, LABEL_MAX) : null
+                    key: (typeof e.key === 'string') ? e.key.slice(0, LABEL_MAX) : null,
+                    // dev (which device set it) drives the "from a linked device"
+                    // indicator; sliced, never trusted for anything but display.
+                    dev: (typeof e.dev === 'string' && e.dev) ? e.dev.slice(0, 64) : null
                 }));
             // Never trust the stored sort — re-sort by the category's declared
             // order, then cut to the top N. (A single mis-ordered add() upstream
@@ -203,6 +206,13 @@ function formatDuration(ms) {
 export function formatDate(ts) {
     if (!isFiniteNum(ts)) return '';
     try { return new Date(ts).toLocaleDateString(); } catch (e) { return ''; }
+}
+
+// A leaderboard entry set by another of the player's linked devices (used for
+// the "shared" affordance). myDeviceId is arcade.v1._meta.deviceId.
+export function isRemoteEntry(entry, myDeviceId) {
+    return !!(entry && typeof entry.dev === 'string' && entry.dev
+        && typeof myDeviceId === 'string' && myDeviceId && entry.dev !== myDeviceId);
 }
 
 // Fallback human label for a category slug when no record.label is set:

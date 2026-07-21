@@ -1325,13 +1325,31 @@ body.app-in-game .launcher-menu[data-open="true"] .launcher-menu__panel {
     justify-self: end;
 }
 .records-board__name {
+    display: flex;
+    align-items: baseline;
+    gap: 5px;
+    min-width: 0;
+    justify-self: start;
+}
+.records-board__name-text {
     font-family: var(--font-mono);
     font-size: 0.82rem;
     color: var(--snow-white);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    justify-self: start;
+}
+.records-board__linked {
+    flex: none;
+    font-size: 0.68em;
+    opacity: 0.75;
+}
+.records-shared-note {
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    color: var(--field-gold);
+    opacity: 0.85;
+    margin: -6px 0 10px;
 }
 
 .records-empty {

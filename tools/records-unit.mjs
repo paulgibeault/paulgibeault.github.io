@@ -10,7 +10,7 @@
  * store. Auto-discovered by run-units.mjs; run: `npm test`.
  */
 import {
-    collectGameData, countPopulated, resetKeysFor, relevantKey,
+    collectGameData, countPopulated, resetKeysFor, relevantKey, isRemoteEntry,
     formatRecordValue, formatScore, formatDate, prettifyCategory,
     RENDER_TOP_N, MAX_CATEGORIES_PER_KIND
 } from '../arcade-records-core.js';
@@ -131,6 +131,22 @@ ok(relevantKey('g', K('g', '_scoreOrders')) === true, 'true for _scoreOrders');
 ok(relevantKey('g', K('g', 'state')) === false, 'false for state');
 ok(relevantKey('g', K('g-2', 'scores.a')) === false, 'false across games (prefix trap)');
 ok(relevantKey('g', 42) === false, 'false for a non-string key');
+
+console.log('\nisRemoteEntry (shared-leaderboard affordance) + dev preserved');
+{
+    const s = store({
+        [K('g', 'scores.high')]: JSON.stringify([
+            { score: 100, name: 'Me', ts: 1, dev: 'dev-aaaaaa', eid: 'e1' },
+            { score: 90, name: 'You', ts: 2, dev: 'dev-bbbbbb', eid: 'e2' }
+        ])
+    });
+    const board = collectGameData(s, 'g').scores[0];
+    ok(board.entries[0].dev === 'dev-aaaaaa', 'collectGameData preserves dev for the affordance');
+    ok(isRemoteEntry(board.entries.find(e => e.dev === 'dev-bbbbbb'), 'dev-aaaaaa') === true, 'other device’s entry is remote');
+    ok(isRemoteEntry(board.entries.find(e => e.dev === 'dev-aaaaaa'), 'dev-aaaaaa') === false, 'my own entry is not remote');
+    ok(isRemoteEntry({ score: 5, ts: 1 }, 'dev-aaaaaa') === false, 'unattributed entry is not remote');
+    ok(isRemoteEntry({ dev: 'dev-bbbbbb' }, null) === false, 'no local device id → nothing marked remote');
+}
 
 console.log('\nformatRecordValue / formatScore');
 ok(formatRecordValue(102130, 'duration-ms') === '1:42.13', 'duration-ms 102130 → 1:42.13');
