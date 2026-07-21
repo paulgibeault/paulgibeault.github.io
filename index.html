@@ -310,6 +310,10 @@
         </div>
         <div class="launcher-menu__section">
             <div class="launcher-menu__heading">Game Data</div>
+            <button type="button" class="launcher-menu__item" id="menu-records" title="View leaderboards and personal records across every game on this device">
+                <span class="launcher-menu__item-icon" aria-hidden="true">🏆</span>
+                <span class="launcher-menu__item-label">Records</span>
+            </button>
             <button type="button" class="launcher-menu__item" id="btn-save" title="Export all arcade save data to a JSON file">
                 <span class="launcher-menu__item-icon" aria-hidden="true">↧</span>
                 <span class="launcher-menu__item-label">Export to File</span>
@@ -467,6 +471,27 @@
     </div>
 </div>
 
+<!-- ========== RECORDS DIALOG ========== -->
+<!-- Leaderboards + personal records aggregated across every catalog game
+     (issues #9 / #12). The launcher reads each game's arcade.v1.<id>.scores.*
+     / .records.* keys straight from its own localStorage (games are
+     opaque-origin frames that can't touch it), so there is no per-game code
+     here — the tabs come from catalog.json and records are self-describing.
+     Rendered entirely by arcade-records.js; this is just the shell. -->
+<div class="records-dialog" id="records-dialog" hidden>
+    <div class="records-dialog__panel" role="dialog" aria-modal="true" aria-labelledby="records-dialog-title">
+        <header class="records-dialog__header">
+            <h2 id="records-dialog-title">Records</h2>
+            <button type="button" class="records-dialog__close" id="records-dialog-close" aria-label="Close">✕</button>
+        </header>
+        <div class="records-dialog__tabs" id="records-dialog-tabs" role="tablist" aria-label="Games"></div>
+        <div class="records-dialog__body" id="records-dialog-body" role="tabpanel" aria-live="polite"></div>
+        <footer class="records-dialog__footer">
+            <button type="button" class="records-dialog__reset" id="records-dialog-reset" hidden>Reset all records for this game</button>
+        </footer>
+    </div>
+</div>
+
 <div class="page-wrapper">
 
     <!-- ========== LAUNCHER HEADER ========== -->
@@ -493,21 +518,6 @@
         <span class="net-watermark__label" id="net-watermark-label"></span>
     </div>
     <div class="visually-hidden" id="net-activity-live" role="status" aria-live="polite"></div>
-
-    <!-- Non-blocking confirm/prompt. window.confirm/prompt freeze the event
-         loop — fired right after a P2P channel opens (naming a new connection,
-         the auto-reconnect opt-in) that stalls heartbeats and the peer sees the
-         fresh link flap to 'interrupted'. This modal keeps the loop running. -->
-    <div id="arcade-dialog" class="arcade-dialog-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="arcade-dialog-msg">
-        <div class="arcade-dialog">
-            <p class="arcade-dialog__msg" id="arcade-dialog-msg"></p>
-            <input type="text" class="arcade-dialog__input hidden" id="arcade-dialog-input" autocomplete="off">
-            <div class="arcade-dialog__actions">
-                <button type="button" class="topbar-btn arcade-dialog__btn" id="arcade-dialog-cancel">Cancel</button>
-                <button type="button" class="topbar-btn arcade-dialog__btn" id="arcade-dialog-ok">OK</button>
-            </div>
-        </div>
-    </div>
 
     <!-- ========== GAME VIEW ========== -->
     <div id="view-game" class="hidden">
@@ -544,6 +554,24 @@
         </div>
     </div>
 
+</div>
+
+<!-- Non-blocking confirm/prompt. window.confirm/prompt freeze the event loop —
+     fired right after a P2P channel opens (naming a new connection, the
+     auto-reconnect opt-in) that stalls heartbeats and the peer sees the fresh
+     link flap to 'interrupted'. This modal keeps the loop running. Lives at
+     body level (not inside .page-wrapper, which is a z-index:2 stacking context)
+     so its z-index:5000 is honoured above every dialog — otherwise a confirm
+     opened from a sibling modal (Multiplayer, Records) renders behind it. -->
+<div id="arcade-dialog" class="arcade-dialog-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="arcade-dialog-msg">
+    <div class="arcade-dialog">
+        <p class="arcade-dialog__msg" id="arcade-dialog-msg"></p>
+        <input type="text" class="arcade-dialog__input hidden" id="arcade-dialog-input" autocomplete="off">
+        <div class="arcade-dialog__actions">
+            <button type="button" class="topbar-btn arcade-dialog__btn" id="arcade-dialog-cancel">Cancel</button>
+            <button type="button" class="topbar-btn arcade-dialog__btn" id="arcade-dialog-ok">OK</button>
+        </div>
+    </div>
 </div>
 
 <script>
@@ -2694,6 +2722,49 @@
         window.__arcade.renderKnownPeers = render; // live-refresh hook for the P2P bridge
         window.__arcade.renamePeer = renamePeer;    // used to accept/edit a new-connection's suggested name
     })();
+</script>
+
+<script type="module">
+    // ==========================================
+    // RECORDS SHEET — the "Records" menu item (issues #9 / #12). Reads every
+    // game's leaderboards/records straight from launcher-origin localStorage
+    // (no bridge round-trip: game frames are opaque-origin and can't touch it)
+    // and renders them tabbed by catalog game. Wired last so window.__arcade
+    // .{catalog,pool,sync,dialog,showToast} all exist; the host object is the
+    // same capability-injection contract the storage modules use.
+    // ==========================================
+    import { initRecords } from './arcade-records.js';
+    import { gameHref } from './arcade-catalog.js';
+
+    const recordsHost = {
+        getCatalog: () => window.__arcade.catalog,
+        dialog: (opts) => window.__arcade.dialog(opts),
+        showToast: (msg, opts) => { if (window.__arcade.showToast) window.__arcade.showToast(msg, opts); },
+        closeLauncherMenu: () => { if (window.__arcade.closeLauncherMenu) window.__arcade.closeLauncherMenu(); },
+        openGame: (game) => { if (window.__arcade.showGame) window.__arcade.showGame(game.id, gameHref(game), game.name); },
+        isGameMounted: (id) => {
+            const pool = window.__arcade.pool;
+            return !!pool && pool.mountedGameIds().indexOf(id) !== -1;
+        },
+        // Push the deletion into a mounted frame's cache so its next save can't
+        // resurrect the wiped keys from stale lsCache.
+        notifyGameKeyRemoved: (id, key) => {
+            const pool = window.__arcade.pool;
+            if (pool) pool.postToIframe(id, { type: 'arcade:state.changed', key, value: null });
+        },
+        // Tombstone sync-opted keys so a paired peer doesn't replicate them
+        // back after a reset.
+        onKeysRemoved: (id, keys) => {
+            if (window.__arcade.sync) {
+                for (const k of keys) window.__arcade.sync.noteLocalWrite(k, null);
+            }
+        }
+    };
+
+    const records = initRecords(recordsHost);
+    window.__arcade.records = records;
+    const recordsBtn = document.getElementById('menu-records');
+    if (recordsBtn) recordsBtn.addEventListener('click', () => records.open());
 </script>
 
 </body>

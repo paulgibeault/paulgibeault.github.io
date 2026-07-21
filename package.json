@@ -34,6 +34,7 @@
     "export-roundtrip": "node tools/export-roundtrip-acceptance.mjs",
     "export-advanced-acceptance": "node tools/export-advanced-acceptance.mjs",
     "catalog-acceptance": "node tools/catalog-acceptance.mjs",
+    "records-acceptance": "node tools/records-acceptance.mjs",
     "acceptance:pool": "node tools/acceptance.mjs --pool --serve --catalog tools/fixtures/ci-catalog.json"
   },
   "devDependencies": {
