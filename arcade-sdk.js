@@ -145,6 +145,12 @@
  *   Arcade.records.list()  →  { [category]: record }
  *   Arcade.records.clear(category)
  *
+ *   // Managed WebAudio SFX (ctx unlock, volume, suspend/resume owned by SDK)
+ *   Arcade.audio.cue('blip', { type:'square', freq:660, dur:0.08, gain:0.3 })
+ *   Arcade.audio.play('blip')                     or play(spec) / play(name, overrides)
+ *   Arcade.audio.play([{freq:523,dur:0.1},{freq:784,dur:0.1}])  timed sequence
+ *   Arcade.audio.enabled() / Arcade.audio.context()
+ *
  *   // Suspended-time-aware game timer
  *   const t = Arcade.session.start();             auto-pauses on onSuspend
  *   const t = Arcade.session.start({ persistKey: 'sessionElapsed' });
@@ -173,7 +179,7 @@
     // tools/sdk-version-unit.mjs enforces all three. Launcher↔SDK compat is
     // still negotiated by welcome.caps, never by this number; it exists for
     // humans (bug reports, CHANGELOG) and for the pinned-URL publish scheme.
-    var SDK_SEMVER = '3.4.0';
+    var SDK_SEMVER = '3.5.0';
     var HANDSHAKE_TIMEOUT_MS = 300;
     // Opaque-origin (sandboxed, no allow-same-origin) frames have no storage
     // to fall back to, so waiting longer for the launcher costs nothing and
@@ -2842,6 +2848,166 @@
         }
     };
 
+    // ─── Audio (managed WebAudio SFX) ─────────────────────────────
+    // One AudioContext per game, created lazily, UNLOCKED on the first user
+    // gesture (autoplay policy), master gain wired to Arcade.settings
+    // .audioVolume(), and suspended when the launcher hides the game (battery)
+    // then resumed on return. The SDK owns every foot-gun games kept
+    // re-hand-rolling: lazy ctx, gesture unlock, resume-after-suspend, and the
+    // exponentialRamp-from/to-zero crash (WebAudio forbids it — we envelope
+    // with linear ramps). Games just declare cues and play them.
+    var AudioCtor = window.AudioContext || window.webkitAudioContext;
+    var audioCtx = null;
+    var masterGain = null;
+    var audioUnlockArmed = false;
+    var audioCues = {};
+    var noiseBuffer = null;
+    var AUDIO_SEQ_CAP = 32; // max voices per play() (a cue array is bounded)
+
+    function audioVolume() {
+        var v = settings.audioVolume;
+        return (typeof v === 'number' && isFinite(v)) ? Math.max(0, Math.min(1, v)) : 1;
+    }
+    function ensureAudioCtx() {
+        if (audioCtx || !AudioCtor) return audioCtx;
+        try {
+            audioCtx = new AudioCtor();
+            masterGain = audioCtx.createGain();
+            masterGain.gain.value = audioVolume();
+            masterGain.connect(audioCtx.destination);
+        } catch (e) { audioCtx = null; masterGain = null; }
+        return audioCtx;
+    }
+    function armAudioUnlock() {
+        if (audioUnlockArmed) return;
+        audioUnlockArmed = true;
+        var unlock = function () {
+            if (audioCtx && audioCtx.state === 'suspended' && !suspendedNow) {
+                try { audioCtx.resume(); } catch (e) {}
+            }
+        };
+        var opts = { passive: true };
+        ['pointerdown', 'mousedown', 'touchstart', 'keydown'].forEach(function (ev) {
+            try { document.addEventListener(ev, unlock, opts); } catch (e) {}
+        });
+    }
+    function getNoiseBuffer() {
+        if (noiseBuffer || !audioCtx) return noiseBuffer;
+        var n = Math.floor(audioCtx.sampleRate * 1);
+        var buf = audioCtx.createBuffer(1, n, audioCtx.sampleRate);
+        var data = buf.getChannelData(0);
+        for (var i = 0; i < n; i++) data[i] = Math.random() * 2 - 1;
+        noiseBuffer = buf;
+        return noiseBuffer;
+    }
+    function audioClamp(v, lo, hi, dflt) {
+        return (typeof v === 'number' && isFinite(v)) ? Math.max(lo, Math.min(hi, v)) : dflt;
+    }
+    // Schedule one voice (tone or noise) starting at ctx-time `at`.
+    function scheduleVoice(spec, at) {
+        var ctx = audioCtx;
+        var dur = audioClamp(spec.dur, 0.001, 30, 0.15);
+        var peak = audioClamp(spec.gain, 0, 1, 0.3);
+        if (peak <= 0) return;
+        var attack = audioClamp(spec.attack, 0, dur, Math.min(0.005, dur / 4));
+        var release = audioClamp(spec.release, 0, dur, Math.min(0.05, dur));
+        var tEnd = at + dur;
+        var g = ctx.createGain();
+        // Linear envelope to/from true zero. exponentialRampToValueAtTime CANNOT
+        // touch 0 (the crash both games hit); linear can, and sounds fine for SFX.
+        g.gain.setValueAtTime(0, at);
+        g.gain.linearRampToValueAtTime(peak, at + attack);
+        g.gain.setValueAtTime(peak, Math.max(at + attack, tEnd - release));
+        g.gain.linearRampToValueAtTime(0, tEnd);
+        g.connect(masterGain);
+        var src;
+        if (spec.type === 'noise') {
+            src = ctx.createBufferSource();
+            src.buffer = getNoiseBuffer();
+        } else {
+            src = ctx.createOscillator();
+            src.type = (spec.type === 'square' || spec.type === 'sawtooth' || spec.type === 'triangle') ? spec.type : 'sine';
+            var f0 = audioClamp(spec.freq, 1, 20000, 440);
+            src.frequency.setValueAtTime(f0, at);
+            if (typeof spec.toFreq === 'number' && isFinite(spec.toFreq)) {
+                src.frequency.linearRampToValueAtTime(Math.max(1, Math.min(20000, spec.toFreq)), tEnd);
+            }
+        }
+        src.connect(g);
+        try { src.start(at); src.stop(tEnd + 0.02); } catch (e) {}
+        src.onended = function () { try { src.disconnect(); } catch (e) {} try { g.disconnect(); } catch (e) {} };
+    }
+    function resolveCue(specOrName, overrides) {
+        var spec = (typeof specOrName === 'string') ? audioCues[specOrName] : specOrName;
+        if (spec === undefined || spec === null) return null;
+        if (isPlainObject(spec) && isPlainObject(overrides)) {
+            var merged = {};
+            var k;
+            for (k in spec) if (Object.prototype.hasOwnProperty.call(spec, k)) merged[k] = spec[k];
+            for (k in overrides) if (Object.prototype.hasOwnProperty.call(overrides, k)) merged[k] = overrides[k];
+            return merged;
+        }
+        return spec;
+    }
+    var audioApi = {
+        // Register a named cue — a spec object, or an array of specs played as a
+        // timed sequence: spec[i] starts spec[i].delay seconds after the
+        // previous voice's START, or (no delay) back-to-back after its DURATION;
+        // an all-`delay:0` array is a chord. Returns Arcade.audio for chaining.
+        //   spec: { type:'sine'|'square'|'sawtooth'|'triangle'|'noise',
+        //           freq, toFreq?, dur, gain, attack?, release?, delay? }
+        cue: function (name, spec) {
+            if (typeof name === 'string' && name) audioCues[name] = spec;
+            return audioApi;
+        },
+        // Play a registered cue by name (with optional shallow overrides) or an
+        // inline spec / spec-array. Fire-and-forget; silent + cheap when muted or
+        // WebAudio is unavailable.
+        play: function (specOrName, overrides) {
+            if (audioVolume() <= 0) return audioApi;
+            if (!ensureAudioCtx()) return audioApi;
+            armAudioUnlock();
+            if (audioCtx.state === 'suspended' && !suspendedNow) { try { audioCtx.resume(); } catch (e) {} }
+            var spec = resolveCue(specOrName, overrides);
+            if (spec === null) return audioApi;
+            var at = audioCtx.currentTime;
+            if (Array.isArray(spec)) {
+                var prevDur = 0;
+                var count = Math.min(spec.length, AUDIO_SEQ_CAP);
+                for (var i = 0; i < count; i++) {
+                    var s = spec[i];
+                    if (!isPlainObject(s)) continue;
+                    if (i > 0) {
+                        at += (typeof s.delay === 'number' && isFinite(s.delay)) ? Math.max(0, s.delay) : prevDur;
+                    }
+                    scheduleVoice(s, at);
+                    prevDur = audioClamp(s.dur, 0.001, 30, 0.15);
+                }
+            } else if (isPlainObject(spec)) {
+                scheduleVoice(spec, at);
+            }
+            return audioApi;
+        },
+        // True when WebAudio exists and volume > 0 (feature/mute detect).
+        enabled: function () { return !!AudioCtor && audioVolume() > 0; },
+        // The managed AudioContext (advanced; null before first play or when
+        // WebAudio is unavailable). For games that need custom node graphs.
+        context: function () { return audioCtx; }
+    };
+    // Master gain tracks the launcher's volume; ctx follows the game's
+    // suspend/resume lifecycle (same hooks the session timer uses).
+    makeSubscriber(listeners.settingsChange)(function () {
+        if (!masterGain || !audioCtx) return;
+        try { masterGain.gain.setTargetAtTime(audioVolume(), audioCtx.currentTime, 0.01); }
+        catch (e) { try { masterGain.gain.value = audioVolume(); } catch (e2) {} }
+    });
+    makeSubscriber(listeners.suspend)(function () {
+        if (audioCtx && audioCtx.state === 'running') { try { audioCtx.suspend(); } catch (e) {} }
+    });
+    makeSubscriber(listeners.resume)(function () {
+        if (audioCtx && audioCtx.state === 'suspended') { try { audioCtx.resume(); } catch (e) {} }
+    });
+
     // ─── Managed rAF loop ─────────────────────────────────────────
     // Every canvas game re-implements "cancel rAF on suspend, re-request on
     // resume" and someone always gets one leg wrong. Arcade.loop(fn) owns
@@ -3229,6 +3395,7 @@
         scores: scoresApi,
         stats: statsApi,
         records: recordsApi,
+        audio: audioApi,
         session: sessionApi,
         store: storeApi,
         files: filesApi,

@@ -251,6 +251,47 @@ try {
     check('configs.share (standalone) returns a decodable code, no url', cfg.shareStandalone && cfg.shareCodeDecodes);
     check('configs.share rejects an oversized config', cfg.shareOversizeRejects);
     check('configs.send (standalone) resolves { ok:false }', cfg.sendStandalone);
+
+    // ── Arcade.audio — managed WebAudio SFX (#38) ──
+    // Every play() variant below must run without throwing (the page-error
+    // listener above catches any) — that pins the ramp-from-zero foot-gun fix
+    // and the hostile-spec clamping.
+    const a1 = await page.evaluate(() => {
+        const out = {};
+        const A = Arcade.audio;
+        out.hasApi = !!A && typeof A.cue === 'function' && typeof A.play === 'function'
+            && typeof A.enabled === 'function' && typeof A.context === 'function';
+        out.enabledBool = typeof A.enabled() === 'boolean';
+        out.playChains = A.play({ type: 'sine', freq: 440, dur: 0.03, gain: 0.2 }) === A;
+        out.ctxExists = !!A.context() && typeof A.context().state === 'string';
+        A.cue('blip', { type: 'square', freq: 660, dur: 0.03, gain: 0.2 });
+        A.play('blip');
+        A.play('blip', { freq: 880 });                                   // registered cue + override
+        A.play([{ freq: 523, dur: 0.02 }, { freq: 784, dur: 0.02 }]);      // sequence
+        A.play([{ freq: 400, dur: 0.03, delay: 0 }, { freq: 500, dur: 0.03, delay: 0 }]); // chord
+        A.play({ type: 'noise', dur: 0.02, gain: 0.15 });
+        A.play({ gain: 0 });                                              // silent — skipped
+        A.play({ dur: -5, freq: -100, gain: 5 });                         // clamped, no throw
+        A.play({ type: 'weird', freq: 9e9 });                             // unknown type / huge freq
+        A.play('nope-not-a-cue');                                         // unknown name → no-op
+        A.play(null); A.play(undefined); A.play(42);                      // junk → no-op
+        return out;
+    });
+    check('Arcade.audio exposes cue/play/enabled/context', a1.hasApi);
+    check('audio.enabled() returns a boolean', a1.enabledBool);
+    check('audio.play returns Arcade.audio (chainable)', a1.playChains);
+    check('audio.play lazily creates a managed AudioContext', a1.ctxExists);
+
+    // A real user gesture must unlock the context (autoplay policy).
+    await page.mouse.click(200, 200);
+    const a2 = await page.evaluate(async () => {
+        Arcade.audio.play('blip');
+        for (let i = 0; i < 20 && Arcade.audio.context().state !== 'running'; i++) {
+            await new Promise((r) => setTimeout(r, 50));
+        }
+        return { state: Arcade.audio.context().state };
+    });
+    check('audio.context() is running after a user gesture', a2.state === 'running', a2.state);
 } catch (e) {
     check('run completed', false, e.message);
 } finally {

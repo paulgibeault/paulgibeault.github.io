@@ -30,6 +30,25 @@ semver is for humans and URLs, never checked on the wire.
 
 ---
 
+## 3.5.0 — 2026-07-20
+
+Managed WebAudio SFX (`Arcade.audio`, #38). Lifts the highest-bug-density audio
+plumbing games kept re-hand-rolling — lazy AudioContext, first-gesture unlock,
+master gain wired to `Arcade.settings.audioVolume()`, suspend on hide / resume
+on return, and the exponentialRamp-from-zero crash (enveloped with linear ramps
+instead). Purely local; no cap/wire.
+
+- `Arcade.audio.cue(name, spec)` — register a named cue (a spec object, or an
+  array played as a timed sequence: each voice `delay` seconds after the
+  previous start, or back-to-back by duration; an all-`delay:0` array is a chord).
+- `Arcade.audio.play(nameOrSpec, overrides?)` — play a cue (with optional
+  overrides) or an inline spec/array. Fire-and-forget; silent + cheap when muted.
+  spec: `{ type:'sine'|'square'|'sawtooth'|'triangle'|'noise', freq, toFreq?,
+  dur, gain, attack?, release? }`.
+- `Arcade.audio.enabled()` — WebAudio present and volume > 0.
+- `Arcade.audio.context()` — the managed AudioContext (advanced; null before
+  first play).
+
 ## 3.4.0 — 2026-07-20
 
 Game-config exchange (`Arcade.configs`, #config-exchange). Games can share and
