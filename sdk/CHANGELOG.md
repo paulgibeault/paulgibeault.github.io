@@ -30,6 +30,30 @@ semver is for humans and URLs, never checked on the wire.
 
 ---
 
+## 3.2.0 — 2026-07-20
+
+Personal records API (`Arcade.records`, issue #9). A self-describing per-category
+personal best, distinct from `Arcade.scores` (a sorted top-N leaderboard): one
+record per category, each carrying its own `direction` so "best" is meaningful
+without out-of-band knowledge. This replaces the brittle
+`scores.add(cat, { score: -timeMs })`-then-re-negate workaround for
+lower-is-better metrics. Purely local storage convention (no new welcome cap):
+
+- `Arcade.records.set(category, { value, direction: 'higher'|'lower', label?, format?, meta? })`
+  — `format` ∈ `'duration-ms' | 'integer' | 'percentage'` (unknown values stored
+  as-is for forward-compat); oversized (>4 KB) or non-object `meta` is dropped
+  with a warning, never thrown.
+- `Arcade.records.best(category, rec)` — writes only if `rec.value` beats the
+  stored record under the stored direction; ties do not write (the first-set
+  timestamp is preserved). Returns `{ improved, record }`.
+- `Arcade.records.get(category)` → record | null (a fresh object each call).
+- `Arcade.records.list()` → `{ [category]: record }`, malformed entries skipped.
+- `Arcade.records.clear(category)`.
+
+Stored one key per category at `arcade.v1.<gameId>.records.<category>`, so records
+ride save-export and (when the game opts into `Arcade.sync`) replication with no
+special handling. The launcher's Records sheet reads these generically.
+
 ## 3.1.0 — 2026-07-18
 
 Multi-party star selection (`plans/multi-party-2026-07.md` Phase 2). A device

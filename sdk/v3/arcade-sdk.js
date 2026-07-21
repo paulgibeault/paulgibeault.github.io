@@ -131,6 +131,15 @@
  *   Arcade.stats.getOrInit(category, defaults)    deep-merge load
  *   Arcade.stats.update(category, prev => next)
  *
+ *   // Self-describing personal best per category (the launcher's Records
+ *   // sheet renders these generically — no per-game launcher code)
+ *   Arcade.records.set(category, { value, direction: 'higher'|'lower', label?, format?, meta? })
+ *                                  format: 'duration-ms' | 'integer' | 'percentage'
+ *   Arcade.records.best(category, { value, direction, ... })   writes only if better
+ *   Arcade.records.get(category)  →  { value, direction, ts, label?, format?, meta? } | null
+ *   Arcade.records.list()  →  { [category]: record }
+ *   Arcade.records.clear(category)
+ *
  *   // Suspended-time-aware game timer
  *   const t = Arcade.session.start();             auto-pauses on onSuspend
  *   const t = Arcade.session.start({ persistKey: 'sessionElapsed' });
@@ -159,7 +168,7 @@
     // tools/sdk-version-unit.mjs enforces all three. Launcher↔SDK compat is
     // still negotiated by welcome.caps, never by this number; it exists for
     // humans (bug reports, CHANGELOG) and for the pinned-URL publish scheme.
-    var SDK_SEMVER = '3.1.0';
+    var SDK_SEMVER = '3.2.0';
     var HANDSHAKE_TIMEOUT_MS = 300;
     // Opaque-origin (sandboxed, no allow-same-origin) frames have no storage
     // to fall back to, so waiting longer for the launcher costs nothing and
@@ -170,6 +179,9 @@
     var GAME_ID_RE = /^[a-z0-9_-]+$/i;
     var SCORES_CAP = 100;
     var SCORES_DEFAULT_LIMIT = 10;
+    var RECORD_LABEL_MAX = 64;
+    var RECORD_FORMAT_MAX = 32;
+    var RECORD_META_MAX = 4096;  // JSON-encoded records meta cap (bytes); oversized meta is dropped, never thrown
 
     // ─── Module state ─────────────────────────────────────────────
     var gameId = null;
@@ -2362,6 +2374,151 @@
         }
     };
 
+    // ─── Records (per-category personal bests) ────────────────────
+    // One self-describing record per category — distinct from scores (a
+    // sorted top-N leaderboard). "Best" is metric-dependent, so each record
+    // carries its own `direction` ('higher'|'lower') plus optional `format`/
+    // `label`, letting the launcher's Records sheet render any record
+    // generically without per-game code. Stored one key per category at
+    // arcade.v1.<gameId>.records.<category>, so it rides save-export and (when
+    // the game opts in) Arcade.sync with no special handling.
+    function recordsKey(category) { return gameKey('records.' + category); }
+    // A stored record is trustworthy only with a finite value and a known
+    // direction; get()/list() and the launcher treat anything else as absent,
+    // so foreign or corrupt data never renders.
+    function isValidRecord(v) {
+        return isPlainObject(v)
+            && typeof v.value === 'number' && isFinite(v.value)
+            && (v.direction === 'higher' || v.direction === 'lower');
+    }
+    // Build the canonical stored shape from caller input. Throws on the two
+    // load-bearing fields (value, direction — never defaulted); tolerates
+    // garnish: label/format are sliced, and oversized / non-object meta is
+    // dropped with a warn rather than thrown (a game must not crash over
+    // metadata). Unknown `format` strings are stored as-is for forward-compat
+    // — the launcher falls back to plain-number rendering.
+    function buildRecord(category, rec) {
+        ensureGameId();
+        if (typeof category !== 'string' || !category) {
+            throw new Error('Arcade.records: category required');
+        }
+        if (!rec || typeof rec !== 'object'
+                || typeof rec.value !== 'number' || !isFinite(rec.value)) {
+            throw new Error('Arcade.records: rec.value must be a finite number');
+        }
+        if (rec.direction !== 'higher' && rec.direction !== 'lower') {
+            throw new Error("Arcade.records: rec.direction must be 'higher' or 'lower'");
+        }
+        var stored = {
+            value: rec.value,
+            direction: rec.direction,
+            ts: (typeof rec.ts === 'number' && isFinite(rec.ts)) ? rec.ts : Date.now()
+        };
+        if (typeof rec.label === 'string' && rec.label) {
+            stored.label = rec.label.slice(0, RECORD_LABEL_MAX);
+        }
+        if (typeof rec.format === 'string' && rec.format) {
+            stored.format = rec.format.slice(0, RECORD_FORMAT_MAX);
+        }
+        if (rec.meta !== undefined) {
+            if (isPlainObject(rec.meta)) {
+                var encoded;
+                try { encoded = JSON.stringify(rec.meta); } catch (e) { encoded = null; }
+                if (encoded !== null && encoded.length <= RECORD_META_MAX) {
+                    stored.meta = rec.meta;
+                } else {
+                    console.warn('[Arcade SDK] records.set("' + category + '"): meta dropped ('
+                        + (encoded === null ? 'not serializable' : 'over ' + RECORD_META_MAX + ' bytes') + ').');
+                }
+            } else {
+                console.warn('[Arcade SDK] records.set("' + category + '"): meta dropped (not a plain object).');
+            }
+        }
+        return stored;
+    }
+    var recordsApi = {
+        // Write (overwrite) the record for a category. Use best() to write
+        // only on improvement.
+        set: function (category, rec) {
+            var stored = buildRecord(category, rec);
+            var k = recordsKey(category);
+            writeJSON(k, stored);
+            fireKeyChange(k, stored);
+            return stored;
+        },
+        // Read one category. Returns null if absent, corrupt, or malformed. A
+        // fresh object every call (readJSON re-parses the raw string in both
+        // storage modes), so mutating the result never touches storage.
+        get: function (category) {
+            ensureGameId();
+            var v = readJSON(recordsKey(category));
+            return isValidRecord(v) ? v : null;
+        },
+        // Every valid record for this game, keyed by category. Corrupt or
+        // foreign-shaped entries are skipped, never surfaced.
+        list: function () {
+            ensureGameId();
+            var prefix = gameKey('records.');
+            var out = {};
+            var take = function (k) {
+                if (k.indexOf(prefix) !== 0) return;
+                var category = k.slice(prefix.length);
+                if (!category) return;
+                var v = readJSON(k);
+                if (isValidRecord(v)) out[category] = v;
+            };
+            if (storageMode === 'bridged') {
+                lsCache.forEach(function (v, k) { take(k); });
+            } else {
+                try {
+                    for (var i = 0; i < localStorage.length; i++) {
+                        var k = localStorage.key(i);
+                        if (k) take(k);
+                    }
+                } catch (e) {}
+            }
+            return out;
+        },
+        // Write rec only if it beats the stored record under the stored
+        // direction. rec carries the full record shape (a bare number can't
+        // establish direction on the first write). Ties do NOT write — the
+        // existing record keeps its original ts. Returns { improved, record }.
+        best: function (category, rec) {
+            var candidate = buildRecord(category, rec);
+            var k = recordsKey(category);
+            var current = readJSON(k);
+            if (!isValidRecord(current)) {
+                writeJSON(k, candidate);
+                fireKeyChange(k, candidate);
+                return { improved: true, record: candidate };
+            }
+            // Stored direction is authoritative — a category's meaning of
+            // "best" is fixed at first write (the scores order-sidecar rule).
+            // A mismatched candidate warns and is judged under the stored one.
+            if (candidate.direction !== current.direction) {
+                console.warn('[Arcade SDK] records.best("' + category + '"): direction "'
+                    + candidate.direction + '" ignored — category established as "' + current.direction + '".');
+            }
+            var improved = current.direction === 'lower'
+                ? candidate.value < current.value
+                : candidate.value > current.value;
+            if (!improved) return { improved: false, record: current };
+            candidate.direction = current.direction;  // keep the established direction
+            writeJSON(k, candidate);
+            fireKeyChange(k, candidate);
+            return { improved: true, record: candidate };
+        },
+        clear: function (category) {
+            ensureGameId();
+            if (typeof category !== 'string' || !category) {
+                throw new Error('Arcade.records.clear: category required');
+            }
+            var k = recordsKey(category);
+            removeKey(k);
+            fireKeyChange(k, null);
+        }
+    };
+
     // ─── Session timer ────────────────────────────────────────────
     // Wall-time tracker that auto-pauses while the game is suspended (iframe
     // hidden). Each `start()` returns an independent tracker — multiple
@@ -2939,6 +3096,7 @@
         html: htmlTemplate,
         scores: scoresApi,
         stats: statsApi,
+        records: recordsApi,
         session: sessionApi,
         store: storeApi,
         files: filesApi,
