@@ -75,7 +75,7 @@ try {
         const tabs = [...document.querySelectorAll('#records-dialog-tabs .records-tab')];
         const body = document.getElementById('records-dialog-body');
         const firstScore = (body.querySelector('.records-board__score') || {}).textContent || '';
-        const recVal = (body.querySelector('.records-list__value') || {}).textContent || '';
+        const recVal = (body.querySelector('.records-card__value') || {}).textContent || '';
         return {
             tabCount: tabs.length,
             tabIds: tabs.map((t) => t.dataset.gameId),

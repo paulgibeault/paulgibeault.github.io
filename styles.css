@@ -1072,9 +1072,9 @@ body.app-in-game .launcher-menu[data-open="true"] .launcher-menu__panel {
 }
 
 /* ============================================================
-   RECORDS DIALOG (issues #9 / #12) — leaderboards + personal records,
-   tabbed by game. Modelled on .connections-dialog so the two modals read as
-   one system. */
+   RECORDS DIALOG (issues #9 / #12) — a "trophy room": leaderboards + personal
+   records, tabbed by game. Shares .connections-dialog's DNA but goes large and
+   celebratory — it's the payoff screen for playing. */
 .records-dialog {
     position: fixed;
     inset: 0;
@@ -1083,45 +1083,65 @@ body.app-in-game .launcher-menu[data-open="true"] .launcher-menu__panel {
     align-items: center;
     justify-content: center;
     padding: 24px;
-    background: rgba(5, 5, 15, 0.72);
-    backdrop-filter: blur(4px);
-    -webkit-backdrop-filter: blur(4px);
+    background: rgba(5, 5, 15, 0.78);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
 }
 .records-dialog[hidden] { display: none; }
 
 .records-dialog__panel {
     width: 100%;
-    max-width: 520px;
-    max-height: min(680px, 86vh);
+    max-width: min(960px, 94vw);
+    height: min(840px, 90vh);
+    min-height: 0;
     display: flex;
     flex-direction: column;
-    background: var(--card-bg);
+    background:
+        radial-gradient(120% 80% at 50% -10%, rgba(212, 175, 55, 0.10), transparent 60%),
+        var(--card-bg);
     border: 1px solid var(--card-border);
-    border-radius: 10px;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+    border-radius: 14px;
+    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(212, 175, 55, 0.08) inset;
+    overflow: hidden;
+    animation: records-pop 0.2s ease both;
+}
+@keyframes records-pop {
+    from { opacity: 0; transform: translateY(8px) scale(0.985); }
+    to   { opacity: 1; transform: none; }
 }
 
 .records-dialog__header {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
-    padding: 14px 16px;
-    border-bottom: 1px solid rgba(212, 175, 55, 0.15);
+    gap: 12px;
+    padding: 18px 22px 14px;
+    border-bottom: 1px solid rgba(212, 175, 55, 0.18);
     flex-shrink: 0;
 }
 .records-dialog__header h2 {
     font-family: var(--font-display);
-    font-size: 1rem;
+    font-size: 1.4rem;
     color: var(--field-gold);
-    letter-spacing: 0.5px;
+    letter-spacing: 1px;
+    text-shadow: 0 0 18px rgba(212, 175, 55, 0.35);
+}
+.records-dialog__subtitle {
+    margin-top: 3px;
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--text-secondary);
 }
 .records-dialog__close {
     background: transparent;
     border: 1px solid var(--card-border);
     color: var(--text-secondary);
-    width: 28px;
-    height: 28px;
-    border-radius: 6px;
+    width: 32px;
+    height: 32px;
+    flex-shrink: 0;
+    border-radius: 8px;
     cursor: pointer;
     transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
@@ -1133,201 +1153,264 @@ body.app-in-game .launcher-menu[data-open="true"] .launcher-menu__panel {
     outline: none;
 }
 
-/* Tab strip: one tab per catalog game, horizontally scrollable so a long
-   catalog never overflows the panel. */
+/* Tab strip: WRAPS (no horizontal scroll) so every game is visible at once. */
 .records-dialog__tabs {
     display: flex;
-    gap: 6px;
-    padding: 10px 12px;
-    overflow-x: auto;
-    border-bottom: 1px solid rgba(212, 175, 55, 0.15);
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 14px 22px;
+    border-bottom: 1px solid rgba(212, 175, 55, 0.12);
     flex-shrink: 0;
 }
 .records-tab {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    flex: 0 0 auto;
-    background: rgba(255, 255, 255, 0.03);
+    gap: 7px;
+    background: rgba(255, 255, 255, 0.04);
     border: 1px solid var(--card-border);
     color: var(--text-secondary);
     font-family: var(--font-mono);
-    font-size: 0.72rem;
-    padding: 6px 9px;
-    border-radius: 6px;
+    font-size: 0.78rem;
+    padding: 8px 12px;
+    border-radius: 999px;
     cursor: pointer;
-    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
 }
 .records-tab:hover,
 .records-tab:focus-visible {
     color: var(--field-gold);
     border-color: var(--field-gold);
+    transform: translateY(-1px);
     outline: none;
 }
 .records-tab--active {
-    background: var(--field-gold-dim);
+    background: linear-gradient(180deg, rgba(212, 175, 55, 0.28), rgba(212, 175, 55, 0.14));
     color: var(--field-gold);
     border-color: var(--field-gold);
+    box-shadow: 0 0 18px rgba(212, 175, 55, 0.25);
 }
 /* Empty games stay visible but de-emphasized — hiding them would leave a
    player wondering why a game they just played has no tab (issue #12). */
 .records-tab--empty { opacity: 0.5; }
+.records-tab--empty.records-tab--active { opacity: 1; }
 .records-tab__icon {
-    width: 16px;
-    height: 16px;
-    border-radius: 3px;
+    width: 20px;
+    height: 20px;
+    border-radius: 5px;
     object-fit: cover;
 }
 .records-tab__label { white-space: nowrap; }
 .records-tab__badge {
-    font-size: 0.62rem;
-    background: var(--field-gold-dim);
-    color: var(--field-gold);
+    font-size: 0.64rem;
+    font-weight: 700;
+    background: var(--field-gold);
+    color: #1a1408;
     border-radius: 999px;
-    padding: 0 5px;
-    min-width: 15px;
+    padding: 1px 6px;
+    min-width: 17px;
     text-align: center;
 }
 
 .records-dialog__body {
-    display: flex;
-    flex-direction: column;
+    flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 8px 16px 14px;
-    gap: 4px;
+    padding: 8px 22px 22px;
 }
 .records-section__heading {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     font-family: var(--font-mono);
-    font-size: 0.62rem;
+    font-size: 0.66rem;
     text-transform: uppercase;
-    letter-spacing: 1.5px;
-    color: var(--text-secondary);
-    margin: 12px 0 4px;
+    letter-spacing: 2px;
+    color: var(--field-gold);
+    margin: 22px 0 12px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid rgba(212, 175, 55, 0.15);
 }
-.records-section__heading:first-child { margin-top: 2px; }
+.records-section__glyph { font-size: 0.95rem; }
 
-/* Personal records — one row per category. */
-.records-list__row {
+/* Personal records — a responsive grid of award cards. */
+.records-cards {
     display: grid;
-    grid-template-columns: 1fr auto auto;
-    align-items: baseline;
-    gap: 10px;
-    padding: 6px 4px;
-    border-bottom: 1px solid rgba(212, 175, 55, 0.08);
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 14px;
 }
-.records-list__label {
-    font-family: var(--font-mono);
-    font-size: 0.8rem;
-    color: var(--snow-white);
+.records-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 16px;
+    border: 1px solid var(--field-gold-dim);
+    border-radius: 12px;
+    background: linear-gradient(160deg, rgba(212, 175, 55, 0.12), rgba(212, 175, 55, 0.02));
+    transition: transform 0.12s ease, box-shadow 0.15s ease;
 }
-.records-list__value {
+.records-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35), 0 0 0 1px var(--field-gold-dim) inset;
+}
+.records-card__head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.records-card__trophy { font-size: 1.1rem; filter: drop-shadow(0 0 6px rgba(212, 175, 55, 0.5)); }
+.records-card__label {
     font-family: var(--font-mono);
-    font-size: 0.85rem;
+    font-size: 0.66rem;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--text-secondary);
+}
+.records-card__value {
+    font-family: var(--font-display);
+    font-size: 1.7rem;
+    line-height: 1.1;
     color: var(--field-gold);
     font-variant-numeric: tabular-nums;
+    text-shadow: 0 0 16px rgba(212, 175, 55, 0.3);
 }
-.records-list__date {
-    font-size: 0.64rem;
+.records-card__date {
+    font-family: var(--font-mono);
+    font-size: 0.6rem;
     color: var(--text-secondary);
 }
 
-/* Leaderboards — a titled block of ranked rows per category. */
-.records-board { margin-top: 6px; }
+/* Leaderboards — a responsive grid of ranked boards. */
+.records-boards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 16px;
+}
+.records-board {
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    padding: 14px 16px;
+    background: rgba(255, 255, 255, 0.02);
+}
 .records-board__title {
     font-family: var(--font-mono);
-    font-size: 0.74rem;
+    font-size: 0.82rem;
     color: var(--snow-white);
-    margin: 6px 0 2px;
+    margin-bottom: 8px;
+    letter-spacing: 0.5px;
 }
 .records-board__row {
     display: grid;
-    grid-template-columns: 2.2em 1fr auto;
-    align-items: baseline;
-    gap: 8px;
-    padding: 4px 4px;
-    border-bottom: 1px solid rgba(212, 175, 55, 0.08);
+    grid-template-columns: 2em 1fr auto;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px;
+    border-radius: 7px;
+}
+.records-board__row + .records-board__row { margin-top: 2px; }
+.records-board__row--top {
+    background: linear-gradient(90deg, rgba(212, 175, 55, 0.14), rgba(212, 175, 55, 0.02));
 }
 .records-board__rank {
     font-family: var(--font-mono);
-    font-size: 0.72rem;
+    font-size: 0.9rem;
+    text-align: center;
     color: var(--text-secondary);
 }
+.records-board__row--top .records-board__rank { font-size: 1.05rem; }
 .records-board__score {
     font-family: var(--font-mono);
-    font-size: 0.82rem;
+    font-size: 0.9rem;
     color: var(--field-gold);
     font-variant-numeric: tabular-nums;
+    justify-self: end;
 }
 .records-board__name {
     font-family: var(--font-mono);
-    font-size: 0.76rem;
+    font-size: 0.82rem;
     color: var(--snow-white);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    max-width: 10em;
     justify-self: start;
-}
-.records-board__date {
-    grid-column: 3;
-    font-size: 0.62rem;
-    color: var(--text-secondary);
 }
 
 .records-empty {
     font-family: var(--font-mono);
-    font-size: 0.8rem;
     color: var(--text-secondary);
-    padding: 28px 10px;
+    padding: 8vh 10px;
     text-align: center;
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 14px;
+    gap: 10px;
 }
+.records-empty__glyph {
+    font-size: 3rem;
+    opacity: 0.85;
+    filter: drop-shadow(0 0 16px rgba(212, 175, 55, 0.35));
+}
+.records-empty__msg { font-size: 0.95rem; color: var(--snow-white); }
+.records-empty__sub { font-size: 0.76rem; }
 .records-empty__play {
-    background: transparent;
-    border: 1px solid var(--field-gold-dim);
+    margin-top: 10px;
+    background: linear-gradient(180deg, rgba(212, 175, 55, 0.28), rgba(212, 175, 55, 0.12));
+    border: 1px solid var(--field-gold);
     color: var(--field-gold);
     font-family: var(--font-mono);
-    font-size: 0.78rem;
-    padding: 8px 14px;
-    border-radius: 6px;
+    font-size: 0.86rem;
+    letter-spacing: 0.5px;
+    padding: 11px 22px;
+    border-radius: 999px;
     cursor: pointer;
-    transition: background 0.15s ease, border-color 0.15s ease;
+    transition: background 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease;
 }
 .records-empty__play:hover,
 .records-empty__play:focus-visible {
-    background: var(--field-gold-dim);
-    border-color: var(--field-gold);
+    transform: translateY(-1px);
+    box-shadow: 0 0 22px rgba(212, 175, 55, 0.3);
     outline: none;
 }
 
 .records-dialog__footer {
     flex-shrink: 0;
-    padding: 8px 16px 12px;
+    padding: 12px 22px;
     border-top: 1px solid rgba(212, 175, 55, 0.15);
     display: flex;
     justify-content: center;
 }
 .records-dialog__reset {
     background: transparent;
-    border: 1px solid var(--tactical-red);
+    border: 1px solid rgba(255, 0, 0, 0.4);
     color: var(--tactical-red);
     font-family: var(--font-mono);
     font-size: 0.72rem;
     letter-spacing: 0.5px;
-    padding: 7px 12px;
-    border-radius: 6px;
+    padding: 8px 14px;
+    border-radius: 999px;
     cursor: pointer;
-    transition: background 0.15s ease;
+    transition: background 0.15s ease, border-color 0.15s ease;
 }
 .records-dialog__reset[hidden] { display: none; }
 .records-dialog__reset:hover,
 .records-dialog__reset:focus-visible {
     background: var(--tactical-red-dim);
+    border-color: var(--tactical-red);
     outline: none;
+}
+
+/* Phones: go full-bleed — a floating card wastes the small screen. */
+@media (max-width: 600px) {
+    .records-dialog { padding: 0; }
+    .records-dialog__panel {
+        max-width: 100%;
+        width: 100%;
+        height: 100%;
+        border: none;
+        border-radius: 0;
+    }
+    .records-dialog__header { padding: 16px 16px 12px; }
+    .records-dialog__tabs { padding: 12px 16px; }
+    .records-dialog__body { padding: 8px 16px 20px; }
 }
 
 /* ---- REDUCED MOTION ---- */

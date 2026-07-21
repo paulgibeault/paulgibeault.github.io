@@ -50,6 +50,15 @@ export function initRecords(host) {
         return node;
     }
 
+    const MEDALS = ['🥇', '🥈', '🥉'];
+    function rankLabel(i) { return MEDALS[i] || ('#' + (i + 1)); }
+    function sectionHeading(glyph, text) {
+        const h = el('h3', 'records-section__heading');
+        h.appendChild(el('span', 'records-section__glyph', glyph));
+        h.appendChild(el('span', null, text));
+        return h;
+    }
+
     // ---- rendering ----
     function renderTabs() {
         tabsEl.textContent = '';
@@ -92,8 +101,10 @@ export function initRecords(host) {
 
         if (!populated) {
             const empty = el('div', 'records-empty');
-            empty.appendChild(el('p', null, 'No scores or records yet for ' + gameName(game) + '.'));
-            const play = el('button', 'records-empty__play', 'Play ' + gameName(game));
+            empty.appendChild(el('div', 'records-empty__glyph', '🏆'));
+            empty.appendChild(el('p', 'records-empty__msg', 'No records yet for ' + gameName(game) + '.'));
+            empty.appendChild(el('p', 'records-empty__sub', 'Play a round to set your first personal best.'));
+            const play = el('button', 'records-empty__play', '▶  Play ' + gameName(game));
             play.type = 'button';
             play.addEventListener('click', () => {
                 close();
@@ -104,34 +115,41 @@ export function initRecords(host) {
             return;
         }
 
-        // Personal records first (usually the shorter, headline list), then
-        // leaderboards. Stats are intentionally not shown in v1 (blobs aren't
-        // self-describing — issue #12 lean).
+        // Personal records first (the headline trophies), then leaderboards.
+        // Stats are intentionally not shown in v1 (blobs aren't self-describing
+        // — issue #12 lean).
         if (data.records.length) {
-            bodyEl.appendChild(el('h3', 'records-section__heading', 'Personal records'));
+            bodyEl.appendChild(sectionHeading('🏅', 'Personal records'));
+            const grid = el('div', 'records-cards');
             for (const r of data.records) {
-                const row = el('div', 'records-list__row');
-                row.appendChild(el('span', 'records-list__label', r.record.label || prettifyCategory(r.category)));
-                row.appendChild(el('span', 'records-list__value', formatRecordValue(r.record.value, r.record.format)));
-                row.appendChild(el('span', 'records-list__date', formatDate(r.record.ts)));
-                bodyEl.appendChild(row);
+                const card = el('div', 'records-card');
+                const head = el('div', 'records-card__head');
+                head.appendChild(el('span', 'records-card__trophy', '🏆'));
+                head.appendChild(el('span', 'records-card__label', r.record.label || prettifyCategory(r.category)));
+                card.appendChild(head);
+                card.appendChild(el('div', 'records-card__value', formatRecordValue(r.record.value, r.record.format)));
+                const when = formatDate(r.record.ts);
+                if (when) card.appendChild(el('div', 'records-card__date', 'Set ' + when));
+                grid.appendChild(card);
             }
+            bodyEl.appendChild(grid);
         }
         if (data.scores.length) {
-            bodyEl.appendChild(el('h3', 'records-section__heading', 'Leaderboards'));
+            bodyEl.appendChild(sectionHeading('📊', 'Leaderboards'));
+            const grid = el('div', 'records-boards');
             for (const board of data.scores) {
                 const wrap = el('div', 'records-board');
                 wrap.appendChild(el('h4', 'records-board__title', prettifyCategory(board.category)));
                 board.entries.forEach((entry, i) => {
-                    const row = el('div', 'records-board__row');
-                    row.appendChild(el('span', 'records-board__rank', '#' + (i + 1)));
-                    row.appendChild(el('span', 'records-board__score', formatScore(entry.score)));
+                    const row = el('div', 'records-board__row' + (i === 0 ? ' records-board__row--top' : ''));
+                    row.appendChild(el('span', 'records-board__rank', rankLabel(i)));
                     row.appendChild(el('span', 'records-board__name', entry.name || '—'));
-                    row.appendChild(el('span', 'records-board__date', formatDate(entry.ts)));
+                    row.appendChild(el('span', 'records-board__score', formatScore(entry.score)));
                     wrap.appendChild(row);
                 });
-                bodyEl.appendChild(wrap);
+                grid.appendChild(wrap);
             }
+            bodyEl.appendChild(grid);
         }
     }
 
