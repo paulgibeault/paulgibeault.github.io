@@ -1,6 +1,17 @@
 # Fleet fan-out — Arcade.records + Arcade.audio adoption (2026-07)
 
-Status: **PLANNED 2026-07-20.** Framework side is **DONE and live** — records shipped
+Status: **DONE 2026-07-21 — all seven packages merged; fleet adoption complete.**
+G1 moon-lit#25, G2 pi-game#19, G3 si-syn#21 (records surveyed → skipped, no
+natural single-best), G4 hecknsic#42, G5 cozy-solitaire#11 (closed #6),
+G6 sowduku#9 (closed #3), G7 p2p-chat#7. G8 poker-night skipped entirely
+(owner call). Post-merge §4 verification 2026-07-22: acceptance 12/12 on six
+games; hecknsic 11/12 — the one failure (check 10, offline SW reload) is a
+pre-existing loopback dev bypass in its `sw.js` fetch handler (commit 6aa7709,
+2026-04-12), not a regression; prod caching unaffected. Ear pass done: audio
+functional but consistently off-theme — **per-game sound-design re-tune is the
+open follow-up.** Original plan follows for reference.
+
+Planned 2026-07-20. Framework side was already DONE and live — records shipped
 in launcher PR #86 (SDK 3.2.0, shared leaderboards in 3.3.0) and Arcade.audio in
 PR #87 (SDK 3.5.0, incl. the global mute button). This plan is the *game-repo*
 side: seven (plus one optional) fully independent work packages, one branch/PR

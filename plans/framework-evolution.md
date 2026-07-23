@@ -209,7 +209,7 @@ frequency × size × bug-risk:
 | 1 | **`Arcade.rng` + `Arcade.daily` + `Arcade.share`** | 5 | 3 divergent mulberry32 copies; **live UTC-vs-local "daily" bug** between games; sharing/replay is core to the arcade identity |
 | 2 | **`Arcade.html.escape`** (+ tagged template) | 6 (only p2p-chat has one) | cheapest, highest-leverage safety fix — user-authored packs/codes now cross devices; **the still-open sowduku XSS is exactly this** |
 | 3 | **`Arcade.ui.confirm` / dialog+sheet** | 3+ | the *sandbox itself* broke `window.confirm`, so games reinvented arm-to-confirm; destructive-action safety |
-| 4 | **`Arcade.audio.cue/play`** (ctx unlock, resume, volume, suspend) | 2 (+ all future) | highest bug-density plumbing; both copies already honor `settings.audioVolume()` |
+| 4 | ✅ **DONE — `Arcade.audio.cue/play`** (ctx unlock, resume, volume, suspend) | 2 (+ all future) | shipped as SDK 3.5.0 (launcher PR #87); **fleet adoption complete 2026-07-21** via `plans/fleet-records-audio-2026-07.md` G1–G7 — both hand-rolled synths (pi-game, sow-duku) migrated plumbing-deleted, five games gained first audio; poker-night (uncataloged) deliberately skipped. Follow-up owed: per-game sound-design re-tune (ear pass verdict: works, but consistently off-theme) |
 | 5 | **`Arcade.tween` + `Arcade.fx.burst`** | 4–6 | two near-twin tween modules + four particle systems, each re-gating reducedMotion and running a private rAF that fights the SDK loop (~450 LOC) |
 | 6 | **`Arcade.canvas.autosize`** (DPR cap + resize debounce) | 4 | the divergences are the classic blur/perf regressions |
 | 7 | **SDK-shipped SW template + build-time manifest injection** | 3 | hand-maintained asset lists = documented silent-offline-failure hazard |
