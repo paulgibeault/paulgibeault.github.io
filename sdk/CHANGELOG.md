@@ -30,6 +30,33 @@ semver is for humans and URLs, never checked on the wire.
 
 ---
 
+## 3.6.0
+
+Additive: **graph cues** — `Arcade.audio.graph(name, fn, opts)`, `start()` for
+sustained beds, `room(cfg)` for the shared acoustic space, `bus()` and `el()`.
+
+A spec cue (`cue()`) is one oscillator with an envelope; that palette is a
+chiptune synthesizer by construction and cannot produce environmental sound at
+any parameter setting. A graph cue is an arbitrary node graph built from
+physical-gesture elements — swept-bandpass friction, stick-slip creak,
+Karplus-Strong pluck, inharmonic struck bodies — with every cue in a game
+feeding one shared convolution room, which is what lets overlapping sounds fuse
+into a scene instead of stacking into a pile.
+
+Elements live in a new optional companion file, `/sdk/v<major>/arcade-audio.js`,
+loaded after the SDK. Games that only need simple cues skip it and pay nothing.
+`tools/soundpack/render.mjs` injects that exact file to render audition WAVs
+offline, so the audition and the game run the same code.
+
+`cue()`/`play()` are unchanged and still work; a graph cue simply takes
+precedence over a spec cue of the same name, so a game can upgrade one sound at
+a time without touching call sites.
+
+Also fixes a long-standing trap: `context()` handed games the managed
+AudioContext for custom graphs, but the master gain was private, so anything
+built on it connected to `ctx.destination` and silently bypassed the launcher's
+volume and mute. `bus()` is now the documented destination.
+
 ## 3.5.0 — 2026-07-20
 
 Managed WebAudio SFX (`Arcade.audio`, #38). Lifts the highest-bug-density audio

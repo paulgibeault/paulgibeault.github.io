@@ -60,6 +60,9 @@ jobs:
       - name: SDK helpers acceptance (rng determinism, local-daily rule, share codes)
         run: node tools/sdk-helpers-acceptance.mjs
 
+      - name: Audio graph acceptance (graph cues, shared room, sustained beds, bus routing)
+        run: node tools/audio-graph-acceptance.mjs
+
       - name: Storage-bridge acceptance (opaque-frame boundary + bridge round-trips)
         run: node tools/bridge-acceptance.mjs
 

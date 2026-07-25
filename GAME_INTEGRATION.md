@@ -338,7 +338,56 @@ every change. The SDK applies the visual ones to the game's `<html>` for free:
   Arcade.audio.play({ type: 'noise', dur: 0.2, gain: 0.15 });          // inline spec
   Arcade.audio.play([{ freq: 523, dur: 0.1 }, { freq: 784, dur: 0.1 }]); // timed sequence
   ```
-  spec = `{ type:'sine'|'square'|'sawtooth'|'triangle'|'noise', freq, toFreq?, dur, gain, attack?, release? }`. Fire-and-forget; silent + cheap when the user has muted (`audioVolume` 0). `Arcade.audio.context()` exposes the managed AudioContext if you need a custom node graph. (Feature-detect on older launcher-served SDKs with `typeof Arcade.audio !== 'undefined'`.)
+  spec = `{ type:'sine'|'square'|'sawtooth'|'triangle'|'noise', freq, toFreq?, dur, gain, attack?, release? }`. Fire-and-forget; silent + cheap when the user has muted (`audioVolume` 0). (Feature-detect on older launcher-served SDKs with `typeof Arcade.audio !== 'undefined'`.)
+
+- [ ] **Environmental sound → graph cues (SDK 3.6.0+).** A spec cue is one
+  oscillator with an envelope. That palette is a chiptune synthesizer by
+  construction — no choice of `freq`/`gain` produces a sound with material or
+  space, and two fleet-wide re-tunes confirmed it the hard way. When a game wants
+  audio that sounds like a *place*, load the optional element library and build
+  cues as node graphs:
+
+  ```html
+  <script src="/sdk/v3/arcade-sdk.js"></script>
+  <script src="/sdk/v3/arcade-audio.js"></script>   <!-- optional; skip it and you pay nothing -->
+  ```
+  ```js
+  Arcade.audio.room({ decay: 0.62 });               // the shared acoustic space
+  Arcade.audio.graph('place-card', (ctx, out, when, params, rnd) => {
+    const E = Arcade.audio.el();
+    E.strike(ctx, out, when, { dur: 0.005, hp: 4200, gain: 0.16 });
+    E.body(ctx, out, when, { f0: 330 * E.cents(rnd, 15), gain: 0.2,
+                             partials: [{ ratio: 1, gain: 1, decay: 0.4 }] });
+  }, { send: 0.3 });
+  Arcade.audio.play('place-card');                  // unchanged call site
+  ```
+
+  Elements are physical gestures rather than waveforms — `strike`, `rustle`,
+  `pluck` (Karplus–Strong), `creak` (stick-slip), `droplet`, `body` (inharmonic
+  partials with independent decay), `thump`, `stream`. Every cue feeds one shared
+  convolution room, which is what makes overlapping sounds fuse into a scene
+  instead of stacking into a pile, and each cue's `send` is really a statement
+  about how far away it is. `rnd` is a seeded stream — vary pitch and balance per
+  play, because byte-identical repetition is itself a chiptune tell.
+
+  Sustained beds use `const h = Arcade.audio.start('ambient')` / `h.stop(1.5)`;
+  register those with `{ sustained: true }` and have the cue return a teardown
+  function.
+
+  A graph cue **takes precedence over a spec cue of the same name**, so you can
+  upgrade one sound at a time, and keep spec cues registered as a fallback for
+  players on a stale cached SDK.
+
+- [ ] **Building a custom node graph? Connect to `Arcade.audio.bus()`, not
+  `ctx.destination`.** `Arcade.audio.context()` hands you the managed
+  AudioContext, but its master gain is private — anything wired straight to
+  `ctx.destination` **silently bypasses the launcher's volume slider and global
+  mute**. `bus()` is the correct destination and obeys both.
+
+  Design and audition sound packs offline with `tools/soundpack/` — it renders
+  your pack to a single WAV in headless Chromium using the same shipped
+  `arcade-audio.js` the game loads, so you judge the real thing before wiring it
+  in. See `tools/soundpack/README.md`.
 
 **Reduced motion is handled for you by default:** the SDK's injected base
 style includes a kill-switch rule — when `data-reduced-motion="true"`, every

@@ -135,6 +135,27 @@ Arcade.settings.audioVolume()         // 0..1
 Arcade.settings.handedness()          // 'left' | 'right'
 Arcade.onSettingsChange(fn)           // fires when launcher updates a setting
 
+// AUDIO — SDK owns the AudioContext, gesture unlock, volume, suspend/resume
+Arcade.audio.cue(name, spec)          // a spec cue: one oscillator + envelope
+Arcade.audio.play(name, overrides)    // fire-and-forget; free + silent when muted
+
+// Graph cues (3.6.0+) need the optional /sdk/v<major>/arcade-audio.js companion.
+// A spec cue can't sound like a *place* — one raw oscillator is a chiptune synth
+// by construction. A graph cue is a node graph of physical gestures (strike,
+// rustle, Karplus-Strong pluck, stick-slip creak, droplet, inharmonic body),
+// and every cue in a game feeds ONE shared convolution room, which is what lets
+// overlapping sounds fuse into a scene instead of stacking into a pile.
+Arcade.audio.room(cfg)                // configure that shared space
+Arcade.audio.graph(name, fn, opts)    // fn(ctx, out, when, params, rnd); opts {send, sustained}
+Arcade.audio.start(name, params)      // sustained bed → handle.stop(fadeSeconds)
+Arcade.audio.el()                     // the element library, or null if not loaded
+Arcade.audio.bus()                    // ← connect custom graphs HERE, not to
+                                      //   ctx.destination, or you bypass volume+mute
+Arcade.audio.context()                // the managed AudioContext (advanced)
+// A graph cue beats a spec cue of the same name, so a game can upgrade one
+// sound at a time and keep spec cues as a stale-cache fallback. Design and
+// audition packs offline with tools/soundpack/ before wiring them in.
+
 // UI — launcher-rendered chrome when framed (needs the 'ui.bridge' cap;
 // degrades to the cancel answer against an older launcher), native
 // fallbacks standalone. Dialogs are attributed with the app's catalog name
