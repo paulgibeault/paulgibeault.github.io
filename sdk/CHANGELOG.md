@@ -30,6 +30,47 @@ semver is for humans and URLs, never checked on the wire.
 
 ---
 
+## 3.7.0
+
+Additive: **adaptive beds** — a sustained cue's handle gains
+`retune(params, fadeSeconds)`.
+
+A sustained cue schedules its whole timeline when it starts, so there is nothing
+to adjust in place; the only honest way to change one is to start a second
+instance and fade the first out under it. Every game that wants a bed to respond
+to play was about to hand-roll that, keeping two handles and getting the
+identity question wrong. `retune()` does it inside the SDK: the handle stays the
+same object, `stop()` still stops whatever is audible, and the old layer's
+sources are torn down at the end of its fade. Quantise the parameter and give it
+hysteresis before calling — it is cheap, but it is not free.
+
+Companion element library (`arcade-audio.js`) gains three gestures and two
+options:
+
+- `flare` — combustion. No contact click, a swelling onset, and a band that
+  sweeps downward as the ball of hot air expands. `weight` sets how much low
+  pressure pulse sits under it, and that pulse swells with the flame rather
+  than punching in front of it (`wAttack`).
+- `blast` — explosion. The front, a boom and a sub under it, and a long
+  lowpassed noise rumble rolling away. `size` scales duration and depth
+  together. No tonal layer by default: an explosion has no pitch, and partials
+  ringing inside the bang are heard as a tone sitting in it. `tone` adds them
+  back for something that should ring — a boiler, a hull, a struck bell.
+  `crack` (default 1) is the snap at the front, and it is the whole difference
+  between a detonation and a fireball: `crack: 0` with a raised `attack` gives
+  a whump that arrives as swelling low air instead of an edge.
+- `thump` gains `attack`: left at its 4 ms default it punches, which is right
+  for an impact and wrong for anything that grows.
+- `chirp` — insect stridulation. A train of very short pulses, because the
+  pulse rate is what the ear reads as "insect"; one note at the same pitch is a
+  whistle.
+- `rustle` gains `lp`, the same cascaded two-stage lowpass `creak` and `stream`
+  already had, for soft low-register gestures that otherwise leak enough top
+  end to read as hiss.
+- `creak` gains `rate1`, sweeping the stick-slip rate across the gesture, so a
+  mechanism can start turning and settle instead of grinding at one speed.
+- `teardown(collect)` builds the standard teardown a sustained cue returns.
+
 ## 3.6.0
 
 Additive: **graph cues** — `Arcade.audio.graph(name, fn, opts)`, `start()` for

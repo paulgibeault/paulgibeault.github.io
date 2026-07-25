@@ -204,6 +204,10 @@
 
   // Friction/air: noise through a bandpass whose cutoff *moves*. A static
   // filter still sounds synthetic; the sweep is what reads as material.
+  // `lp` cascades two lowpass stages after the band, for the same reason creak
+  // and stream do: a biquad bandpass only rolls off at 6 dB/octave, so a soft
+  // low-register gesture still leaks enough top end to read as hiss rather than
+  // as paper, cloth or air. Omit it and the element behaves exactly as before.
   function rustle(ctx, dest, t, p) {
     const dur = p.dur || 0.3;
     const src = track(p, ctx.createBufferSource());
@@ -218,7 +222,17 @@
     const atk = p.attack == null ? dur * 0.35 : p.attack;
     const mk = bandMakeup(ctx, ((p.f0 || 900) + (p.f1 || 2400)) / 2, Q);
     env(g.gain, t, (p.gain == null ? 0.25 : p.gain) * mk, atk, dur);
-    src.connect(bp); bp.connect(g); g.connect(dest);
+    let tail = bp;
+    if (p.lp) {
+      for (let i = 0; i < 2; i++) {
+        const lp = ctx.createBiquadFilter();
+        lp.type = 'lowpass';
+        lp.frequency.value = p.lp;
+        tail.connect(lp);
+        tail = lp;
+      }
+    }
+    src.connect(bp); tail.connect(g); g.connect(dest);
     src.start(t); src.stop(t + dur + 0.05);
     return dur;
   }
@@ -277,19 +291,25 @@
   // Rope and wood under load. Creak is *stick-slip*: the surfaces grip, tension
   // builds, they release, repeat — irregularly. That irregular amplitude
   // envelope is the whole sound; a smooth envelope just gives filtered hiss.
-  function creakBuffer(ctx, dur, seed, rate) {
+  // `rate1` (optional) is the stick-slip rate at the END of the gesture, swept
+  // from `rate` across the buffer. A mechanism that starts turning and settles
+  // grips more slowly as it slows; a constant rate reads as a hand-held creak
+  // no matter what the envelope does, because the ear tracks event density.
+  function creakBuffer(ctx, dur, seed, rate, rate1) {
     const sr = ctx.sampleRate;
     const len = Math.ceil(dur * sr);
     const buf = ctx.createBuffer(1, len, sr);
     const d = buf.getChannelData(0);
     const r = rng(seed || 31);
-    const spd = rate || 1;
+    const spd0 = rate || 1;
+    const spd1 = rate1 == null ? spd0 : rate1;
     let amp = 0, next = 0, k = 1;
     for (let i = 0; i < len; i++) {
       if (i >= next) {
+        const spd = spd0 + (spd1 - spd0) * (i / len);
         amp = between(r, 0.35, 1.0);
         k = Math.exp(-1 / (between(r, 0.003, 0.022) * sr));
-        next = i + Math.floor(between(r, 0.005, 0.055) * sr / spd);
+        next = i + Math.floor(between(r, 0.005, 0.055) * sr / Math.max(0.05, spd));
       }
       amp *= k;
       d[i] = (r() * 2 - 1) * amp;
@@ -300,7 +320,7 @@
   function creak(ctx, dest, t, p) {
     const dur = p.dur || 0.5;
     const src = track(p, ctx.createBufferSource());
-    src.buffer = creakBuffer(ctx, dur + 0.05, p.seed, p.rate);
+    src.buffer = creakBuffer(ctx, dur + 0.05, p.seed, p.rate, p.rate1);
     const bp = ctx.createBiquadFilter();
     bp.type = 'bandpass';
     bp.frequency.setValueAtTime(p.f0 || 260, t);
@@ -372,14 +392,20 @@
   }
 
   // Low impact weight — taiko, a body landing, distant thunder.
+  //
+  // `attack` (default 4 ms) is the difference between a hit and a swell. Left
+  // fast it punches, which is right for an impact and wrong for anything that
+  // grows — a fireball, a wave arriving — where the same fast onset is heard as
+  // a pop in front of the sound rather than as part of it.
   function thump(ctx, dest, t, p) {
     const dur = p.dur || 0.35;
+    const atk = p.attack == null ? 0.004 : p.attack;
     const osc = track(p, ctx.createOscillator());
     osc.type = 'sine';
     osc.frequency.setValueAtTime(p.f0 || 110, t);
     osc.frequency.exponentialRampToValueAtTime(p.f1 || 45, t + dur * 0.8);
     const g = ctx.createGain();
-    env(g.gain, t, p.gain == null ? 0.35 : p.gain, 0.004, dur);
+    env(g.gain, t, p.gain == null ? 0.35 : p.gain, atk, dur);
     osc.connect(g); g.connect(dest);
     osc.start(t); osc.stop(t + dur + 0.05);
 
@@ -393,6 +419,152 @@
     n.connect(lp); lp.connect(ng); ng.connect(dest);
     n.start(t); n.stop(t + 0.1);
     return dur;
+  }
+
+  // Combustion — a lamp taking flame, a torch catching, a burner lighting.
+  // Three things separate this from "noise with an envelope":
+  //   · No contact click. Nothing touches anything; a strike here reads as a
+  //     thrown object, not as ignition.
+  //   · The onset SWELLS. Air catching light takes tens of milliseconds to
+  //     bloom; a hard attack is the single most common way this ends up
+  //     sounding like a thud with hiss on top.
+  //   · The band sweeps DOWNWARD, because the ball of hot air resonates lower
+  //     as it expands.
+  // `weight` (0..1) is how much low pressure pulse sits under the flame — 0 for
+  // a match head, more for something with volume behind it. `bright` scales the
+  // whole band, so repeated flares in one cluster don't stack into a tone.
+  function flare(ctx, dest, t, p) {
+    const dur = p.dur || 0.3;
+    const gain = p.gain == null ? 0.12 : p.gain;
+    const bright = p.bright || 1;
+    const f0 = (p.f0 || 1450) * bright;
+    const f1 = (p.f1 || 700) * bright;
+    const seed = p.seed || 61;
+    const atk = p.attack == null ? Math.min(0.06, dur * 0.2) : p.attack;
+    // the flame front
+    rustle(ctx, dest, t, {
+      f0, f1, Q: p.Q || 0.9, lp: p.lp, dur, gain, attack: atk,
+      seed, collect: p.collect,
+    });
+    // its top — thinner, faster, quieter; this is what makes it airy
+    rustle(ctx, dest, t + 0.01, {
+      f0: f0 * 2.0, f1: f1 * 2.0, Q: (p.Q || 0.9) * 1.3, lp: p.lp,
+      dur: dur * 0.6, gain: gain * 0.35, attack: atk * 0.6,
+      seed: seed + 1, collect: p.collect,
+    });
+    const weight = p.weight == null ? 0.3 : p.weight;
+    if (weight > 0) {
+      thump(ctx, dest, t + 0.01, {
+        f0: p.wf0 || 150, f1: (p.wf0 || 150) * 0.38, dur: dur * 0.9,
+        // The weight has to arrive WITH the flame, not before it. A default
+        // thump onset is 4 ms, which under a swelling noise front is heard as a
+        // pop and then a flare — two events where there should be one.
+        attack: p.wAttack == null ? Math.min(0.05, dur * 0.15) : p.wAttack,
+        gain: gain * weight, seed: seed + 2, collect: p.collect,
+      });
+    }
+    return dur * 1.1;
+  }
+
+  // Explosion. Built the opposite way round from `flare`: the front arrives
+  // first and hard, and the low end carries everything after it. `size` scales
+  // duration and depth together — a bigger blast is not a louder small one.
+  //
+  // Everything here is noise and pitch-dropping sine, and that is the point: an
+  // explosion has no pitch. An inharmonic `body` under the boom — the obvious
+  // way to voice "a shell of hot air" — gives partials that ring at definite
+  // frequencies, and the ear picks that out of the noise instantly as a tone
+  // sitting inside the bang. `tone` (default 0, off) can add it back for a
+  // resonating container: a boiler, a bell struck by the blast, a hull.
+  //
+  // What replaces it is `rumble`: a long, very low, heavily lowpassed noise
+  // layer that swells rather than hits. That is the part heard as size.
+  //
+  // `crack` (0..1, default 1) is the snap at the very front. It is the whole
+  // difference between a detonation — high explosive, a gunshot, something
+  // shattering — and a fireball, which is fuel igniting and has no snap at all.
+  // Set it to 0 and raise `attack` and what comes out is a whump: the sound
+  // arrives as a swell of low air rather than as an edge. A fireball with a
+  // crack on it reads as a firecracker no matter how much bass is underneath.
+  function blast(ctx, dest, t, p) {
+    const size = p.size == null ? 1 : p.size;
+    const gain = p.gain == null ? 0.24 : p.gain;
+    const seed = p.seed || 71;
+    const dur = (p.dur || 0.55) * size;
+    const crack = p.crack == null ? 1 : p.crack;
+    const attack = p.attack == null ? 0.008 : p.attack;
+    // the crack — the body of the front, plus a thin edge on top
+    if (crack > 0) {
+      strike(ctx, dest, t, { dur: 0.04, hp: 180, gain: gain * 1.1 * crack, seed, collect: p.collect });
+      strike(ctx, dest, t + 0.004, { dur: 0.012, hp: 2200, gain: gain * 0.4 * crack, seed: seed + 1, collect: p.collect });
+    }
+    // the front, sweeping the whole band down as it expands
+    rustle(ctx, dest, t, {
+      f0: (p.f0 || 2700) / size, f1: (p.f1 || 210) / size, Q: 0.65, lp: p.lp,
+      dur, gain: gain * 0.82, attack, seed: seed + 2, collect: p.collect,
+    });
+    // the boom — as soft-onset as the front, or the snap comes back in through
+    // the low end instead of the top
+    thump(ctx, dest, t, {
+      f0: (p.wf0 || 130) / size, f1: 26, dur: dur * 1.9, gain: gain * 1.15,
+      attack: Math.max(0.004, attack * 0.8), seed: seed + 3, collect: p.collect,
+    });
+    // …and the sub under the boom, an octave down and slower to arrive
+    thump(ctx, dest, t + 0.02, {
+      f0: (p.wf0 || 130) * 0.5 / size, f1: 22, dur: dur * 2.6, gain: gain * 0.8,
+      attack: 0.03, seed: seed + 4, collect: p.collect,
+    });
+    // the rumble rolling away — noise, not pitch
+    const rumble = p.rumble == null ? 1 : p.rumble;
+    if (rumble > 0) {
+      rustle(ctx, dest, t + 0.01, {
+        f0: 190 / size, f1: 42 / size, Q: 0.5, lp: 170,
+        dur: dur * 3.0, gain: gain * 0.9 * rumble, attack: dur * 0.25,
+        seed: seed + 5, collect: p.collect,
+      });
+      rustle(ctx, dest, t + 0.04, {
+        f0: 420 / size, f1: 120 / size, Q: 0.6, lp: 380,
+        dur: dur * 2.2, gain: gain * 0.4 * rumble, attack: dur * 0.35,
+        seed: seed + 6, collect: p.collect,
+      });
+    }
+    // an inharmonic shell, only if something around the blast should ring
+    if (p.tone) {
+      body(ctx, dest, t + 0.02, {
+        f0: (p.bf0 || 64) / size, gain: gain * 0.42 * p.tone,
+        partials: [
+          { ratio: 1.0, gain: 1.0, decay: 1.30 * size, detune: 11, attack: 0.03 },
+          { ratio: 2.47, gain: 0.30, decay: 0.55 * size, detune: 15, attack: 0.02 },
+          { ratio: 4.13, gain: 0.12, decay: 0.28 * size, detune: 19, attack: 0.015 },
+        ],
+        collect: p.collect,
+      });
+    }
+    return dur * 3.0 + 0.3;
+  }
+
+  // Insect stridulation — a cricket, a katydid, a cicada. A chirp is not a
+  // tone: it is a train of 2–5 very short pulses a few tens of milliseconds
+  // apart, and the PULSE RATE is what the ear reads as "insect" (and, in real
+  // insects, as temperature — they stridulate faster when it is warm). One
+  // long note at the same frequency reads as a whistle.
+  function chirp(ctx, dest, t, p) {
+    const f = p.f || 3600;
+    const pulses = p.pulses || 3;
+    const step = p.step || 0.04;
+    const gain = p.gain == null ? 0.05 : p.gain;
+    const pulse = p.pulse || 0.016;
+    for (let i = 0; i < pulses; i++) {
+      body(ctx, dest, t + i * step, {
+        f0: f, gain,
+        partials: [
+          { ratio: 1.0, gain: 1.0, decay: pulse, detune: p.detune == null ? 9 : p.detune, attack: pulse * 0.25 },
+          { ratio: 2.02, gain: 0.16, decay: pulse * 0.55, detune: 14, attack: pulse * 0.2 },
+        ],
+        collect: p.collect,
+      });
+    }
+    return pulses * step;
   }
 
   // Sustained filtered-noise layer with a slowly drifting band — the basis for
@@ -431,8 +603,20 @@
     return dur;
   }
 
+  // The teardown a sustained cue is expected to return, given the `collect`
+  // array its elements filled in. Stopping a bed has to actually stop its
+  // sources: merely disconnecting the output leaves everything scheduled and
+  // alive for the rest of the bed's duration, once per start().
+  function teardown(collect) {
+    return function stopCollected(when) {
+      for (const n of collect) { try { n.stop(when); } catch (e) { /* already ended */ } }
+    };
+  }
+
   global.ArcadeAudioElements = {
     rng, between, cents, env, noiseBuffer, impulseResponse, createBus, out,
-    track, strike, rustle, pluck, pluckBuffer, creak, creakBuffer, droplet, body, thump, stream,
+    track, teardown,
+    strike, rustle, pluck, pluckBuffer, creak, creakBuffer, droplet, body, thump,
+    flare, blast, chirp, stream,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

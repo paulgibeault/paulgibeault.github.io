@@ -179,7 +179,7 @@
     // tools/sdk-version-unit.mjs enforces all three. Launcher↔SDK compat is
     // still negotiated by welcome.caps, never by this number; it exists for
     // humans (bug reports, CHANGELOG) and for the pinned-URL publish scheme.
-    var SDK_SEMVER = '3.6.0';
+    var SDK_SEMVER = '3.7.0';
     var HANDSHAKE_TIMEOUT_MS = 300;
     // Opaque-origin (sandboxed, no allow-same-origin) frames have no storage
     // to fall back to, so waiting longer for the launcher costs nothing and
@@ -3070,37 +3070,68 @@
         },
 
         // Start a sustained graph cue (an ambient bed). Returns a handle whose
-        // stop(fadeSeconds) fades it out and tears it down. Always returns a
-        // handle, so callers never have to null-check before stopping.
+        // stop(fadeSeconds) fades it out and tears it down, and whose
+        // retune(params, fadeSeconds) crossfades the bed to a new
+        // parameterisation. Always returns a handle, so callers never have to
+        // null-check before stopping.
         start: function (name, params) {
-            var noop = { stop: function () {} };
+            var noop = { stop: function () {}, retune: function () { return this; } };
             var entry = audioGraphCues[name];
             if (!entry || !entry.sustained) return noop;
             if (!ensureAudioBus()) return noop;
             armAudioUnlock();
             if (audioCtx.state === 'suspended' && !suspendedNow) { try { audioCtx.resume(); } catch (e) {} }
             var E = window.ArcadeAudioElements;
-            var out = E.out(audioBus, entry.send);
+            // The live layer. retune() replaces both, which is why they are
+            // mutable rather than captured once.
+            var out = null;
             var teardown = null;
-            var at = audioCtx.currentTime;
-            try { teardown = entry.fn(audioCtx, out, at, params || null, E.rng(audioSeed++)); }
-            catch (e) { try { out.disconnect(); } catch (e2) {} return noop; }
+            function build(p) {
+                var o = E.out(audioBus, entry.send);
+                var td = null;
+                try { td = entry.fn(audioCtx, o, audioCtx.currentTime, p || null, E.rng(audioSeed++)); }
+                catch (e) { try { o.disconnect(); } catch (e2) {} return false; }
+                out = o; teardown = td;
+                return true;
+            }
+            // Fade a layer out over `f` seconds, tear down its sources at the
+            // end of the fade, and disconnect once it is silent.
+            function retire(o, td, f) {
+                var now = audioCtx ? audioCtx.currentTime : 0;
+                try {
+                    o.gain.cancelScheduledValues(now);
+                    o.gain.setValueAtTime(Math.max(o.gain.value, 0.0001), now);
+                    o.gain.exponentialRampToValueAtTime(0.0001, now + f);
+                } catch (e) {}
+                if (typeof td === 'function') { try { td(now + f); } catch (e) {} }
+                setTimeout(function () { try { o.disconnect(); } catch (e) {} }, (f + 0.2) * 1000);
+            }
+            if (!build(params)) return noop;
             var stopped = false;
-            return {
+            var handle = {
                 stop: function (fade) {
                     if (stopped) return;
                     stopped = true;
-                    var f = typeof fade === 'number' && isFinite(fade) && fade > 0 ? fade : 0.4;
-                    var now = audioCtx ? audioCtx.currentTime : 0;
-                    try {
-                        out.gain.cancelScheduledValues(now);
-                        out.gain.setValueAtTime(Math.max(out.gain.value, 0.0001), now);
-                        out.gain.exponentialRampToValueAtTime(0.0001, now + f);
-                    } catch (e) {}
-                    if (typeof teardown === 'function') { try { teardown(now + f); } catch (e) {} }
-                    setTimeout(function () { try { out.disconnect(); } catch (e) {} }, (f + 0.2) * 1000);
+                    retire(out, teardown, typeof fade === 'number' && isFinite(fade) && fade > 0 ? fade : 0.4);
+                },
+                // Change a running bed's parameters. A sustained cue schedules
+                // its whole timeline up front, so there is nothing to adjust in
+                // place: the only honest way to change one is to start a second
+                // instance and fade the first out under it. Doing that here
+                // rather than in every game keeps the handle identity stable —
+                // callers keep one handle and stop() still stops what is
+                // audible. Cheap to call, but not free: quantise the parameter
+                // and give it hysteresis rather than retuning every frame.
+                retune: function (nextParams, fade) {
+                    if (stopped) return handle;
+                    var f = typeof fade === 'number' && isFinite(fade) && fade > 0 ? fade : 2.0;
+                    var prevOut = out, prevTeardown = teardown;
+                    if (!build(nextParams)) { out = prevOut; teardown = prevTeardown; return handle; }
+                    retire(prevOut, prevTeardown, f);
+                    return handle;
                 }
             };
+            return handle;
         }
     };
     // Master gain tracks the launcher's volume; ctx follows the game's

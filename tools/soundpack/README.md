@@ -65,6 +65,9 @@ makes sound:
 | `droplet` | a fast **upward** pitch sweep; the collapsing cavity raises its own resonance |
 | `body` | inharmonic partials, each with its own decay rate, each a detuned pair so the stack beats |
 | `thump` | low pitch-dropping impact |
+| `flare` | combustion — no contact click, a swelling onset, band sweeping down as the hot air expands |
+| `blast` | explosion — front first and hard, boom under it, a shell of hot air sagging as it cools |
+| `chirp` | insect stridulation — a train of very short pulses; the pulse *rate* is what reads as "insect" |
 | `stream` | sustained filtered noise with a drifting band — water, wind, ambient beds |
 
 **Cues** layer and time-offset elements, and vary pitch, timing and layer balance

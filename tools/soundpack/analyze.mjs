@@ -108,9 +108,15 @@ for (let i = 0; i < items.length; i++) {
   const to = Math.min(frames, Math.floor(Math.min(next, at + 9) * SR));
   if (to <= from) continue;
 
+  // Level is measured over the item's WHOLE span, not the first nine seconds.
+  // The nine-second cap belongs to the spectral window below (an FFT wants the
+  // onset, not a minute of room tone); applying it to peak and RMS reported a
+  // sparse ambient bed — silence with an event every twenty seconds — as
+  // inaudible, which is exactly the kind of bed most worth measuring.
+  const span = Math.min(frames, Math.floor(next * SR));
   let peak = 0;
-  for (let n = from; n < to; n++) { const a = Math.abs(mono[n]); if (a > peak) peak = a; }
-  const r = rms(from, to);
+  for (let n = from; n < span; n++) { const a = Math.abs(mono[n]); if (a > peak) peak = a; }
+  const r = rms(from, span);
 
   const mags = spectrum(from + Math.floor(0.004 * SR));
   const c = centroid(mags);

@@ -102,7 +102,8 @@ const r = await page.evaluate(async () => {
 
 console.log('\nGate A — element library');
 ok(r.elementsLoaded, 'arcade-audio.js attaches window.ArcadeAudioElements');
-for (const el of ['body', 'creak', 'droplet', 'pluck', 'rustle', 'strike', 'stream', 'thump', 'createBus', 'out', 'rng']) {
+for (const el of ['body', 'creak', 'droplet', 'pluck', 'rustle', 'strike', 'stream', 'thump',
+                  'flare', 'blast', 'chirp', 'teardown', 'createBus', 'out', 'rng']) {
     ok(r.elementNames.includes(el), `element "${el}" exported`);
 }
 
@@ -179,6 +180,9 @@ const collect = await page.evaluate(async () => {
         droplet: (p) => E.droplet(ctx, dest, 0, p),
         body: (p) => E.body(ctx, dest, 0, { f0: 440, partials, ...p }),
         thump: (p) => E.thump(ctx, dest, 0, p),
+        flare: (p) => E.flare(ctx, dest, 0, p),
+        blast: (p) => E.blast(ctx, dest, 0, p),
+        chirp: (p) => E.chirp(ctx, dest, 0, p),
         stream: (p) => E.stream(ctx, dest, 0, 4.0, p),
     };
 
@@ -223,6 +227,71 @@ ok(collect.nestedCount > 1, `nested elements report through the same bin (drople
 ok(!collect.noCollectThrew, 'omitting collect is not an error (existing cues unaffected)');
 ok(!collect.badCollectThrew, 'a non-array collect is ignored, not thrown on');
 ok(collect.stopAllOk, `a teardown can stop every collected source, twice (${collect.binSize} sources)`);
+
+// ── Gate H: retune, the adaptive-bed contract ────────────────────────────
+// A sustained cue schedules its whole timeline up front, so a bed can only
+// change by being rebuilt. retune() owns that so games don't hand-roll it: the
+// handle must stay the same object (callers keep one reference), the layer it
+// replaces must be torn down (or its sources stay scheduled for the rest of the
+// bed's duration, every time the game gets tense), and a retune after stop must
+// not resurrect anything.
+console.log('\nGate H — retune() crossfades a sustained bed');
+const retune = await page.evaluate(async () => {
+    const built = [];
+    const tornDown = [];
+    Arcade.audio.graph('bed-h', (ctx, out, when, params) => {
+        const id = built.length;
+        built.push(params && params.heat);
+        return () => { tornDown.push(id); };
+    }, { sustained: true });
+
+    const h = Arcade.audio.start('bed-h', { heat: 0 });
+    const hasRetune = typeof h.retune === 'function';
+    const same = h.retune({ heat: 1 }, 0.05) === h;
+    const builtAfterRetune = built.slice();
+    const tornAfterRetune = tornDown.slice();
+    h.stop(0.05);
+    const tornAfterStop = tornDown.slice();
+    h.retune({ heat: 0.5 }, 0.05);          // after stop: must be inert
+    const builtAfterStopRetune = built.slice();
+
+    // An unknown cue hands back a no-op handle; retune on it must be safe too.
+    let noopSafe = true;
+    try { Arcade.audio.start('bed-h-nope').retune({ heat: 1 }); } catch { noopSafe = false; }
+
+    return { hasRetune, same, builtAfterRetune, tornAfterRetune, tornAfterStop, builtAfterStopRetune, noopSafe };
+});
+ok(retune.hasRetune, 'start() returns a handle with retune()');
+ok(retune.same, 'retune() returns the same handle');
+ok(retune.builtAfterRetune.length === 2 && retune.builtAfterRetune[1] === 1,
+   `retune() builds a second layer with the new params (${JSON.stringify(retune.builtAfterRetune)})`);
+ok(retune.tornAfterRetune.length === 1 && retune.tornAfterRetune[0] === 0,
+   'retune() tears down the layer it replaced, and only that one');
+ok(retune.tornAfterStop.length === 2, 'stop() after a retune tears down the live layer');
+ok(retune.builtAfterStopRetune.length === 2, 'retune() after stop() is inert');
+ok(retune.noopSafe, 'retune() on a no-op handle does not throw');
+
+// ── Gate I: rustle lp, measured ──────────────────────────────────────────
+// A biquad bandpass rolls off at 6 dB/octave, so a quiet low-register rustle
+// leaks enough top end to read as hiss rather than as paper or cloth. `lp` is
+// the fix, and it is only worth having if it measurably removes that energy.
+console.log('\nGate I — rustle lp actually darkens the gesture');
+const darkness = await page.evaluate(async () => {
+    async function hfShare(lp) {
+        const ctx = new OfflineAudioContext(1, 24000, 48000);
+        const E = window.ArcadeAudioElements;
+        E.rustle(ctx, ctx.destination, 0, { f0: 550, f1: 300, Q: 1.1, dur: 0.4, gain: 0.2, lp, seed: 5 });
+        const buf = await ctx.startRendering();
+        const d = buf.getChannelData(0);
+        // crude high-band energy: first difference emphasises high frequencies
+        let total = 0, high = 0;
+        for (let i = 1; i < d.length; i++) { total += d[i] * d[i]; high += (d[i] - d[i - 1]) ** 2; }
+        return total > 0 ? high / total : 0;
+    }
+    return { open: await hfShare(undefined), damped: await hfShare(900) };
+});
+ok(darkness.damped < darkness.open * 0.6,
+   `lp removes high-band energy (${darkness.open.toFixed(3)} → ${darkness.damped.toFixed(3)})`);
 
 await browser.close();
 console.log(failures ? `\n✗ audio-graph: ${failures} failure(s)\n` : '\n✓ audio-graph gates passed\n');
