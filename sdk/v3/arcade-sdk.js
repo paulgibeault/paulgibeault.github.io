@@ -179,7 +179,7 @@
     // tools/sdk-version-unit.mjs enforces all three. Launcher↔SDK compat is
     // still negotiated by welcome.caps, never by this number; it exists for
     // humans (bug reports, CHANGELOG) and for the pinned-URL publish scheme.
-    var SDK_SEMVER = '3.5.0';
+    var SDK_SEMVER = '3.6.0';
     var HANDSHAKE_TIMEOUT_MS = 300;
     // Opaque-origin (sandboxed, no allow-same-origin) frames have no storage
     // to fall back to, so waiting longer for the launcher costs nothing and
@@ -2863,6 +2863,12 @@
     var audioCues = {};
     var noiseBuffer = null;
     var AUDIO_SEQ_CAP = 32; // max voices per play() (a cue array is bounded)
+    // Graph cues (arcade-audio.js): richer than spec cues, and all sharing one
+    // convolution room so overlapping sounds fuse instead of stacking.
+    var audioGraphCues = {};
+    var audioRoomCfg = {};
+    var audioBus = null;
+    var audioSeed = 1;  // advanced per play, so no two plays are identical
 
     function audioVolume() {
         var v = settings.audioVolume;
@@ -2937,6 +2943,18 @@
         try { src.start(at); src.stop(tEnd + 0.02); } catch (e) {}
         src.onended = function () { try { src.disconnect(); } catch (e) {} try { g.disconnect(); } catch (e) {} };
     }
+    // The graph bus hangs off masterGain, so everything a sound pack plays stays
+    // under the launcher's volume and mute. Built lazily on first use and torn
+    // down whenever room() changes, so games that never use graph cues never pay
+    // for the convolver.
+    function ensureAudioBus() {
+        if (audioBus) return audioBus;
+        var E = window.ArcadeAudioElements;
+        if (!E || !ensureAudioCtx()) return null;
+        try { audioBus = E.createBus(audioCtx, masterGain, audioRoomCfg); }
+        catch (e) { audioBus = null; }
+        return audioBus;
+    }
     function resolveCue(specOrName, overrides) {
         var spec = (typeof specOrName === 'string') ? audioCues[specOrName] : specOrName;
         if (spec === undefined || spec === null) return null;
@@ -2968,6 +2986,16 @@
             if (!ensureAudioCtx()) return audioApi;
             armAudioUnlock();
             if (audioCtx.state === 'suspended' && !suspendedNow) { try { audioCtx.resume(); } catch (e) {} }
+            // Graph cues take precedence over spec cues of the same name, so a
+            // game can upgrade one sound at a time without touching call sites.
+            var graph = (typeof specOrName === 'string') ? audioGraphCues[specOrName] : null;
+            if (graph && !graph.sustained && ensureAudioBus()) {
+                var E = window.ArcadeAudioElements;
+                var gOut = E.out(audioBus, graph.send);
+                try { graph.fn(audioCtx, gOut, audioCtx.currentTime, overrides || null, E.rng(audioSeed++)); }
+                catch (e) { try { gOut.disconnect(); } catch (e2) {} }
+                return audioApi;
+            }
             var spec = resolveCue(specOrName, overrides);
             if (spec === null) return audioApi;
             var at = audioCtx.currentTime;
@@ -2992,7 +3020,88 @@
         enabled: function () { return !!AudioCtor && audioVolume() > 0; },
         // The managed AudioContext (advanced; null before first play or when
         // WebAudio is unavailable). For games that need custom node graphs.
-        context: function () { return audioCtx; }
+        // NOTE: connect to bus() — see below — not to ctx.destination, or you
+        // bypass the launcher's volume and mute.
+        context: function () { return audioCtx; },
+
+        // ── graph cues (needs /sdk/v<major>/arcade-audio.js) ──────────
+        // A spec cue is one oscillator with an envelope. A graph cue is an
+        // arbitrary node graph built from physical-gesture elements, sharing one
+        // convolution room with every other cue in the game — which is what lets
+        // overlapping sounds fuse into a scene instead of stacking. See
+        // ARCADE_PLATFORM.md and tools/soundpack/.
+
+        // The elements library, or null when arcade-audio.js was not loaded.
+        el: function () { return window.ArcadeAudioElements || null; },
+
+        // The node graph cues should connect to. Also the correct destination
+        // for any hand-built graph via context(): everything routed here obeys
+        // the launcher's volume slider and global mute, which connecting to
+        // ctx.destination does not. Creates the managed AudioContext on first
+        // call (unlike context(), which only reports one that already exists);
+        // returns null when WebAudio or arcade-audio.js is unavailable.
+        bus: function () {
+            if (!ensureAudioBus()) return null;
+            return audioBus;
+        },
+
+        // Configure the shared acoustic space. Call once, before registering
+        // cues; calling again rebuilds the room (cheap, but not free — the
+        // impulse response is regenerated).
+        room: function (cfg) {
+            audioRoomCfg = isPlainObject(cfg) ? cfg : {};
+            audioBus = null; // rebuilt lazily against the new config
+            return audioApi;
+        },
+
+        // Register a graph cue. `fn(ctx, out, when, params, rnd)` builds the
+        // graph; `out` is a per-play gain already wired to the dry path and the
+        // room send. opts: { send } room amount 0..1, { sustained } for beds.
+        // A sustained fn should return a teardown function taking a stop time.
+        graph: function (name, fn, opts) {
+            if (typeof name !== 'string' || !name || typeof fn !== 'function') return audioApi;
+            var o = isPlainObject(opts) ? opts : {};
+            audioGraphCues[name] = {
+                fn: fn,
+                send: typeof o.send === 'number' && isFinite(o.send) ? Math.max(0, Math.min(1, o.send)) : 0.25,
+                sustained: !!o.sustained
+            };
+            return audioApi;
+        },
+
+        // Start a sustained graph cue (an ambient bed). Returns a handle whose
+        // stop(fadeSeconds) fades it out and tears it down. Always returns a
+        // handle, so callers never have to null-check before stopping.
+        start: function (name, params) {
+            var noop = { stop: function () {} };
+            var entry = audioGraphCues[name];
+            if (!entry || !entry.sustained) return noop;
+            if (!ensureAudioBus()) return noop;
+            armAudioUnlock();
+            if (audioCtx.state === 'suspended' && !suspendedNow) { try { audioCtx.resume(); } catch (e) {} }
+            var E = window.ArcadeAudioElements;
+            var out = E.out(audioBus, entry.send);
+            var teardown = null;
+            var at = audioCtx.currentTime;
+            try { teardown = entry.fn(audioCtx, out, at, params || null, E.rng(audioSeed++)); }
+            catch (e) { try { out.disconnect(); } catch (e2) {} return noop; }
+            var stopped = false;
+            return {
+                stop: function (fade) {
+                    if (stopped) return;
+                    stopped = true;
+                    var f = typeof fade === 'number' && isFinite(fade) && fade > 0 ? fade : 0.4;
+                    var now = audioCtx ? audioCtx.currentTime : 0;
+                    try {
+                        out.gain.cancelScheduledValues(now);
+                        out.gain.setValueAtTime(Math.max(out.gain.value, 0.0001), now);
+                        out.gain.exponentialRampToValueAtTime(0.0001, now + f);
+                    } catch (e) {}
+                    if (typeof teardown === 'function') { try { teardown(now + f); } catch (e) {} }
+                    setTimeout(function () { try { out.disconnect(); } catch (e) {} }, (f + 0.2) * 1000);
+                }
+            };
+        }
     };
     // Master gain tracks the launcher's volume; ctx follows the game's
     // suspend/resume lifecycle (same hooks the session timer uses).

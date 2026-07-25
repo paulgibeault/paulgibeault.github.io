@@ -15,7 +15,7 @@
 
 (function (global) {
   'use strict';
-  const S = global.SP;
+  const S = global.ArcadeAudioElements;
 
   const ROOM = {
     dur: 2.4,

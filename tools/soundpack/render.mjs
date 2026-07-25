@@ -2,9 +2,9 @@
 // Offline sound-pack renderer.
 //
 // Runs the pack's graphs in headless Chromium's OfflineAudioContext and writes
-// a single audition WAV plus a timestamped index. The graph code is injected
-// verbatim and is the SAME code a browser runtime would execute, so what you
-// hear in the WAV is what would ship — there is no mockup-versus-shipped gap.
+// a single audition WAV plus a timestamped index. The graph code injected here
+// is the shipped /arcade-audio.js itself, so the audition and the game run the
+// same code — no mockup-versus-shipped gap.
 //
 //   node tools/soundpack/render.mjs [packName] [--sr 48000] [--out DIR]
 //
@@ -28,7 +28,9 @@ const SR = parseInt(flag('sr', '48000'), 10);
 const OUT_DIR = resolve(flag('out', join(HERE, 'out')));
 const VERSION = flag('version', 'v1');
 
-const graphSrc = readFileSync(join(HERE, 'lib', 'graph.js'), 'utf8');
+// The SHIPPED element library, not a copy — this is what makes an approved
+// audition bit-identical to what plays in the game.
+const graphSrc = readFileSync(join(HERE, '..', '..', 'arcade-audio.js'), 'utf8');
 const packSrc = readFileSync(join(HERE, 'packs', `${packName}.js`), 'utf8');
 
 console.log(`sound-pack renderer — ${packName} ${VERSION} @ ${SR} Hz`);
@@ -74,13 +76,13 @@ for (let si = 0; si < plan.sections.length; si++) {
 
   const rendered = await page.evaluate(async ({ si, SR }) => {
     const P = globalThis.PACK;
-    const S = globalThis.SP;
+    const S = globalThis.ArcadeAudioElements;
     const section = P.SECTIONS[si];
 
     // Two passes: measure item durations first (a cue reports its own length),
     // then render for real into a correctly sized context.
     const probe = new OfflineAudioContext(2, Math.ceil(SR * 0.1), SR);
-    const probeBus = S.createBus(probe, P.ROOM);
+    const probeBus = S.createBus(probe, probe.destination, P.ROOM);
     const durs = section.items.map((it, i) => {
       if (it.dur != null) return it.dur;
       const r = S.rng(9000 + si * 100 + i);
@@ -97,7 +99,7 @@ for (let si = 0; si < plan.sections.length; si++) {
     const total = t + P.TAIL;
 
     const ctx = new OfflineAudioContext(2, Math.ceil(total * SR), SR);
-    const bus = S.createBus(ctx, P.ROOM);
+    const bus = S.createBus(ctx, ctx.destination, P.ROOM);
     section.items.forEach((it, i) => {
       const r = S.rng(9000 + si * 100 + i);
       if (it.build) {

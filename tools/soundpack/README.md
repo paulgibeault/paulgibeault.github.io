@@ -30,11 +30,16 @@ the lot. That means:
 
 > **The renderer and the runtime are the same code.** A sound is a function
 > `(ctx, dest, t, params)`. Offline, `ctx` is an `OfflineAudioContext` and the
-> result becomes a WAV. Live, `ctx` is the SDK's managed `AudioContext`. What you
-> approve in the audition is bit-identical to what would ship.
+> result becomes a WAV. Live, `ctx` is the SDK's managed `AudioContext`. The
+> renderer injects the shipped `/arcade-audio.js` itself, so approving an
+> audition approves the code that plays.
 
-Renders are deterministic (every random stream is seeded) and run much faster
-than real time.
+Renders are reproducible and run much faster than real time. Every random stream
+is seeded, so the same pack renders the same sound every time — though not
+literally the same bytes: a few hundred samples in millions land on the other
+side of a 16-bit rounding boundary between runs (max 1 LSB, about −90 dBFS)
+because the convolver and compressor accumulate in floating point. Compare
+renders by ear or with `analyze.mjs`, not with `cmp`.
 
 ## Layout
 
