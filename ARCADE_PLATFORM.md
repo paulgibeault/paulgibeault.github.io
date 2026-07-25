@@ -142,12 +142,15 @@ Arcade.audio.play(name, overrides)    // fire-and-forget; free + silent when mut
 // Graph cues (3.6.0+) need the optional /sdk/v<major>/arcade-audio.js companion.
 // A spec cue can't sound like a *place* — one raw oscillator is a chiptune synth
 // by construction. A graph cue is a node graph of physical gestures (strike,
-// rustle, Karplus-Strong pluck, stick-slip creak, droplet, inharmonic body),
-// and every cue in a game feeds ONE shared convolution room, which is what lets
-// overlapping sounds fuse into a scene instead of stacking into a pile.
+// rustle, Karplus-Strong pluck, stick-slip creak, droplet, inharmonic body,
+// combustion flare, blast, insect chirp), and every cue in a game feeds ONE
+// shared convolution room, which is what lets overlapping sounds fuse into a
+// scene instead of stacking into a pile.
 Arcade.audio.room(cfg)                // configure that shared space
 Arcade.audio.graph(name, fn, opts)    // fn(ctx, out, when, params, rnd); opts {send, sustained}
 Arcade.audio.start(name, params)      // sustained bed → handle.stop(fadeSeconds)
+                                      //   handle.retune(params, fade)  (3.7.0+)
+                                      //   crossfades the bed to new params
 Arcade.audio.el()                     // the element library, or null if not loaded
 Arcade.audio.bus()                    // ← connect custom graphs HERE, not to
                                       //   ctx.destination, or you bypass volume+mute

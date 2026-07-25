@@ -364,7 +364,12 @@ every change. The SDK applies the visual ones to the game's `<html>` for free:
 
   Elements are physical gestures rather than waveforms — `strike`, `rustle`,
   `pluck` (Karplus–Strong), `creak` (stick-slip), `droplet`, `body` (inharmonic
-  partials with independent decay), `thump`, `stream`. Every cue feeds one shared
+  partials with independent decay), `thump`, `flare` (combustion), `blast`
+  (explosion), `chirp` (insect stridulation), `stream`. If your game needs a
+  gesture that isn't there, add it to the library rather than hand-rolling it in
+  the pack: a game's pack is its *design* — which gestures, how loud, how far
+  away — and the synthesis belongs where every pack can reach it. Every cue
+  feeds one shared
   convolution room, which is what makes overlapping sounds fuse into a scene
   instead of stacking into a pile, and each cue's `send` is really a statement
   about how far away it is. `rnd` is a seeded stream — vary pitch and balance per
@@ -372,7 +377,20 @@ every change. The SDK applies the visual ones to the game's `<html>` for free:
 
   Sustained beds use `const h = Arcade.audio.start('ambient')` / `h.stop(1.5)`;
   register those with `{ sustained: true }` and have the cue return a teardown
-  function.
+  function — `E.teardown(collect)` builds the standard one from the `collect`
+  array the elements filled in.
+
+  **A bed that responds to play (3.7.0+):** `h.retune(params, fade)`. A
+  sustained cue schedules its whole timeline up front, so nothing can be
+  adjusted in place — `retune` starts a second instance and fades the first out
+  under it, keeping the same handle. Quantise the parameter and give it
+  hysteresis first; do not call it every frame.
+
+  ```js
+  const bed = Arcade.audio.start('night', { heat: 0 });
+  // …later, when the game gets tense (a handful of times per level, not per frame)
+  bed.retune({ heat: 1 }, 3.0);
+  ```
 
   A graph cue **takes precedence over a spec cue of the same name**, so you can
   upgrade one sound at a time, and keep spec cues registered as a fallback for
