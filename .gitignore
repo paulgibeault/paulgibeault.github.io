@@ -3,3 +3,4 @@
 .dev-stage/
 node_modules/
 .DS_Store
+tools/soundpack/out/
