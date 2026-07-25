@@ -1,7 +1,41 @@
 # Fleet audio re-tune — sound design pass (2026-07)
 
-Status: **SPEC rev 2 — awaiting review.** Not yet implemented. Follow-up to
-`plans/fleet-records-audio-2026-07.md` (G1–G7, merged 2026-07-21).
+Status: **IMPLEMENTED 2026-07-24 — all seven draft PRs open, awaiting the ear
+pass.** Follow-up to `plans/fleet-records-audio-2026-07.md` (G1–G7, merged
+2026-07-21).
+
+| Game | Draft PR | Tests | Sound identity landed |
+| --- | --- | --- | --- |
+| cozy-solitaire | [#13](https://github.com/paulgibeault/cozy-solitaire/pull/13) | 61/61 | a card table, not a screen — noise friction + tone settle |
+| sow-duku | [sowduku#11](https://github.com/paulgibeault/sowduku/pull/11) | n/a | material not musical — mud, straw, small warm animals |
+| moon-lit | [#27](https://github.com/paulgibeault/moon-lit/pull/27) | 107/107 | struck bronze, plucked string, wet paper, wood + rope |
+| hecknsic | [#45](https://github.com/paulgibeault/hecknsic/pull/45) | 66/66 | struck glass on a dark board; saw reserved for the bomb |
+| p2p-chat | [#8](https://github.com/paulgibeault/p2p-chat/pull/8) | n/a | sonar — peers as contacts surfacing on a scope |
+| pi-game | [#21](https://github.com/paulgibeault/pi-game/pull/21) | n/a | metronome under the concentration; alarm on failure |
+| si-syn | [#22](https://github.com/paulgibeault/si-syn/pull/22) | 135/135 | a test bench — waveform *means* something per cue |
+
+**Corrections the implementation made to this spec** (recorded because they are
+the useful part of the round-trip):
+
+1. **The `win` bell partials in §2 were wrong.** 196/466/700 puts the "tierce"
+   a minor third above the *octave*, not above the prime. moon-lit#27 replaced
+   them with a real cast-bell series (hum 98, prime 196, tierce 233, quint 295,
+   nominal 391, clang 700), each detuned a couple of Hz off exact so the stack
+   beats gently instead of relapsing into the organ chord this spec set out to
+   escape.
+2. **The SDK's `noise` is raw white noise with no filter node**, so it reads far
+   louder and brighter per unit gain than an oscillator. Every drafted
+   noise-layer gain in §2 was too hot; implementations cut them roughly by half
+   (cozy-solitaire 0.10→0.055) so the transient sits *under* its tone as
+   intended rather than swamping it. **Any future cue spec written against this
+   SDK should assume the same correction.**
+3. **`masterGain` has no limiter or compressor**, so summed simultaneous voice
+   gain is the implementer's problem. Multi-voice cues were checked to stay well
+   under 1.0 (worst case ~0.69).
+4. **A pre-existing bug surfaced in pi-game**: the `combo` accent's per-play gain
+   coefficient peaked at 0.5 against a 0.14 tick — 3.5× louder than the cue it
+   layers over. Fixed to 0.012 in pi-game#21; unrelated to this re-tune, just
+   found by it.
 
 Rev 2 (2026-07-24): scope widened after review. Rev 1 graded four games
 "LOW mismatch — no rework proposed" and held moon-lit up as the reference
@@ -334,21 +368,25 @@ affected cues fire:
 6. **pi-game** (two main cues + practice siblings)
 7. **si-syn** (sharpening, not replacing)
 
-## 4. Process for implementing this spec
+## 4. How this was implemented (2026-07-24)
 
-Unlike G1–G7, this is tuning existing, already-integrated cue registrations
-— no new call sites (one exception: moon-lit's `match-tick` companion cue
-adds one play-site next to the existing `match` one), no records work, no SW
-bumps (unless a repo's release convention requires a version bump for any JS
-change — check per repo). Small enough to be single-agent-per-game or done
-directly; no G1–G7-level coordination scaffolding needed.
+Seven concurrent agents, one per repo, each on an `audio-retune` branch, each
+opening a draft PR. Unlike G1–G7 this touched no records code and added no
+gameplay hooks — cue-value edits plus the one sanctioned `match-tick`
+companion in moon-lit. SW cache keys bumped where the cues live inside a
+cached asset (`sowdoku-shell-v5`→`v6`, `pi-game-v4`→`v5`, hecknsic
+`APP_VERSION` 1.4.1→1.4.2); the four repos with `package.json` versions were
+left alone after checking each repo's actual bump convention (hecknsic's is
+bot-driven — bumping by hand would fight it).
 
-**This is still audio nobody has heard** — the specs above are informed
-guesses from the same synth-only constraint as the original work. Land as a
-draft PR per touched repo (now all seven), get another ear pass, iterate
-before merge. Do not skip the ear-check loop just because this is "smaller."
-Expect a second round of value-nudges after listening; the specs encode
-*direction*, the ear encodes *taste*.
+Each package also rewrote the module's stale header comments, which had
+justified the palette by citing the A5 convention this document exists to
+undo. Comments now state design intent.
+
+**Remaining gate: nobody has heard any of this.** All seven PRs are drafts and
+say so in their bodies, each naming the two failure modes most likely on first
+listen. The specs encode *direction*; the ear encodes *taste*. Expect a round
+of value-nudges after listening, then merge.
 
 ## Out of scope
 
