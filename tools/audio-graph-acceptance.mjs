@@ -1,7 +1,10 @@
-/* audio-graph-unit.mjs — gates Arcade.audio graph cues (SDK 3.6.0).
+/* audio-graph-acceptance.mjs — gates Arcade.audio graph cues (SDK 3.6.0).
  *
  * Graph cues need real WebAudio (filters, convolution), so this runs the SDK
- * plus arcade-audio.js inside headless Chromium rather than a DOM shim.
+ * plus arcade-audio.js inside headless Chromium rather than a DOM shim. That
+ * browser dependency is why this is an acceptance suite and not a *-unit.mjs
+ * one: run-units.mjs discovers the unit tier and runs it before CI installs
+ * any browser, so a Playwright import there fails the whole tier.
  *
  * What it protects:
  *   - the element library loads and attaches without depending on `Arcade`
@@ -152,6 +155,74 @@ const levels = await page.evaluate(async () => {
 ok(levels.full > 0.01, `audible at full volume (peak ${levels.full.toFixed(4)})`);
 ok(levels.muted === 0, `silent when master gain is 0 (peak ${levels.muted})`);
 ok(levels.half < levels.full * 0.75, `volume scales the bus (half ${levels.half.toFixed(4)} < full ${levels.full.toFixed(4)})`);
+
+// ── Gate G: params.collect, the sustained-cue teardown contract ──────────
+// A sustained cue can only stop what it can name. Elements build and return
+// without keeping handles, so `collect: []` is the one way a bed gets a real
+// teardown; if an element quietly stops reporting a source, the bed keeps that
+// source scheduled for its whole duration, once per play, and nothing else in
+// this suite would notice.
+console.log('\nGate G — params.collect reports sources for teardown');
+const collect = await page.evaluate(async () => {
+    const E = window.ArcadeAudioElements;
+    const ctx = new OfflineAudioContext(2, 48000, 48000);
+    const bus = E.createBus(ctx, ctx.destination, { dur: 0.5, decay: 0.3 });
+    const dest = E.out(bus, 0.2);
+    const partials = [{ ratio: 1, gain: 1, decay: 0.2 }, { ratio: 2.7, gain: 0.4, decay: 0.1 }];
+
+    // Every element that creates a source, called the way a cue calls it.
+    const calls = {
+        strike: (p) => E.strike(ctx, dest, 0, p),
+        rustle: (p) => E.rustle(ctx, dest, 0, p),
+        pluck: (p) => E.pluck(ctx, dest, 0, { f0: 330, ...p }),
+        creak: (p) => E.creak(ctx, dest, 0, p),
+        droplet: (p) => E.droplet(ctx, dest, 0, p),
+        body: (p) => E.body(ctx, dest, 0, { f0: 440, partials, ...p }),
+        thump: (p) => E.thump(ctx, dest, 0, p),
+        stream: (p) => E.stream(ctx, dest, 0, 4.0, p),
+    };
+
+    const reported = {};
+    const stoppable = {};
+    for (const [name, call] of Object.entries(calls)) {
+        const bin = [];
+        call({ collect: bin });
+        reported[name] = bin.length;
+        stoppable[name] = bin.length > 0 && bin.every((n) => typeof n.stop === 'function');
+    }
+
+    // droplet() calls strike() internally — nested elements must report through
+    // the same bin, or a cue's teardown silently misses their sources.
+    const nested = [];
+    E.droplet(ctx, dest, 0, { collect: nested });
+    const nestedCount = nested.length;
+
+    // Backward compatibility: every existing cue calls these with no `collect`.
+    let noCollectThrew = false;
+    let badCollectThrew = false;
+    try { for (const call of Object.values(calls)) call({}); } catch { noCollectThrew = true; }
+    try { for (const call of Object.values(calls)) call({ collect: 'nope' }); } catch { badCollectThrew = true; }
+
+    // The property the moon-lit bed depends on: everything collected can be
+    // stopped, and stopping twice is safe (teardown may race the cue's own stop).
+    const bin = [];
+    E.stream(ctx, dest, 0, 4.0, { collect: bin });
+    E.body(ctx, dest, 0, { f0: 220, partials, collect: bin });
+    let stopAllOk = true;
+    try {
+        for (const n of bin) { n.stop(0.5); n.stop(0.5); }
+    } catch { stopAllOk = false; }
+
+    return { reported, stoppable, nestedCount, noCollectThrew, badCollectThrew, stopAllOk, binSize: bin.length };
+});
+for (const [name, count] of Object.entries(collect.reported)) {
+    ok(count > 0, `${name}() reports its ${count} source(s)`);
+    ok(collect.stoppable[name], `${name}() reports only stoppable sources`);
+}
+ok(collect.nestedCount > 1, `nested elements report through the same bin (droplet → ${collect.nestedCount})`);
+ok(!collect.noCollectThrew, 'omitting collect is not an error (existing cues unaffected)');
+ok(!collect.badCollectThrew, 'a non-array collect is ignored, not thrown on');
+ok(collect.stopAllOk, `a teardown can stop every collected source, twice (${collect.binSize} sources)`);
 
 await browser.close();
 console.log(failures ? `\n✗ audio-graph: ${failures} failure(s)\n` : '\n✓ audio-graph gates passed\n');
