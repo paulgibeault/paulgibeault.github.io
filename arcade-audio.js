@@ -173,13 +173,24 @@
     return g;
   }
 
+  // Sustained cues need to stop the sources they started, but an element builds
+  // its graph and returns without keeping handles. Pass `collect: []` in any
+  // element's params and it reports every source node it creates, so a cue can
+  // return a real teardown. The alternative — wrapping ctx.createOscillator
+  // around the call — works only because JS is single-threaded and breaks the
+  // day a cue does anything async.
+  function track(p, node) {
+    if (p && Array.isArray(p.collect)) p.collect.push(node);
+    return node;
+  }
+
   // ── elements ──────────────────────────────────────────────────────────
 
   // Contact click. Every physical event starts with one; its absence is why
   // pure tones sound like they were never touched by anything.
   function strike(ctx, dest, t, p) {
     const dur = p.dur || 0.006;
-    const src = ctx.createBufferSource();
+    const src = track(p, ctx.createBufferSource());
     src.buffer = noiseBuffer(ctx, dur + 0.02, p.seed || 11);
     const hp = ctx.createBiquadFilter();
     hp.type = 'highpass';
@@ -195,7 +206,7 @@
   // filter still sounds synthetic; the sweep is what reads as material.
   function rustle(ctx, dest, t, p) {
     const dur = p.dur || 0.3;
-    const src = ctx.createBufferSource();
+    const src = track(p, ctx.createBufferSource());
     src.buffer = noiseBuffer(ctx, dur + 0.05, p.seed || 23);
     const bp = ctx.createBiquadFilter();
     bp.type = 'bandpass';
@@ -243,7 +254,7 @@
 
   function pluck(ctx, dest, t, p) {
     const dur = p.dur || 1.2;
-    const src = ctx.createBufferSource();
+    const src = track(p, ctx.createBufferSource());
     src.buffer = pluckBuffer(ctx, p.freq, dur, p.damping, p.seed);
     if (p.bend) {
       // string tension easing off — real playback-rate glide, not a step
@@ -288,7 +299,7 @@
 
   function creak(ctx, dest, t, p) {
     const dur = p.dur || 0.5;
-    const src = ctx.createBufferSource();
+    const src = track(p, ctx.createBufferSource());
     src.buffer = creakBuffer(ctx, dur + 0.05, p.seed, p.rate);
     const bp = ctx.createBiquadFilter();
     bp.type = 'bandpass';
@@ -318,8 +329,8 @@
   // downward, the intuitive choice, sounds nothing like water.
   function droplet(ctx, dest, t, p) {
     const dur = p.dur || 0.05;
-    strike(ctx, dest, t, { dur: 0.004, hp: 3500, gain: (p.gain || 0.2) * 0.35, seed: (p.seed || 3) + 1 });
-    const osc = ctx.createOscillator();
+    strike(ctx, dest, t, { dur: 0.004, hp: 3500, gain: (p.gain || 0.2) * 0.35, seed: (p.seed || 3) + 1, collect: p.collect });
+    const osc = track(p, ctx.createOscillator());
     osc.type = 'sine';
     osc.frequency.setValueAtTime(p.f0 || 320, t);
     osc.frequency.exponentialRampToValueAtTime(p.f1 || 1500, t + dur);
@@ -347,7 +358,7 @@
       longest = Math.max(longest, delay + decay);
       const det = pt.detune == null ? 3 : pt.detune;
       for (const side of [-1, 1]) {
-        const o = ctx.createOscillator();
+        const o = track(p, ctx.createOscillator());
         o.type = p.type || 'sine';
         o.frequency.value = p.f0 * pt.ratio;
         o.detune.value = side * det;
@@ -363,7 +374,7 @@
   // Low impact weight — taiko, a body landing, distant thunder.
   function thump(ctx, dest, t, p) {
     const dur = p.dur || 0.35;
-    const osc = ctx.createOscillator();
+    const osc = track(p, ctx.createOscillator());
     osc.type = 'sine';
     osc.frequency.setValueAtTime(p.f0 || 110, t);
     osc.frequency.exponentialRampToValueAtTime(p.f1 || 45, t + dur * 0.8);
@@ -372,7 +383,7 @@
     osc.connect(g); g.connect(dest);
     osc.start(t); osc.stop(t + dur + 0.05);
 
-    const n = ctx.createBufferSource();
+    const n = track(p, ctx.createBufferSource());
     n.buffer = noiseBuffer(ctx, 0.08, (p.seed || 9) + 4);
     const lp = ctx.createBiquadFilter();
     lp.type = 'lowpass';
@@ -387,7 +398,7 @@
   // Sustained filtered-noise layer with a slowly drifting band — the basis for
   // running water, wind, and other ambient beds.
   function stream(ctx, dest, t, dur, p) {
-    const src = ctx.createBufferSource();
+    const src = track(p, ctx.createBufferSource());
     src.buffer = noiseBuffer(ctx, Math.min(dur + 0.5, 8), p.seed || 41);
     src.loop = true;
     const bp = ctx.createBiquadFilter();
@@ -403,7 +414,7 @@
     const lp2 = ctx.createBiquadFilter();
     lp2.type = 'lowpass';
     lp2.frequency.value = p.lp || 1900;
-    const lfo = ctx.createOscillator();
+    const lfo = track(p, ctx.createOscillator());
     lfo.type = 'sine';
     lfo.frequency.value = p.rate || 0.07;
     const lfoAmt = ctx.createGain();
@@ -422,6 +433,6 @@
 
   global.ArcadeAudioElements = {
     rng, between, cents, env, noiseBuffer, impulseResponse, createBus, out,
-    strike, rustle, pluck, pluckBuffer, creak, creakBuffer, droplet, body, thump, stream,
+    track, strike, rustle, pluck, pluckBuffer, creak, creakBuffer, droplet, body, thump, stream,
   };
 })(typeof window !== 'undefined' ? window : globalThis);
