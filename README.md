@@ -6,7 +6,8 @@ with **shared storage**, **cross-device save files**, and **serverless P2P
 multiplayer** — without breaking anyone's ability to open a game standalone.
 
 Live: [paulgibeault.github.io](https://paulgibeault.github.io) ·
-Current lineup: Moon Lit, Pi Game, Silicon Syndicate, HecknSic, Cozy Solitaire.
+Current lineup: Moon Lit, Pi Game, Silicon Syndicate, HecknSic, Cozy Solitaire,
+Sowdoku, P2P Chat.
 
 ---
 

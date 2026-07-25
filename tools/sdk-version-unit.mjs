@@ -51,6 +51,20 @@ if (existsSync(join(ROOT, pinnedPath))) {
     if (!inSync) console.log(`      fix: cp arcade-sdk.js ${pinnedPath}   (and add a sdk/CHANGELOG.md entry)`);
 }
 
+// The companion element library ships beside the SDK on the same pinned path,
+// so it needs the same drift protection. It is optional — games that only use
+// spec cues never load it — but if it exists at the root it must be mirrored.
+const companion = 'arcade-audio.js';
+if (existsSync(join(ROOT, companion))) {
+    const pinnedCompanion = join('sdk', `v${major}`, companion);
+    ok(existsSync(join(ROOT, pinnedCompanion)), `${pinnedCompanion} exists`);
+    if (existsSync(join(ROOT, pinnedCompanion))) {
+        const same = readFileSync(join(ROOT, pinnedCompanion), 'utf8') === readFileSync(join(ROOT, companion), 'utf8');
+        ok(same, `${pinnedCompanion} byte-identical to ${companion}`);
+        if (!same) console.log(`      fix: cp ${companion} ${pinnedCompanion}`);
+    }
+}
+
 console.log('\nGate C — newest CHANGELOG entry matches SDK_SEMVER');
 const changelog = readFileSync(join(ROOT, 'sdk', 'CHANGELOG.md'), 'utf8');
 const newest = /^## (\d+\.\d+\.\d+)/m.exec(changelog);
