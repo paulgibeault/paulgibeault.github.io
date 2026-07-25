@@ -31,9 +31,19 @@ const VERSION = flag('version', 'v1');
 // The SHIPPED element library, not a copy — this is what makes an approved
 // audition bit-identical to what plays in the game.
 const graphSrc = readFileSync(join(HERE, '..', '..', 'arcade-audio.js'), 'utf8');
-const packSrc = readFileSync(join(HERE, 'packs', `${packName}.js`), 'utf8');
+// The pack itself belongs to the game that ships it, so the default path points
+// at a sibling game repo rather than a copy kept here — a duplicated pack would
+// drift from the one actually playing, which defeats the whole point of
+// auditioning. The audition timeline stays here: it is test material and has no
+// business being shipped to players.
+const packPath = resolve(flag('pack', join(HERE, '..', '..', '..', packName, 'js', 'soundpack.js')));
+const auditionPath = resolve(flag('audition', join(HERE, 'auditions', `${packName}.js`)));
+const packSrc = readFileSync(packPath, 'utf8');
+const auditionSrc = readFileSync(auditionPath, 'utf8');
 
 console.log(`sound-pack renderer — ${packName} ${VERSION} @ ${SR} Hz`);
+console.log(`  pack     ${packPath}`);
+console.log(`  audition ${auditionPath}`);
 
 const browser = await chromium.launch();
 const page = await browser.newPage();
@@ -41,6 +51,7 @@ page.on('pageerror', (e) => { console.error('page error:', e.message); });
 
 await page.evaluate((src) => { (0, eval)(src); }, graphSrc);
 await page.evaluate((src) => { (0, eval)(src); }, packSrc);
+await page.evaluate((src) => { (0, eval)(src); }, auditionSrc);
 
 const plan = await page.evaluate(() => {
   const P = globalThis.PACK;
