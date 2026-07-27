@@ -201,14 +201,17 @@ done
 ln -snf "$LAUNCHER_DIR/images" "$STAGE_DIR/images"
 ln -snf "$LAUNCHER_DIR/p2p" "$STAGE_DIR/p2p"
 
-# Major-pinned SDK copies (sdk/v<N>/arcade-sdk.js) — same sed rewrite as the
-# root alias, and a glob for the same reason as arcade-*.js above: a new major
-# stages with zero edits here.
-for src in "$LAUNCHER_DIR"/sdk/v*/arcade-sdk.js; do
+# Major-pinned SDK directories (sdk/v<N>/) — same sed rewrite as the root
+# alias, and globbed on BOTH axes for the same reason as arcade-*.js above: a
+# new major, or a new file inside a major, stages with zero edits here.
+# Naming only arcade-sdk.js was the drift this comment warns about — it left
+# sdk/v3/arcade-audio.js unstaged, so a game loading the audio companion at the
+# path GAME_INTEGRATION §5 documents got a 404 in dev and passed in production.
+for src in "$LAUNCHER_DIR"/sdk/v*/*.js; do
   if [ -f "$src" ]; then
     rel_dir="sdk/$(basename "$(dirname "$src")")"
     mkdir -p "$STAGE_DIR/$rel_dir"
-    sed "s|https://paulgibeault.github.io|$LOCAL_ORIGIN|g" "$src" > "$STAGE_DIR/$rel_dir/arcade-sdk.js"
+    sed "s|https://paulgibeault.github.io|$LOCAL_ORIGIN|g" "$src" > "$STAGE_DIR/$rel_dir/$(basename "$src")"
   fi
 done
 
