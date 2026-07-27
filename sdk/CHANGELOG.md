@@ -30,6 +30,39 @@ semver is for humans and URLs, never checked on the wire.
 
 ---
 
+## 3.9.0
+
+Companion element library (`arcade-audio.js`) gains three gestures, on the
+same terms as 3.8.0: no SDK surface change — `Arcade.audio` is untouched — but
+the elements ship on the same version line, so the pinned copy and the
+changelog move together. Driven by sow-duku, whose world is mud, straw and
+small warm animals; the previous library could make a room full of glass and
+a pond at night, but had no way to voice anything alive.
+
+- `squelch` — wet granular collapse: mud, silt, a soft body meeting a
+  yielding surface. Not one splat but a population of tiny cavity pops, each
+  sweeping *upward* as its channel closes (droplet physics, miniaturised —
+  sweeping down is the intuitive choice and sounds nothing like wet), dense at
+  contact and thinning as the surface settles, under a dark downward smear.
+  `skew` shapes the population like `shatter`'s does, and inverting it (`< 1`)
+  reverses the gesture into a suck: mud releasing rather than receiving, which
+  is a lift-out, not a landing. Buffer-synthesised per call for the same
+  reason as `shatter` — a placement cue fires it on every input.
+- `breath` — respiration through a soft passage: a snout, a nostril, a
+  sleeping animal. Superficially `rustle`, but the gesture is cyclic rather
+  than frictional: the passage opens and relaxes, so the band moves in ONE
+  ARC, and the flow is turbulent, so the level flutters irregularly a few
+  times a second. A monotonic sweep under a smooth envelope reads as cloth or
+  wind and never as something alive — the flutter is the whole difference.
+  `dir: 'in'` mirrors the envelope for a sniff.
+- `grunt` — a voiced animal call: a pig, a dove, anything with a larynx. A
+  glottal pulse train in which no two periods are identical (pitch jitter and
+  amplitude shimmer on every cycle, which is what separates a creature from an
+  oscillator), through a pair of broad formant resonances. The formants are
+  the SPECIES and stay put while the pitch moves underneath — that fixed
+  formant / moving pitch split is how the ear tells a voice from a filter
+  sweep. `formants` is a parameter, so another game can re-voice the animal.
+
 ## 3.8.1
 
 Comment only, no behavior change. The note above `rng()` in `arcade-audio.js`
