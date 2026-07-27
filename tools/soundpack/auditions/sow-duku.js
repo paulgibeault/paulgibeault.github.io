@@ -1,11 +1,19 @@
-// sow-duku — audition timeline.
+// sow-duku — audition timeline, v5 (diagnostic).
 //
-// Test material: the sections rendered into the audition WAV. Deliberately NOT
-// part of the game's shipped pack — players never need the dry/wet comparisons
-// or the repetition test. Reads the game's own pack, so the sounds auditioned
-// here are literally the sounds the game plays.
+//   node tools/soundpack/render.mjs sow-duku --version v5
 //
-//   node tools/soundpack/render.mjs sow-duku
+// The PROVING file for the v5 no-music profile — listen to sow-duku-short.js
+// first; come here when something in it needs isolating. v5 was a redesign,
+// not a retune, so the old OLD-vs-NEW A/B sections are gone: there is no
+// prior version of these cues worth comparing against. What remains are the
+// checks that have caught real defects before:
+//
+//   · contour separation — the three verdicts (yes / wrong / win) share one
+//     voice and are distinguished only by shape; heard back to back they
+//     must be unmistakable, because in play they arrive seconds apart
+//   · repetition at game density — level wander and fatigue both hide in
+//     long runs and nowhere else
+//   · dry/wet pairs — the room must stay "outside", never a tail
 //
 (function (global) {
   'use strict';
@@ -13,87 +21,59 @@
   const P = global.SowDukuPack;
   const { CUES, SENDS } = P;
 
-  const GAP = 0.55;   // between items inside a section
-  const TAIL = 1.4;   // let the yard finish before a section ends
+  const GAP = 0.55;
+  const TAIL = 1.8;
+
+  const o = (bus, name) => S.out(bus, SENDS[name]);
+  const place = (ctx, bus, at, r) => { CUES['thud'](ctx, o(bus, 'thud'), at, null, r); CUES['pen'](ctx, o(bus, 'pen'), at, null, r); };
 
   const SECTIONS = [
     {
-      title: 'A · New elements — the raw ingredients',
-      note: 'Three additions to the shared library, heard bare. squelch is the identity gesture of the whole pack; if it reads as electrical crackle rather than wet mud, everything downstream is wrong. The reversed squelch (skew 0.6) should sound like RELEASE — a foot pulling out. breath out vs in should read as exhale vs sniff, and the flutter comparison shows why turbulence matters: flutter 0 is cloth, not a creature. The grunt must read as a small animal with opinions, never as a synth bass note.',
+      title: 'A · The grammar — one voice, three shapes',
+      note: 'The whole design stands on these being unconfusable: the yes is two smooth DISCRETE steps up, the wheek is one rough CONTINUOUS slide up cut short, the win is the yes grown into three climbing calls. Alternating pairs, then each alone. If yes-then-wheek ever blurs, the pack has failed regardless of how nice anything sounds.',
       items: [
-        { label: 'squelch — default (a landing)', dur: 0.8, build: (ctx, bus, t, r) => { const o = S.out(bus, 0.2); S.squelch(ctx, o, t, { dur: 0.14, f0: 250, gain: 0.22, seed: 2001 }); } },
-        { label: 'squelch — reversed (skew 0.6, a lift-out)', dur: 0.8, build: (ctx, bus, t, r) => { const o = S.out(bus, 0.2); S.squelch(ctx, o, t, { dur: 0.12, f0: 220, skew: 0.6, gain: 0.2, seed: 2002 }); } },
-        { label: 'breath — out (exhale)', dur: 0.9, build: (ctx, bus, t, r) => { const o = S.out(bus, 0.22); S.breath(ctx, o, t, { dur: 0.35, f: 500, gain: 0.18, seed: 2003 }); } },
-        { label: 'breath — in (sniff)', dur: 0.9, build: (ctx, bus, t, r) => { const o = S.out(bus, 0.22); S.breath(ctx, o, t, { dur: 0.3, f: 560, dir: 'in', gain: 0.18, seed: 2004 }); } },
-        { label: 'breath — flutter 0 (the cloth control)', dur: 0.9, build: (ctx, bus, t, r) => { const o = S.out(bus, 0.22); S.breath(ctx, o, t, { dur: 0.35, f: 500, flutter: 0, gain: 0.18, seed: 2005 }); } },
-        { label: 'grunt — default piggy', dur: 0.8, build: (ctx, bus, t, r) => { const o = S.out(bus, 0.2); S.grunt(ctx, o, t, { f0: 110, dur: 0.2, gain: 0.2, seed: 2006 }); } },
-        { label: 'grunt — long sagging (the sigh voice)', dur: 1.2, build: (ctx, bus, t, r) => { const o = S.out(bus, 0.2); S.grunt(ctx, o, t, { f0: 120, f1: 76, dur: 0.5, rough: 0.8, breathy: 0.5, attack: 0.1, gain: 0.18, seed: 2007 }); } },
+        { label: 'yes · wheek · yes · wheek — alternating', dur: 4.6, build: (ctx, bus, t, r) => { for (let i = 0; i < 2; i++) { CUES['pen'](ctx, o(bus, 'pen'), t + i * 2.3, null, r); CUES['slip'](ctx, o(bus, 'slip'), t + i * 2.3 + 1.15, null, r); } } },
+        { label: 'the yes ×4 — smooth, stepped, up', dur: 3.6, build: (ctx, bus, t, r) => { for (let i = 0; i < 4; i++) CUES['pen'](ctx, o(bus, 'pen'), t + i * 0.9, null, r); } },
+        { label: 'the wheek ×4 — rough, sliding, cut off', dur: 3.6, build: (ctx, bus, t, r) => { for (let i = 0; i < 4; i++) CUES['slip'](ctx, o(bus, 'slip'), t + i * 0.9, null, r); } },
+        { label: 'the win ×2 — the yes, celebrated', dur: 4.4, build: (ctx, bus, t, r) => { CUES['oink'](ctx, o(bus, 'oink'), t, null, r); CUES['oink'](ctx, o(bus, 'oink'), t + 2.2, null, r); } },
+        { label: 'win then fail — the two endings, back to back', dur: 5.2, build: (ctx, bus, t, r) => { CUES['oink'](ctx, o(bus, 'oink'), t, null, r); CUES['fail'](ctx, o(bus, 'fail'), t + 2.6, null, r); } },
       ],
     },
     {
-      title: 'B · Each cue — dry, then in the room',
-      note: 'First without reverb, then with — the "room" here is the open yard over soft ground. Its contribution should be barely more than a sense that the sound happened OUTSIDE, never a tail you could point to.',
+      title: 'B · The touch layer',
+      note: 'Scratch, step, placement — three sizes of the same mud, and the ordering has to be audible: hoofprint < step < placement. Then hoofprints at painting speed: dragging across a row marks up to six cells in under a second, and the scratch must stay a texture, never become a drum roll.',
+      items: [
+        { label: 'scratch · step · placement — the three sizes', dur: 3.3, build: (ctx, bus, t, r) => { CUES['hoof'](ctx, o(bus, 'hoof'), t, null, r); CUES['thud'](ctx, o(bus, 'thud'), t + 1.1, null, r); place(ctx, bus, t + 2.2, r); } },
+        { label: 'hoofprints painted in a drag — six in a second', dur: 1.8, build: (ctx, bus, t, r) => { for (let i = 0; i < 6; i++) CUES['hoof'](ctx, o(bus, 'hoof'), t + i * 0.15, null, r); } },
+        { label: 'hoofprints at tap pace ×5', dur: 3.0, build: (ctx, bus, t, r) => { for (let i = 0; i < 5; i++) CUES['hoof'](ctx, o(bus, 'hoof'), t + i * 0.6, null, r); } },
+      ],
+    },
+    {
+      title: 'C · Each cue — dry, then in the room',
+      note: 'First without reverb, then with. The room must be barely more than a sense of OUTSIDE. The win and fail include their pre-roll, so each starts with about four tenths of a second of silence — the fix that keeps them out from under the move that triggers them, not a rendering fault.',
       items: Object.keys(CUES).flatMap((name) => ([
         { label: name + ' — dry', dur: null, cue: name, send: 0 },
         { label: name + ' — in the room', dur: null, cue: name, send: SENDS[name] },
       ])),
     },
     {
-      title: 'C · Repetition — does it fatigue?',
-      note: 'The same cue fired eight times. thud matters most: it fires on every placement, so any repeating tell in it becomes the sound of the game. Listen for two splats landing identically — that is the failure. slip ×4 checks that being wrong four times in a row stays disappointment and never turns into punishment.',
+      title: 'D · Repetition — level and fatigue',
+      note: 'Placements at the density of real play. The yes fires on every single correct move: the question is not "can I hear it" but "do I want to hear it a hundred more times", and whether its level holds — the ranges inside every cue are pinned tight because the ear reads a loud outlier as the game changing, not as variety. Four wheeks in a row must stay disappointment, never scolding.',
       items: [
-        { label: 'thud ×8 — a steady solving hand', dur: 8.0, build: (ctx, bus, t, r) => { for (let i = 0; i < 8; i++) { const o = S.out(bus, SENDS['thud']); CUES['thud'](ctx, o, t + i * 0.95, null, r); } } },
-        { label: 'thud ×5 — quick fill, 0.45s apart', dur: 4.0, build: (ctx, bus, t, r) => { for (let i = 0; i < 5; i++) { const o = S.out(bus, SENDS['thud']); CUES['thud'](ctx, o, t + i * 0.45, null, r); } } },
-        { label: 'slip ×4', dur: 4.5, build: (ctx, bus, t, r) => { for (let i = 0; i < 4; i++) { const o = S.out(bus, SENDS['slip']); CUES['slip'](ctx, o, t + i * 1.05, null, r); } } },
+        { label: 'placement ×8 — a steady solving hand', dur: 8.0, build: (ctx, bus, t, r) => { for (let i = 0; i < 8; i++) place(ctx, bus, t + i * 0.95, r); } },
+        { label: 'placement ×6 — quick fill, 0.45 s apart', dur: 4.0, build: (ctx, bus, t, r) => { for (let i = 0; i < 6; i++) place(ctx, bus, t + i * 0.45, r); } },
+        { label: 'step ×10 — the mud alone, level check', dur: 8.0, build: (ctx, bus, t, r) => { for (let i = 0; i < 10; i++) CUES['thud'](ctx, o(bus, 'thud'), t + i * 0.8, null, r); } },
+        { label: 'wheek ×4 — four mistakes running', dur: 4.5, build: (ctx, bus, t, r) => { for (let i = 0; i < 4; i++) CUES['slip'](ctx, o(bus, 'slip'), t + i * 1.05, null, r); } },
       ],
     },
     {
-      title: 'D · A solving run — the real cadence',
-      note: 'What a good minute actually sounds like: placements at thinking pace, a pen closing, more placements, the last pen, and the piggy’s verdict on the whole field. The chime has to read as a clear, separate moment once the thuds have decayed — that was the original complaint about the spec cues. Then the same finish rushed, thud into chime into snuffle almost on top of each other, to check the overlap fuses in the shared yard instead of piling up.',
+      title: 'E · Scenes',
+      note: 'The moments that have failed before, at real timing. The finish: the win fires from inside the same handler as the last placement — the pre-roll must put the climb in clear air. The rushed finish stresses that with two fast placements right in front. The loss: the fail must land as an ending now, present and unmissable, while staying on the right side of gentle.',
       items: [
-        {
-          label: 'thud, thud, thud → chime … thud, thud → chime → snuffle', dur: 12.0,
-          build: (ctx, bus, t, r) => {
-            const th = (at) => CUES['thud'](ctx, S.out(bus, SENDS['thud']), at, null, r);
-            th(t); th(t + 1.3); th(t + 2.2);
-            CUES['chime'](ctx, S.out(bus, SENDS['chime']), t + 3.0, null, r);
-            th(t + 4.9); th(t + 6.0);
-            CUES['chime'](ctx, S.out(bus, SENDS['chime']), t + 6.8, null, r);
-            CUES['snuffle'](ctx, S.out(bus, SENDS['snuffle']), t + 8.3, null, r);
-          },
-        },
-        {
-          label: 'the rushed finish — thud → chime → snuffle, tight', dur: 4.5,
-          build: (ctx, bus, t, r) => {
-            CUES['thud'](ctx, S.out(bus, SENDS['thud']), t, null, r);
-            CUES['chime'](ctx, S.out(bus, SENDS['chime']), t + 0.3, null, r);
-            CUES['snuffle'](ctx, S.out(bus, SENDS['snuffle']), t + 1.2, null, r);
-          },
-        },
-        {
-          label: 'a slip inside a run — thud, slip, thud → chime', dur: 7.0,
-          build: (ctx, bus, t, r) => {
-            CUES['thud'](ctx, S.out(bus, SENDS['thud']), t, null, r);
-            CUES['slip'](ctx, S.out(bus, SENDS['slip']), t + 1.4, null, r);
-            CUES['thud'](ctx, S.out(bus, SENDS['thud']), t + 3.1, null, r);
-            CUES['chime'](ctx, S.out(bus, SENDS['chime']), t + 4.0, null, r);
-          },
-        },
-      ],
-    },
-    {
-      title: 'E · The gentle end',
-      note: 'Two slips and then the hearts run out. The fail is a nap, not a death: a long exhale with the sag voiced inside it, the body settling into the straw, one last small breath. If it lands as a fanfare — even a sad one — it is overwritten. It should make you want to try again, softly.',
-      items: [
-        {
-          label: 'slip, slip → fail', dur: 6.5,
-          build: (ctx, bus, t, r) => {
-            CUES['slip'](ctx, S.out(bus, SENDS['slip']), t, null, r);
-            CUES['slip'](ctx, S.out(bus, SENDS['slip']), t + 1.5, null, r);
-            CUES['fail'](ctx, S.out(bus, SENDS['fail']), t + 3.2, null, r);
-          },
-        },
-        { label: 'fail — alone', dur: null, cue: 'fail', send: SENDS['fail'] },
+        { label: 'the finish — last placement → the win', dur: 5.0, build: (ctx, bus, t, r) => { place(ctx, bus, t + 1.2, r); CUES['oink'](ctx, o(bus, 'oink'), t + 1.2, null, r); } },
+        { label: 'a rushed finish — two fast placements into the win', dur: 5.0, build: (ctx, bus, t, r) => { place(ctx, bus, t + 0.4, r); place(ctx, bus, t + 0.9, r); CUES['oink'](ctx, o(bus, 'oink'), t + 0.9, null, r); } },
+        { label: 'the loss — slip, slip, slip → the fail', dur: 7.0, build: (ctx, bus, t, r) => { CUES['slip'](ctx, o(bus, 'slip'), t, null, r); CUES['slip'](ctx, o(bus, 'slip'), t + 1.5, null, r); CUES['slip'](ctx, o(bus, 'slip'), t + 3.0, null, r); CUES['fail'](ctx, o(bus, 'fail'), t + 3.0, null, r); } },
+        { label: 'win, then starred — the happy ending in full', dur: 6.0, build: (ctx, bus, t, r) => { place(ctx, bus, t + 0.3, r); CUES['oink'](ctx, o(bus, 'oink'), t + 0.3, null, r); CUES['star'](ctx, o(bus, 'star'), t + 3.6, null, r); } },
       ],
     },
   ];
