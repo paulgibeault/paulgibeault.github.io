@@ -2,7 +2,8 @@
  *
  * Physical-gesture synthesis primitives for sound packs: friction, strike,
  * stick-slip creak, Karplus-Strong pluck, water droplets, inharmonic struck
- * bodies, sustained streams, plus the shared convolution room they all feed.
+ * bodies, granular shatter, ratchet detents, sustained streams and drones,
+ * plus the shared convolution room they all feed.
  *
  * Load AFTER arcade-sdk.js, from the same major-pinned path:
  *
@@ -603,6 +604,177 @@
     return dur;
   }
 
+  // Brittle fracture — glass, ice, ceramic. A shatter is not one sound but a
+  // population: tens of shards, each a tiny inharmonically-pitched ring, and
+  // the population's DENSITY is the gesture — thickest at the instant of
+  // fracture, thinning as the fragments scatter. Two things make it read as
+  // breakage rather than as wind chimes:
+  //   · the crack at the front (the fracture itself, before any shard rings)
+  //   · that density decay — grains spread evenly across the duration are
+  //     heard as decoration, not as a break.
+  // `skew` shapes the grain-time distribution (>1 front-loads it; <1 REVERSES
+  // the gesture into a converging crescendo — glass assembling rather than
+  // breaking, which is a formation sound, not a destruction). Synthesised into
+  // one buffer per call, like pluck and creak: a match-3 fires this on every
+  // clear, and a 60-shard cloud as live oscillator pairs would be hundreds of
+  // nodes per cascade step.
+  function shatterBuffer(ctx, p) {
+    const sr = ctx.sampleRate;
+    const dur = p.dur || 0.45;
+    const len = Math.ceil((dur + 0.12) * sr);
+    const buf = ctx.createBuffer(1, len, sr);
+    const d = buf.getChannelData(0);
+    const r = rng(p.seed || 97);
+    const grains = p.grains || 42;
+    const f0 = (p.f0 || 3200) * (p.bright || 1);
+    const skew = p.skew == null ? 2.2 : p.skew;
+    const ring = p.ring == null ? 1 : p.ring;
+    for (let g = 0; g < grains; g++) {
+      const t0 = Math.pow(r(), skew) * dur * 0.88;
+      const i0 = Math.floor(t0 * sr);
+      // log-uniform: shard pitch scales with fragment size, and fragment sizes
+      // are log-distributed — linear-uniform bunches everything at the top
+      const f = f0 * Math.pow(2, between(r, -0.8, 1.4));
+      const tau = between(r, 0.010, 0.05) * ring;
+      const glen = Math.min(len - i0, Math.ceil(tau * 6 * sr));
+      const amp = between(r, 0.25, 1.0) * (1 - 0.55 * (t0 / dur));
+      const w = (2 * Math.PI * f) / sr;
+      const w2 = w * 2.32;               // the glassy upper partial
+      const phase = between(r, 0, 6.283);
+      const k = Math.exp(-1 / (tau * sr));
+      let a = amp;
+      for (let i = 0; i < glen; i++) {
+        d[i0 + i] += a * (Math.sin(phase + w * i) + 0.35 * Math.sin(w2 * i));
+        a *= k;
+      }
+    }
+    // normalize, then a hard fade over the last 3% so a late grain clipped by
+    // the buffer end cannot click
+    let peak = 0;
+    for (let i = 0; i < len; i++) peak = Math.max(peak, Math.abs(d[i]));
+    if (peak > 0) for (let i = 0; i < len; i++) d[i] /= peak;
+    const fadeAt = Math.floor(len * 0.97);
+    for (let i = fadeAt; i < len; i++) d[i] *= 1 - (i - fadeAt) / (len - fadeAt);
+    return buf;
+  }
+
+  function shatter(ctx, dest, t, p) {
+    const dur = p.dur || 0.45;
+    const gain = p.gain == null ? 0.2 : p.gain;
+    const crack = p.crack == null ? 1 : p.crack;
+    const seed = p.seed || 97;
+    if (crack > 0) {
+      strike(ctx, dest, t, { dur: 0.006, hp: 2400, gain: gain * 1.1 * crack, seed: seed + 1, collect: p.collect });
+      strike(ctx, dest, t + 0.003, { dur: 0.010, hp: 900, gain: gain * 0.5 * crack, seed: seed + 2, collect: p.collect });
+    }
+    const src = track(p, ctx.createBufferSource());
+    src.buffer = shatterBuffer(ctx, p);
+    // keeps the cloud out of the low registers, where it would read as debris
+    // rather than glass
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = p.hp || 1500;
+    const g = ctx.createGain();
+    g.gain.value = gain;
+    src.connect(hp); hp.connect(g); g.connect(dest);
+    src.start(t); src.stop(t + dur + 0.15);
+    return dur + 0.15;
+  }
+
+  // A pawl riding over gear teeth — the mechanism sound stick-slip cannot
+  // make. `creak` is irregular grip-and-release; a ratchet is the opposite:
+  // discrete, near-regular detents, each a contact click plus the short ring
+  // of the pawl. What sells the mechanism:
+  //   · detent SPACING follows the gesture — `end` is the last interval
+  //     divided by the first, so >1 decelerates (a hand settling a dial) and
+  //     <1 accelerates (a wheel let go)
+  //   · per-detent variation in strike position and ring — real teeth are not
+  //     identical — while the spacing stays regular enough to read as machined.
+  function ratchet(ctx, dest, t, p) {
+    const detents = Math.max(2, p.detents || 5);
+    const dur = p.dur || 0.35;
+    const end = p.end == null ? 1 : p.end;
+    const jitter = p.jitter == null ? 0.07 : p.jitter;
+    const gain = p.gain == null ? 0.2 : p.gain;
+    const f = p.f || 640;
+    const hp = p.hp || 2600;
+    const seed = p.seed || 53;
+    const r = rng(seed);
+    const w = [];
+    let sum = 0;
+    for (let i = 0; i < detents; i++) {
+      const x = detents === 1 ? 1 : 1 + (end - 1) * (i / (detents - 1));
+      w.push(x); sum += x;
+    }
+    let at = t;
+    for (let i = 0; i < detents; i++) {
+      const jt = Math.max(t, at + (r() * 2 - 1) * jitter * (dur / detents));
+      strike(ctx, dest, jt, {
+        dur: between(r, 0.0025, 0.0045), hp: hp * cents(r, 120),
+        gain: gain * between(r, 0.65, 1.05), seed: seed + i * 7 + 1, collect: p.collect,
+      });
+      body(ctx, dest, jt, {
+        f0: f * cents(r, 60), gain: gain * between(r, 0.45, 0.8),
+        partials: [
+          { ratio: 1.0, gain: 1.0, decay: between(r, 0.018, 0.040), detune: 6 },
+          { ratio: 2.76, gain: 0.3, decay: between(r, 0.010, 0.020), detune: 10 },
+        ],
+        collect: p.collect,
+      });
+      at += (dur * w[i]) / sum;
+    }
+    return dur + 0.08;
+  }
+
+  // Sustained tonal pressure — the tonal sibling of `stream`, which is noise-
+  // only. Two oscillators split symmetrically around `f` by `detune` cents
+  // beat against each other, and the beat RATE is the whole character: under
+  // 1 Hz reads as breathing, 2–4 Hz as unease. An optional `sub` doubles an
+  // octave down for floor weight, and a slow lowpass drift keeps ten seconds
+  // of it from reading as a test tone. Same signature shape as `stream`
+  // (explicit dur), same fade-in/out envelope, `collect`-aware for teardown.
+  function drone(ctx, dest, t, dur, p) {
+    const f = p.f || 55;
+    const det = p.detune == null ? 8 : p.detune;
+    const gain = Math.max(p.gain || 0.05, FLOOR * 2);
+    const fade = p.fade || 1.5;
+    const lpf = p.lp || 500;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = lpf;
+    lp.Q.value = 0.7;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(FLOOR, t);
+    g.gain.exponentialRampToValueAtTime(gain, t + fade);
+    g.gain.setValueAtTime(gain, t + Math.max(fade, dur - fade));
+    g.gain.exponentialRampToValueAtTime(FLOOR, t + dur);
+    for (const side of [-1, 1]) {
+      const o = track(p, ctx.createOscillator());
+      o.type = p.type || 'sine';
+      o.frequency.value = f * Math.pow(2, (side * det) / 2400);
+      o.connect(lp);
+      o.start(t); o.stop(t + dur + 0.05);
+    }
+    if (p.sub) {
+      const s = track(p, ctx.createOscillator());
+      s.type = 'sine';
+      s.frequency.value = f / 2;
+      const sg = ctx.createGain();
+      sg.gain.value = p.sub;
+      s.connect(sg); sg.connect(lp);
+      s.start(t); s.stop(t + dur + 0.05);
+    }
+    const lfo = track(p, ctx.createOscillator());
+    lfo.type = 'sine';
+    lfo.frequency.value = p.drift || 0.06;
+    const la = ctx.createGain();
+    la.gain.value = p.driftAmt == null ? lpf * 0.25 : p.driftAmt;
+    lfo.connect(la); la.connect(lp.frequency);
+    lfo.start(t); lfo.stop(t + dur + 0.05);
+    lp.connect(g); g.connect(dest);
+    return dur;
+  }
+
   // The teardown a sustained cue is expected to return, given the `collect`
   // array its elements filled in. Stopping a bed has to actually stop its
   // sources: merely disconnecting the output leaves everything scheduled and
@@ -618,5 +790,6 @@
     track, teardown,
     strike, rustle, pluck, pluckBuffer, creak, creakBuffer, droplet, body, thump,
     flare, blast, chirp, stream,
+    shatter, shatterBuffer, ratchet, drone,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -30,6 +30,33 @@ semver is for humans and URLs, never checked on the wire.
 
 ---
 
+## 3.8.0
+
+Companion element library (`arcade-audio.js`) gains three gestures. No SDK
+surface change — `Arcade.audio` is untouched — but the elements ship on the
+same version line, so the pinned copy and the changelog move together.
+
+- `shatter` — brittle fracture: glass, ice, ceramic. A break is not one sound
+  but a population of shards, and the population's DENSITY is the gesture:
+  thickest at the fracture, thinning as the fragments scatter. `skew` shapes
+  that distribution, and inverting it (`< 1`) reverses the gesture into a
+  converging crescendo — glass assembling rather than breaking, which is a
+  formation sound, not a destruction. Synthesised into one buffer per call,
+  like `pluck` and `creak`: a match-3 fires this on every clear, and a
+  60-shard cloud as live oscillator pairs would be hundreds of nodes per
+  cascade step.
+- `ratchet` — a pawl riding over gear teeth, the mechanism sound stick-slip
+  cannot make. `creak` is irregular grip-and-release; a ratchet is the
+  opposite: discrete, near-regular detents, each a contact click plus the
+  short ring of the pawl. `end` (last interval / first) carries the gesture —
+  `> 1` decelerates like a hand settling a dial, `< 1` accelerates like a
+  wheel let go.
+- `drone` — sustained tonal pressure, the tonal sibling of `stream`, which is
+  noise-only. Two oscillators split symmetrically around `f` beat against each
+  other and the beat RATE is the character: under 1 Hz reads as breathing,
+  2-4 Hz as unease. Takes an explicit `dur` and is `collect`-aware, like
+  `stream`, so beds built on it get a real teardown.
+
 ## 3.7.0
 
 Additive: **adaptive beds** — a sustained cue's handle gains
