@@ -179,7 +179,7 @@
     // tools/sdk-version-unit.mjs enforces all three. Launcher↔SDK compat is
     // still negotiated by welcome.caps, never by this number; it exists for
     // humans (bug reports, CHANGELOG) and for the pinned-URL publish scheme.
-    var SDK_SEMVER = '3.7.0';
+    var SDK_SEMVER = '3.8.0';
     var HANDSHAKE_TIMEOUT_MS = 300;
     // Opaque-origin (sandboxed, no allow-same-origin) frames have no storage
     // to fall back to, so waiting longer for the launcher costs nothing and
