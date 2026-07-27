@@ -30,6 +30,16 @@ semver is for humans and URLs, never checked on the wire.
 
 ---
 
+## 3.8.1
+
+Comment only, no behavior change. The note above `rng()` in `arcade-audio.js`
+claimed "every render must be reproducible", which overstated what actually
+holds: the *scheduling* is reproducible (seeded, no entropy in the render
+path), but Chromium's `OfflineAudioContext` is not bit-exact between runs once
+enough sources sum concurrently. Corrected, and pointed at the detail in
+`tools/soundpack/render.mjs`. Ships as a patch because the pinned copy has to
+stay byte-identical to the canonical file.
+
 ## 3.8.0
 
 Companion element library (`arcade-audio.js`) gains three gestures. No SDK

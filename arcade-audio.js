@@ -36,7 +36,12 @@
   'use strict';
 
   // ── deterministic randomness ──────────────────────────────────────────
-  // Every render must be reproducible, so "random" is always a seeded stream.
+  // "Random" is always a seeded stream, so the same seed always schedules the
+  // same graph — which is what makes an audition reviewable: a note about 1:12
+  // still refers to the same sound after a re-render. (The scheduling is
+  // reproducible; the rendered samples are not bit-exact between runs, for
+  // reasons that belong to Chromium rather than to this file — see the note in
+  // tools/soundpack/render.mjs.)
   // Per-play variation is the antidote to the byte-identical repetition that
   // makes synthesised audio read as chiptune.
   function rng(seed) {

@@ -11,6 +11,32 @@
 // Sections render independently and are concatenated with silence between, so
 // reverb tails never spill across a boundary and no single render has to hold
 // the whole piece in memory.
+//
+// ── what "reproducible" does and does not mean here ──────────────────────
+//
+// The PACK is fully seeded: every cue draws from `rng(seed)`, there is no
+// Math.random(), Date or other entropy anywhere in the render path, and the
+// same seed always produces the same scheduled graph. That is the guarantee
+// the design depends on, and it holds.
+//
+// The RENDER is not bit-reproducible. Chromium's OfflineAudioContext gives
+// last-bit-different output between runs once enough sources sum concurrently:
+// measured deterministic at 4 concurrent oscillators, nondeterministic at 8+
+// (oscillators, buffer sources, biquads, compressors and convolvers are all
+// individually bit-exact, within a process and across processes — it is the
+// concurrent fan-in that does it, presumably summation order). Across the full
+// moon-lit audition this shows up as ~300 samples of 27M differing by exactly
+// 1 LSB: -90 dBFS peak, ~109 dB under the signal, and inaudible.
+//
+// The practical consequence: DO NOT compare auditions with `shasum`. It reports
+// a difference every time and cannot answer "did my change to the shared
+// element library affect this pack?". Use the differ, which measures the
+// difference and knows what the noise floor looks like:
+//
+//   node tools/soundpack/wavdiff.mjs A.wav B.wav --manifest A.manifest.json
+//
+// It exits 0 when the delta is within run-to-run noise and 1 when the sound
+// actually changed, so it can gate CI.
 
 import { chromium } from 'playwright';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
