@@ -3,7 +3,8 @@
  * Physical-gesture synthesis primitives for sound packs: friction, strike,
  * stick-slip creak, Karplus-Strong pluck, water droplets, inharmonic struck
  * bodies, granular shatter, ratchet detents, sustained streams and drones,
- * plus the shared convolution room they all feed.
+ * wet squelch, animal breath and voiced grunts, plus the shared convolution
+ * room they all feed.
  *
  * Load AFTER arcade-sdk.js, from the same major-pinned path:
  *
@@ -780,6 +781,217 @@
     return dur;
   }
 
+  // Mud — something soft settling into a wet, yielding surface. A squelch is
+  // not one splat but a population of tiny cavity pops: water and air forced
+  // out through irregular channels, each collapsing passage a miniature
+  // droplet raising its own resonance as it closes. Two things make it read
+  // as wet rather than as crackle:
+  //   · every grain SWEEPS UPWARD — droplet physics, miniaturised; grains at
+  //     fixed pitch are heard as something dry breaking
+  //   · the cloud sits low and heavily lowpassed, dense at contact and
+  //     thinning as the surface settles. Mud has no top end.
+  // `skew` works as in shatter (>1 front-loads the population; <1 reverses
+  // the gesture into a suck — mud releasing rather than receiving, which is
+  // a lift-out, not a landing). Synthesised into one buffer per call, same
+  // reasoning as shatter: a placement cue fires this on every single tap.
+  function squelchBuffer(ctx, p) {
+    const sr = ctx.sampleRate;
+    const dur = p.dur || 0.16;
+    const len = Math.ceil((dur + 0.08) * sr);
+    const buf = ctx.createBuffer(1, len, sr);
+    const d = buf.getChannelData(0);
+    const r = rng(p.seed || 87);
+    const grains = p.grains || 18;
+    const f0 = p.f0 || 260;
+    const skew = p.skew == null ? 2.4 : p.skew;
+    for (let g = 0; g < grains; g++) {
+      const t0 = Math.pow(r(), skew) * dur * 0.85;
+      const i0 = Math.floor(t0 * sr);
+      // channel size is log-distributed, like shard size in a shatter
+      const fa = f0 * Math.pow(2, between(r, -0.7, 1.0));
+      const sweep = between(r, 1.7, 3.1);              // every pop closes upward
+      const glen = Math.min(len - i0, Math.ceil(between(r, 0.008, 0.035) * sr));
+      const amp = between(r, 0.3, 1.0) * (1 - 0.5 * (t0 / dur));
+      const k = Math.exp(-3.2 / glen);
+      let a = amp, phase = between(r, 0, 6.283);
+      for (let i = 0; i < glen; i++) {
+        const f = fa * Math.pow(sweep, i / glen);
+        phase += (2 * Math.PI * f) / sr;
+        d[i0 + i] += a * Math.sin(phase);
+        a *= k;
+      }
+    }
+    let peak = 0;
+    for (let i = 0; i < len; i++) peak = Math.max(peak, Math.abs(d[i]));
+    if (peak > 0) for (let i = 0; i < len; i++) d[i] /= peak;
+    const fadeAt = Math.floor(len * 0.96);
+    for (let i = fadeAt; i < len; i++) d[i] *= 1 - (i - fadeAt) / (len - fadeAt);
+    return buf;
+  }
+
+  function squelch(ctx, dest, t, p) {
+    const dur = p.dur || 0.16;
+    const gain = p.gain == null ? 0.22 : p.gain;
+    const seed = p.seed || 87;
+    // the smear — the surface itself giving way under the pops, a dark
+    // downward wash with no edge on it
+    rustle(ctx, dest, t, {
+      f0: p.sf0 || 420, f1: p.sf1 || 140, Q: 0.8, lp: p.lp || 520,
+      dur: dur * 1.3, gain: gain * 0.55, attack: 0.006,
+      seed: seed + 1, collect: p.collect,
+    });
+    const src = track(p, ctx.createBufferSource());
+    src.buffer = squelchBuffer(ctx, p);
+    // two stages, like creak and stream: a single biquad leaks enough top end
+    // that the pops read as electrical crackle instead of wet
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = p.lp || 1300;
+    const lp2 = ctx.createBiquadFilter();
+    lp2.type = 'lowpass';
+    lp2.frequency.value = p.lp || 1300;
+    const g = ctx.createGain();
+    g.gain.value = gain;
+    src.connect(lp); lp.connect(lp2); lp2.connect(g); g.connect(dest);
+    src.start(t); src.stop(t + dur + 0.1);
+    return dur * 1.3;
+  }
+
+  // Respiration — an exhale through a soft passage: a snout, a nostril, a
+  // dozing animal. Superficially rustle (noise through a moving band), but
+  // the gesture is cyclic, not frictional: the passage opens then relaxes,
+  // so the band rises and falls in ONE ARC, and the flow is turbulent, so
+  // the level flutters irregularly a few times a second. A monotonic sweep
+  // under a smooth envelope reads as cloth or wind, never as something alive.
+  // `dir: 'in'` draws the arc the other way for a sniff — a long pull that
+  // stops short instead of a release that tapers.
+  function breath(ctx, dest, t, p) {
+    const dur = p.dur || 0.35;
+    const f = p.f || 500;
+    const rise = p.rise == null ? 1.7 : p.rise;
+    const Q = p.Q || 1.3;
+    const gain = p.gain == null ? 0.2 : p.gain;
+    const dirIn = p.dir === 'in';
+    const seed = p.seed || 113;
+    const src = track(p, ctx.createBufferSource());
+    src.buffer = noiseBuffer(ctx, dur + 0.05, seed);
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.value = Q;
+    // the arc: open, then relax — peak sits early on an exhale, late on a sniff
+    const peakAt = dirIn ? 0.7 : 0.3;
+    bp.frequency.setValueAtTime(f, t);
+    bp.frequency.exponentialRampToValueAtTime(f * rise, t + dur * peakAt);
+    bp.frequency.exponentialRampToValueAtTime(f * 0.8, t + dur);
+    // breath is dark — cascade two stages, same reason as creak
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = p.lp || 1100;
+    const lp2 = ctx.createBiquadFilter();
+    lp2.type = 'lowpass';
+    lp2.frequency.value = p.lp || 1100;
+    const g = ctx.createGain();
+    const mk = bandMakeup(ctx, f * 1.2, Q);
+    const atk = dirIn ? dur * 0.6 : dur * (p.attack == null ? 0.18 : p.attack);
+    env(g.gain, t, gain * mk, atk, dur);
+    // turbulence: a second noise stream, lowpassed to a few hertz, wobbling
+    // the gain — the irregular flutter is what the ear reads as flow
+    const flutter = p.flutter == null ? 0.45 : p.flutter;
+    if (flutter > 0) {
+      const fsrc = track(p, ctx.createBufferSource());
+      fsrc.buffer = noiseBuffer(ctx, dur + 0.05, seed + 1);
+      const flp = ctx.createBiquadFilter();
+      flp.type = 'lowpass';
+      flp.frequency.value = p.rate || 7;
+      const fam = ctx.createGain();
+      fam.gain.value = gain * mk * flutter;
+      fsrc.connect(flp); flp.connect(fam); fam.connect(g.gain);
+      fsrc.start(t); fsrc.stop(t + dur + 0.05);
+    }
+    src.connect(bp); bp.connect(lp); lp.connect(lp2); lp2.connect(g); g.connect(dest);
+    src.start(t); src.stop(t + dur + 0.05);
+    return dur;
+  }
+
+  // A voiced animal call — a pig's grunt, a dove's coo, anything with a
+  // larynx. The source is a train of glottal pulses, and what makes it a
+  // creature rather than a synth is that no two periods are identical: pitch
+  // wanders (jitter) and pulse strength wanders (shimmer) a few percent on
+  // every single cycle. The tract above the larynx is a pair of broad formant
+  // resonances; their placement is the SPECIES and stays put while the pitch
+  // moves underneath — that fixed-formant/moving-pitch split is exactly how
+  // the ear tells a voice from a filter sweep.
+  function gruntBuffer(ctx, p) {
+    const sr = ctx.sampleRate;
+    const dur = p.dur || 0.22;
+    const f0 = p.f0 || 95;
+    const f1 = p.f1 || f0 * 0.8;                       // a grunt sags by default
+    const rough = p.rough == null ? 1 : p.rough;
+    const len = Math.ceil((dur + 0.03) * sr);
+    const buf = ctx.createBuffer(1, len, sr);
+    const d = buf.getChannelData(0);
+    const r = rng(p.seed || 131);
+    let i = 0;
+    while (i < len) {
+      const x = i / (dur * sr);
+      const f = f0 * Math.pow(f1 / f0, Math.min(1, x)) * (1 + rough * 0.04 * (r() * 2 - 1));
+      const N = Math.max(8, Math.round(sr / f));
+      const amp = 1 - rough * 0.3 * r();
+      const open = Math.floor(N * 0.55);               // open phase, then closure
+      for (let j = 0; j < N && i + j < len; j++) {
+        d[i + j] = j < open ? amp * Math.sin((Math.PI * j) / open) : 0;
+      }
+      i += N;
+    }
+    // fade the tail so a period clipped by the buffer end cannot click
+    const fadeAt = Math.floor(len * 0.94);
+    for (let k = fadeAt; k < len; k++) d[k] *= 1 - (k - fadeAt) / (len - fadeAt);
+    return buf;
+  }
+
+  function grunt(ctx, dest, t, p) {
+    const dur = p.dur || 0.22;
+    const gain = p.gain == null ? 0.2 : p.gain;
+    const seed = p.seed || 131;
+    const src = track(p, ctx.createBufferSource());
+    src.buffer = gruntBuffer(ctx, p);
+    const sum = ctx.createGain();
+    // two formants make a snout; override to re-voice the species
+    const formants = p.formants || [
+      { f: 430, Q: 5, gain: 1.0 },
+      { f: 1050, Q: 7, gain: 0.4 },
+    ];
+    for (const fm of formants) {
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.value = fm.f;
+      bp.Q.value = fm.Q;
+      const fg = ctx.createGain();
+      fg.gain.value = fm.gain * Math.min(6, bandMakeup(ctx, fm.f, fm.Q) * 0.12);
+      src.connect(bp); bp.connect(fg); fg.connect(sum);
+    }
+    // the chest under the formants — the direct voicing, kept dark
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = p.chest || 300;
+    const cg = ctx.createGain();
+    cg.gain.value = 0.7;
+    src.connect(lp); lp.connect(cg); cg.connect(sum);
+    // breathiness: air escaping around the voicing, through the first formant
+    const breathy = p.breathy == null ? 0.25 : p.breathy;
+    if (breathy > 0) {
+      breath(ctx, sum, t, {
+        dur, f: formants[0].f * 1.4, rise: 1.2, Q: 2.2, lp: 1400,
+        gain: gain * breathy, flutter: 0.3, seed: seed + 7, collect: p.collect,
+      });
+    }
+    const g = ctx.createGain();
+    env(g.gain, t, gain, p.attack == null ? 0.018 : p.attack, dur);
+    sum.connect(g); g.connect(dest);
+    src.start(t); src.stop(t + dur + 0.05);
+    return dur;
+  }
+
   // The teardown a sustained cue is expected to return, given the `collect`
   // array its elements filled in. Stopping a bed has to actually stop its
   // sources: merely disconnecting the output leaves everything scheduled and
@@ -796,5 +1008,6 @@
     strike, rustle, pluck, pluckBuffer, creak, creakBuffer, droplet, body, thump,
     flare, blast, chirp, stream,
     shatter, shatterBuffer, ratchet, drone,
+    squelch, squelchBuffer, breath, grunt, gruntBuffer,
   };
 })(typeof window !== 'undefined' ? window : globalThis);
