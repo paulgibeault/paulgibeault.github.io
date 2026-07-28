@@ -30,6 +30,40 @@ semver is for humans and URLs, never checked on the wire.
 
 ---
 
+## 3.10.0
+
+Companion element library (`arcade-audio.js`) gains one gesture and one
+fix, both driven by cozy-solitaire — a game entirely about thin cards on
+felt, which the library had no way to voice at all.
+
+- `flex` (+ `flexBuffer`) — a thin springy sheet bent and released: paper,
+  cardstock, a ticket, a flag. Nothing existing fit — `rustle` is friction
+  with no release in it, `creak` grips under load in wood/rope registers,
+  `strike` is contact with no body after it. The signature is a broadband
+  snap followed by a short train of decaying micro-oscillations whose rate
+  ACCELERATES as amplitude falls (a bending sheet's restoring force rises
+  as its amplitude drops, so the gaps close as the gesture dies — a
+  constant rate reads as a mechanism, not a sheet). `stiffness` is the
+  material knob, the same role `body`'s partial tables play for struck
+  objects; `count`/`rate`/`end` repeat the gesture for a riffle or a fan,
+  spacing curved exactly as `ratchet`'s detents are.
+- **Fix: a ~27 dB level outlier in any cue run not scheduled on a
+  128-sample grid.** A fresh `GainNode`'s value is `1.0` until its first
+  automation event lands, and Chromium applies automation on 128-sample
+  render-quantum boundaries — so when a cue's start time falls
+  mid-quantum, the samples between that boundary and the actual start were
+  being multiplied by the stale `1.0` while the source was already
+  running. Silent at low density (each cue alone still measured correctly)
+  and only visible once enough cues fired close together to land on the
+  wrong side of a quantum boundary — which is exactly the repetition runs
+  hardest to audition by ear. `env()` primes the gain param before
+  scheduling; `pluck`, `stream` and `drone`, which build their own
+  envelopes, get the same treatment via a new `primed()` helper. Measured
+  across thirteen `strike`s 100 ms apart: peak spread 26.6 dB → 4.6 dB.
+  This changes the rendered output of every existing pack — nothing gets
+  quieter than intended, only spurious peaks disappear — most visibly in
+  hecknsic's `rotate`/`match`/`ui-click` repetition sections.
+
 ## 3.9.0
 
 Companion element library (`arcade-audio.js`) gains three gestures, on the
