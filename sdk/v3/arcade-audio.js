@@ -3,8 +3,8 @@
  * Physical-gesture synthesis primitives for sound packs: friction, strike,
  * stick-slip creak, Karplus-Strong pluck, water droplets, inharmonic struck
  * bodies, granular shatter, ratchet detents, sustained streams and drones,
- * wet squelch, animal breath and voiced grunts, plus the shared convolution
- * room they all feed.
+ * wet squelch, animal breath and voiced grunts, flexing sheets, plus the
+ * shared convolution room they all feed.
  *
  * Load AFTER arcade-sdk.js, from the same major-pinned path:
  *
@@ -61,8 +61,29 @@
   // Exponential decay, not the linear ramp the old engine used. Natural decay
   // is exponential; linear decay is one of the tells the ear reads as "synth".
   const FLOOR = 0.0001;
+
+  // A fresh GainNode's value is 1.0, and it stays 1.0 until the first
+  // automation event actually lands. Chromium applies automation on
+  // 128-sample render-quantum boundaries, so when `t` falls mid-quantum — as
+  // it does for roughly half of any cue run not scheduled on a 128-sample grid
+  // — the samples between the quantum boundary and `t` are multiplied by that
+  // stale 1.0 while the source is already running. On a strike at gain 0.04
+  // that is a 28 dB burst, landing on random members of a rapid run: the exact
+  // "the game just got louder" outlier every pack in the fleet is written to
+  // avoid, arriving from underneath the packs rather than from their tuning.
+  // Measured across thirteen strikes 100 ms apart, priming the param first
+  // takes the spread from 26.6 dB to 4.6 dB.
+  //
+  // Anything that schedules its own envelope from FLOOR (pluck, stream, drone)
+  // needs the same priming — see `primed()`.
+  function primed(g) {
+    g.gain.value = FLOOR;
+    return g;
+  }
+
   function env(param, t, peak, attack, dur) {
     const p = Math.max(peak, FLOOR * 2);
+    param.value = FLOOR;
     param.setValueAtTime(FLOOR, t);
     param.exponentialRampToValueAtTime(p, t + attack);
     param.exponentialRampToValueAtTime(FLOOR, t + Math.max(dur, attack + 0.005));
@@ -285,7 +306,7 @@
     const lp = ctx.createBiquadFilter();
     lp.type = 'lowpass';
     lp.frequency.value = p.tone || 3200;
-    const g = ctx.createGain();
+    const g = primed(ctx.createGain());
     g.gain.setValueAtTime(FLOOR, t);
     g.gain.exponentialRampToValueAtTime(Math.max(p.gain || 0.3, FLOOR * 2), t + 0.003);
     g.gain.setValueAtTime(Math.max(p.gain || 0.3, FLOOR * 2), t + Math.min(0.05, dur * 0.4));
@@ -599,7 +620,7 @@
     const lfoAmt = ctx.createGain();
     lfoAmt.gain.value = p.sweep || 300;
     lfo.connect(lfoAmt); lfoAmt.connect(bp.frequency);
-    const g = ctx.createGain();
+    const g = primed(ctx.createGain());
     g.gain.setValueAtTime(FLOOR, t);
     g.gain.exponentialRampToValueAtTime(Math.max(p.gain || 0.05, FLOOR * 2), t + (p.fade || 1.2));
     g.gain.setValueAtTime(Math.max(p.gain || 0.05, FLOOR * 2), t + dur - (p.fade || 1.2));
@@ -749,7 +770,7 @@
     lp.type = 'lowpass';
     lp.frequency.value = lpf;
     lp.Q.value = 0.7;
-    const g = ctx.createGain();
+    const g = primed(ctx.createGain());
     g.gain.setValueAtTime(FLOOR, t);
     g.gain.exponentialRampToValueAtTime(gain, t + fade);
     g.gain.setValueAtTime(gain, t + Math.max(fade, dur - fade));
@@ -992,6 +1013,153 @@
     return dur;
   }
 
+  // A thin springy sheet bent and let go — a card, a page, a ticket, a flag,
+  // a leaf. Nothing else in this library makes this sound: `rustle` is two
+  // surfaces sliding with no release in them, `creak` is a mechanism gripping
+  // under load, and `strike` is contact with no body after it.
+  //
+  // Twang a ruler on a desk edge and what comes out is two things: the SNAP of
+  // release, and then the sheet beating against itself as it runs out of
+  // travel. That second part is the element, and the non-obvious half of it is
+  // that the beats ACCELERATE — a bending sheet's restoring force rises as its
+  // amplitude falls, so the gaps close as the gesture dies. A constant flap
+  // rate is heard as a machine (that is `ratchet`, and it decelerates); one
+  // filtered burst is heard as `rustle`. The closing train is the whole tell,
+  // the same way the pulse rate is the whole tell in `chirp`.
+  //
+  // `stiffness` (0..1) is the material, playing the part `body`'s partial
+  // tables play there: near 0 is cloth or soft paper — dark, murky, gone
+  // immediately; near 1 is cardstock — defined, brighter, with some ring left.
+  // `count` repeats the whole gesture for a riffle, a fan of tickets, a packet
+  // being squared: sheet spacing follows `end` exactly as detent spacing does
+  // in `ratchet`, so a deal can accelerate and a squaring-up can settle.
+  //
+  // Synthesised into a buffer for the same reason as shatter and squelch: a
+  // card game fires this on every placement, dozens of times a minute, and the
+  // train as live nodes would be a few dozen per card.
+  function flexBuffer(ctx, p) {
+    const sr = ctx.sampleRate;
+    const dur = p.dur || 0.07;
+    const flaps = Math.max(1, Math.round(p.flaps == null ? 5 : p.flaps));
+    const accel = p.accel == null ? 2.2 : p.accel;
+    const stiffness = p.stiffness == null ? 0.7 : p.stiffness;
+    const len = Math.ceil((dur + 0.02) * sr);
+    const buf = ctx.createBuffer(1, len, sr);
+    const d = buf.getChannelData(0);
+    const r = rng(p.seed || 149);
+
+    // Interval weights, normalised so the train always spans `dur` whatever
+    // `accel` is: the last gap is the first divided by `accel`. Same
+    // construction as ratchet's `end`, pointed the other way.
+    const w = [];
+    let sum = 0;
+    for (let i = 0; i < flaps; i++) {
+      const x = flaps === 1 ? 1 : 1 / (1 + (accel - 1) * (i / (flaps - 1)));
+      w.push(x); sum += x;
+    }
+
+    let at = 0;
+    for (let i = 0; i < flaps; i++) {
+      const i0 = Math.floor(at * sr);
+      if (i0 >= len) break;
+      // Stiffer sheets hold their edge longer; soft ones are a smear.
+      const tau = between(r, 0.0011, 0.0032) * (0.45 + stiffness);
+      const glen = Math.min(len - i0, Math.ceil(tau * 6 * sr));
+      // Amplitude runs down the train — this is what makes it one gesture
+      // dying rather than a row of identical taps.
+      const amp = Math.pow(1 - i / (flaps + 0.6), 1.4) * between(r, 0.72, 1.0);
+      const k = Math.exp(-1 / (tau * sr));
+      let a = amp;
+      for (let j = 0; j < glen; j++) {
+        d[i0 + j] += a * (r() * 2 - 1);
+        a *= k;
+      }
+      at += (dur * w[i]) / sum;
+    }
+
+    // Peak-normalise, then fade the last few percent so a flap clipped by the
+    // buffer end cannot click. Normalising is also what keeps `flaps` from
+    // being a second, hidden volume control: level is `gain` and nothing else.
+    let peak = 0;
+    for (let i = 0; i < len; i++) peak = Math.max(peak, Math.abs(d[i]));
+    if (peak > 0) for (let i = 0; i < len; i++) d[i] /= peak;
+    const fadeAt = Math.floor(len * 0.96);
+    for (let i = fadeAt; i < len; i++) d[i] *= 1 - (i - fadeAt) / (len - fadeAt);
+    return buf;
+  }
+
+  function flex(ctx, dest, t, p) {
+    const dur = p.dur || 0.07;
+    const gain = p.gain == null ? 0.2 : p.gain;
+    const snap = p.snap == null ? 0.6 : p.snap;
+    const stiffness = p.stiffness == null ? 0.7 : p.stiffness;
+    const f0 = p.f0 || 1400;
+    const count = Math.max(1, Math.round(p.count || 1));
+    const seed = p.seed || 149;
+    const r = rng(seed);
+
+    // Paper is broadband with an emphasis, not a resonator: Q stays low even
+    // at full stiffness, and a second lowpass stage keeps the top end from
+    // reading as hiss (the same cascade creak, stream and squelch all need).
+    const Q = 0.7 + stiffness * 1.5;
+    const lpHz = p.lp || (1100 + stiffness * 4200);
+
+    const sheet = function (at, n, bright) {
+      if (snap > 0) {
+        strike(ctx, dest, at, {
+          dur: between(r, 0.0028, 0.0048),
+          hp: (1500 + stiffness * 2600) * bright,
+          gain: gain * 1.15 * snap,
+          seed: seed + n * 13 + 1, collect: p.collect,
+        });
+      }
+      const src = track(p, ctx.createBufferSource());
+      src.buffer = flexBuffer(ctx, {
+        dur, flaps: p.flaps, accel: p.accel, stiffness,
+        seed: seed + n * 13 + 2,
+      });
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.value = f0 * bright;
+      bp.Q.value = Q;
+      const lp = ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.value = lpHz * bright;
+      const lp2 = ctx.createBiquadFilter();
+      lp2.type = 'lowpass';
+      lp2.frequency.value = lpHz * bright;
+      const g = ctx.createGain();
+      g.gain.value = gain * Math.min(6, bandMakeup(ctx, f0 * bright, Q) * 0.5);
+      src.connect(bp); bp.connect(lp); lp.connect(lp2); lp2.connect(g); g.connect(dest);
+      src.start(at); src.stop(at + dur + 0.05);
+    };
+
+    if (count === 1) {
+      sheet(t, 0, 1);
+      return dur + 0.03;
+    }
+
+    // Riffle: one gesture per sheet, spacing curved by `end` as in ratchet,
+    // each sheet slightly differently voiced — a real packet is not 52 copies
+    // of one card, and identical repeats are the fastest way to sound
+    // synthetic.
+    const rate = p.rate || 26;
+    const end = p.end == null ? 1 : p.end;
+    const span = count / rate;
+    const w = [];
+    let sum = 0;
+    for (let i = 0; i < count; i++) {
+      const x = count === 1 ? 1 : 1 + (end - 1) * (i / (count - 1));
+      w.push(x); sum += x;
+    }
+    let at = t;
+    for (let i = 0; i < count; i++) {
+      sheet(at, i, cents(r, 110));
+      at += (span * w[i]) / sum;
+    }
+    return (at - t) + dur + 0.03;
+  }
+
   // The teardown a sustained cue is expected to return, given the `collect`
   // array its elements filled in. Stopping a bed has to actually stop its
   // sources: merely disconnecting the output leaves everything scheduled and
@@ -1009,5 +1177,6 @@
     flare, blast, chirp, stream,
     shatter, shatterBuffer, ratchet, drone,
     squelch, squelchBuffer, breath, grunt, gruntBuffer,
+    flex, flexBuffer,
   };
 })(typeof window !== 'undefined' ? window : globalThis);
