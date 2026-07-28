@@ -38,7 +38,11 @@
 // It exits 0 when the delta is within run-to-run noise and 1 when the sound
 // actually changed, so it can gate CI.
 
-import { chromium } from 'playwright';
+// playwright is imported lazily, AFTER the arguments are validated — see the
+// dynamic import further down. A top-level import would make `render.mjs` with
+// no arguments die on a missing module instead of printing usage, and would
+// couple the no-browser unit tier (which runs before `npm install` in CI) to a
+// browser toolchain it deliberately does not have.
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -120,6 +124,10 @@ console.log(`sound-pack renderer — ${packName} · ${auditionKey} → ${LABEL} 
 console.log(`  config   ${CONFIG_PATH}`);
 console.log(`  pack     ${packPath}`);
 console.log(`  audition ${auditionPath}`);
+
+// Everything above this line is pure argument/config handling, so a bad
+// invocation reports itself without needing a browser installed.
+const { chromium } = await import('playwright');
 
 const browser = await chromium.launch();
 const page = await browser.newPage();
