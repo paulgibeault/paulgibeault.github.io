@@ -5,7 +5,7 @@
       "id": "moon-lit",
       "name": "Moon Lit",
       "subtitle": "Lantern matching",
-      "icon": "images/moon-lit.png",
+      "icon": "/moon-lit/icon.png",
       "url": "/moon-lit/",
       "spotlight": true,
       "profile": {
@@ -22,7 +22,7 @@
       "id": "pi-game",
       "name": "Pi Game",
       "subtitle": "Memorization",
-      "icon": "images/pi-game.png",
+      "icon": "/pi-game/icon.png",
       "url": "/pi-game/",
       "profile": {
         "subtitle": "Memorization Gauntlet",
@@ -38,7 +38,7 @@
       "id": "si-syn",
       "name": "Si Syndicate",
       "subtitle": "Assembly Logic",
-      "icon": "images/si-syn.png",
+      "icon": "/si-syn/icon.png",
       "url": "/si-syn/",
       "profile": {
         "name": "Silicon Syndicate",
@@ -55,7 +55,7 @@
       "id": "hecknsic",
       "name": "HecknSic",
       "subtitle": "Hex Puzzle",
-      "icon": "images/hecknsic.png",
+      "icon": "/hecknsic/icon.png",
       "url": "/hecknsic/",
       "profile": {
         "subtitle": "Hexagonal Puzzle",
@@ -71,7 +71,7 @@
       "id": "cozy-solitaire",
       "name": "Solitaire",
       "subtitle": "Card Games",
-      "icon": "images/cozy-solitaire.png",
+      "icon": "/cozy-solitaire/icon.png",
       "url": "/cozy-solitaire/",
       "profile": {
         "name": "Cozy Solitaire",
@@ -88,7 +88,7 @@
       "id": "sowduku",
       "name": "Sowdoku",
       "subtitle": "Cozy Logic Puzzle",
-      "icon": "images/sowduku.png",
+      "icon": "/sowduku/icon.png",
       "url": "/sowduku/",
       "profile": {
         "subtitle": "A Cozy Logic Puzzle",
@@ -104,7 +104,7 @@
       "id": "p2p-chat",
       "name": "P2P Chat",
       "subtitle": "Multiplayer Messaging",
-      "icon": "images/p2p-chat.png",
+      "icon": "/p2p-chat/icon.png",
       "url": "/p2p-chat/",
       "profile": {
         "subtitle": "Multiplayer Messaging",

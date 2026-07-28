@@ -24,11 +24,15 @@ render from it — the old hand-mirrored copies are gone.
 **Registering a new game** takes exactly three steps, none of them HTML edits:
 
 1. Add one entry to `catalog.json`: `id`, `name`, `subtitle`, `icon`
-   (`images/<gameId>.png`), `url` (root-relative, `/<gameId>/`), plus an
+   (`/<gameId>/icon.png`), `url` (root-relative, `/<gameId>/`), plus an
    optional `profile` block (`subtitle`, `alt`, `descLead`, `descBody`,
    `kicker`, `tags[]`, `codeUrl`) if it should appear on the portfolio page.
    Entries without a `profile` block render on the launcher only.
-2. Commit the card image at `images/<gameId>.png`.
+2. **Serve your own card image at `/<gameId>/icon.png`** — square, 512 px or
+   larger. It lives in your repo, not the launcher's; if you have a build step,
+   make sure the icon ends up in the published output (a repo-root file that
+   never reaches `dist/` is the way this goes wrong). The launcher degrades to
+   a text-only tile if it 404s.
 3. Bump `CACHE_NAME` in `sw.js` so installed launchers refresh their precache.
 
 **Deep links.** `https://paulgibeault.github.io/#app=<gameId>` boots the
