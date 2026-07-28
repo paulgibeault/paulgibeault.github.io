@@ -10,7 +10,7 @@ addressed to other maintainers).
 | ----- | ----- | -------- |
 | [#17 — Arcade platform: security fixes + fleet-wide SDK/launcher enhancements](https://github.com/paulgibeault/paulgibeault.github.io/issues/17) | Security hardening, lifecycle, SW hygiene | HIGH |
 | [#106 — WP1: re-audition the four pre-fix sound packs; root-cause the renderer's t=0 attenuation](https://github.com/paulgibeault/paulgibeault.github.io/issues/106) | Soundpack tooling, fleet re-approval | HIGH |
-| [#107 — WP2: land the v1 graph packs for pi-game, si-syn, p2p-chat](https://github.com/paulgibeault/paulgibeault.github.io/issues/107) | Sound design, per-app wiring (uncommitted) | MED |
+| [#107 — WP2: land the v1 graph packs for the three remaining apps](https://github.com/paulgibeault/paulgibeault.github.io/issues/107) | Sound design, per-app wiring (uncommitted) | MED |
 | [#108 — WP3: spec-cue scheduler retirement path (pinning, cache turnover, SDK v4)](https://github.com/paulgibeault/paulgibeault.github.io/issues/108) | SDK lifecycle | MED |
 
 Historical context for all of the above: the eight-part platform review of
@@ -33,9 +33,10 @@ and its acceptance passes, with no deprecation window.
 
 - **Retire the spec-cue (chiptune) audio engine.** `Arcade.audio.cue()` and the
   spec form of `play()` are superseded by graph cues sharing one convolution
-  room. **All seven catalog apps now ship a graph pack** — pi-game (the memory
-  palace), si-syn (the bench) and p2p-chat (sonar) landed 2026-07-28, joining
-  moon-lit, hecknsic, cozy-solitaire and sow-duku. What still holds this open
+  room. **All seven catalog apps now ship a graph pack** — the last three
+  landed 2026-07-28, joining the four approved earlier (the per-app rollout is
+  recorded in [#107](https://github.com/paulgibeault/paulgibeault.github.io/issues/107)).
+  What still holds this open
   is the other half of the condition: every one of the seven also registers
   spec cues on its **fallback path**, for a player on a service-worker cache
   stale enough to be missing `/arcade-audio.js`. Those paths are the last
