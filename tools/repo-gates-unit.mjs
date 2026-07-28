@@ -136,9 +136,26 @@ function gateB() {
         ok(typeof g.url === 'string' && g.url.startsWith('/') && g.url.endsWith('/'),
             `url is root-relative directory ('/${g.id}/'-style): ${label}`);
         ok(typeof g.subtitle === 'string', `subtitle present (may be empty): ${label}`);
+        // Icons are served by the app that owns them ('/<gameId>/icon.png'), so
+        // "exists on disk" is the wrong check — the file is in another repo by
+        // design. What this repo can still guarantee is that the path is
+        // root-relative and points inside the app's own mount, which is what
+        // keeps a typo from silently resolving somewhere else on the origin.
+        // Anything still served from this repo (launcher chrome) is checked as
+        // before. Whether the app has actually deployed its icon is a runtime
+        // fact no static gate can know; the launcher already degrades to a
+        // text-only tile on a broken image.
         if (g.icon !== undefined) {
-            ok(typeof g.icon === 'string' && existsSync(join(ROOT, g.icon)),
-                `icon exists on disk: ${label} (${g.icon})`);
+            ok(typeof g.icon === 'string' && g.icon.length > 0, `icon is a string: ${label}`);
+            if (typeof g.icon === 'string') {
+                if (g.icon.startsWith('/')) {
+                    ok(g.icon.startsWith(`/${g.id}/`),
+                        `icon is served from the app's own mount: ${label} (${g.icon})`);
+                } else {
+                    ok(existsSync(join(ROOT, g.icon)),
+                        `launcher-hosted icon exists on disk: ${label} (${g.icon})`);
+                }
+            }
         }
         if (g.spotlight !== undefined) ok(typeof g.spotlight === 'boolean', `spotlight is boolean: ${label}`);
         if (g.profile !== undefined) {

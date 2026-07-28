@@ -36,11 +36,6 @@ and its acceptance passes, with no deprecation window.
   spec-voice scheduler, move the fleet to it, and delete `sdk/v3/`.
   Plan: [plans/decouple-game-names-2026-07.md](plans/decouple-game-names-2026-07.md) §3a.
 
-- **Icon hosting.** Catalog entries still point at icons served from this repo's
-  `images/`. Each app now carries its own copy; flipping the catalog to
-  `/<gameId>/icon.png` needs the apps deployed first, or the launcher grid
-  breaks. One coordinated deploy, then `images/` keeps only launcher chrome.
-
 ## Standing policy
 
 No deprecated-but-supported code. The catalog apps are the entire dependency on
