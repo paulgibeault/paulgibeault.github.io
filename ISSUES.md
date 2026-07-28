@@ -1,32 +1,52 @@
-# Arcade Platform Review — Issues
+# Framework issues
 
-All GitHub issues opened from the eight-part platform/integration review
-(2026-07-06). Each links to its full remediation plan on the
-`arcade-review-plans` branch of `paulgibeault/paulgibeault.github.io`.
+Open work on **this repo** — the SDK, the launcher, and the tooling. Each app in
+the catalog tracks its own integration work in its own issue tracker; that is
+where per-app remediation plans now live (`docs/arcade-remediation.md` in each
+repo, moved out of `plans/` on 2026-07-28 so this repo stops carrying work
+addressed to other maintainers).
 
-| # | Repo | Issue | Plan | Severity of headline |
-| - | ---- | ----- | ---- | -------------------- |
-| 1 | paulgibeault.github.io | [#17 — Arcade platform: security fixes + fleet-wide SDK/launcher enhancements](https://github.com/paulgibeault/paulgibeault.github.io/issues/17) | [framework-launcher.md](https://github.com/paulgibeault/paulgibeault.github.io/blob/arcade-review-plans/plans/framework-launcher.md) | HIGH |
-| 2 | moon-lit | [#20 — Arcade integration: origin-wide SW/cache wipe (critical) + suspend containment + stats-delta](https://github.com/paulgibeault/moon-lit/issues/20) | [moon-lit.md](https://github.com/paulgibeault/paulgibeault.github.io/blob/arcade-review-plans/plans/moon-lit.md) | HIGH (critical) |
-| 3 | p2p-chat | [#1 — Arcade integration: stored XSS via peer ids (critical) + interrupted-send cap + reduced-motion](https://github.com/paulgibeault/p2p-chat/issues/1) | [p2p-chat.md](https://github.com/paulgibeault/paulgibeault.github.io/blob/arcade-review-plans/plans/p2p-chat.md) | HIGH (critical) |
-| 4 | pi-game | [#14 — Arcade integration: resume rAF freeze + accruing timer + offline SW assets](https://github.com/paulgibeault/pi-game/issues/14) | [pi-game.md](https://github.com/paulgibeault/paulgibeault.github.io/blob/arcade-review-plans/plans/pi-game.md) | HIGH |
-| 5 | hecknsic | [#38 — Arcade integration: SW caches the SDK + orphaned .ls.* migration + canvas font-scale](https://github.com/paulgibeault/hecknsic/issues/38) | [hecknsic.md](https://github.com/paulgibeault/paulgibeault.github.io/blob/arcade-review-plans/plans/hecknsic.md) | HIGH |
-| 6 | si-syn | [#17 — Arcade integration: pause cinematic timers when hidden + locked-level rehydrate](https://github.com/paulgibeault/si-syn/issues/17) | [si-syn.md](https://github.com/paulgibeault/paulgibeault.github.io/blob/arcade-review-plans/plans/si-syn.md) | MED |
-| 7 | cozy-solitaire | [#7 — Arcade integration: idle clock freeze + standalone flush + cleanup](https://github.com/paulgibeault/cozy-solitaire/issues/7) | [cozy-solitaire.md](https://github.com/paulgibeault/paulgibeault.github.io/blob/arcade-review-plans/plans/cozy-solitaire.md) | MED |
-| 8 | sowduku | [#1 — Arcade integration: SW caches the SDK + no suspend handling + non-square art](https://github.com/paulgibeault/sowduku/issues/1) | [sowduku.md](https://github.com/paulgibeault/paulgibeault.github.io/blob/arcade-review-plans/plans/sowduku.md) | HIGH |
+| Issue | Theme | Severity |
+| ----- | ----- | -------- |
+| [#17 — Arcade platform: security fixes + fleet-wide SDK/launcher enhancements](https://github.com/paulgibeault/paulgibeault.github.io/issues/17) | Security hardening, lifecycle, SW hygiene | HIGH |
 
-Index of all plans: [plans/README.md](https://github.com/paulgibeault/paulgibeault.github.io/blob/arcade-review-plans/plans/README.md)
+Historical context for all of the above: the eight-part platform review of
+2026-07-06, indexed in [plans/README.md](plans/README.md).
 
-## Cross-repo dependencies
-- **p2p-chat launcher entry** — finish the `profile.html` `#games` mirror vs. remove the TEMP button: framework [#17](https://github.com/paulgibeault/paulgibeault.github.io/issues/17) (A7) ↔ p2p-chat [#1](https://github.com/paulgibeault/p2p-chat/issues/1) (#7).
-- **Retire the ls-proxy path** — blocked on hecknsic's `.ls.*` migration: hecknsic [#38](https://github.com/paulgibeault/hecknsic/issues/38) (#2) ↔ framework [#17](https://github.com/paulgibeault/paulgibeault.github.io/issues/17) (B11).
+## Seams — framework work blocked on an app, or vice versa
 
-## Fleet priority (across all repos)
-1. p2p-chat stored XSS — [p2p-chat#1](https://github.com/paulgibeault/p2p-chat/issues/1)
-2. moon-lit origin-wide SW/cache nuke — [moon-lit#20](https://github.com/paulgibeault/moon-lit/issues/20)
-3. Launcher inbound `postMessage` origin check — [#17](https://github.com/paulgibeault/paulgibeault.github.io/issues/17) A1
-4. `__proto__` import-regex + `deepMerge` hardening — [#17](https://github.com/paulgibeault/paulgibeault.github.io/issues/17) A2
-5. Known Peers `loadP2P` dead-code fix — [#17](https://github.com/paulgibeault/paulgibeault.github.io/issues/17) A3
-6. SW SDK-caching in hecknsic + sowduku — [hecknsic#38](https://github.com/paulgibeault/hecknsic/issues/38), [sowduku#1](https://github.com/paulgibeault/sowduku/issues/1)
-7. Rendezvous fingerprint-gated pair rebind — [#17](https://github.com/paulgibeault/paulgibeault.github.io/issues/17) A4
-8. Remove TEMP p2p-chat button; square sowduku art — [#17](https://github.com/paulgibeault/paulgibeault.github.io/issues/17) A7, [sowduku#1](https://github.com/paulgibeault/sowduku/issues/1) #3
+These are the only cross-repo entries that belong here, because the *framework
+side* is what is blocked. Each names the condition, not a schedule: under the
+closed-fleet policy the framework side is deleted as soon as the app side merges
+and its acceptance passes, with no deprecation window.
+
+- **Retire the `ls-proxy` path.** The launcher answers a pre-SDK
+  postMessage-`localStorage` protocol so that a game shipping its own storage
+  shim does not hang on init. One app still speaks it. When that app's `.ls.*`
+  → `Arcade.state` migration merges, delete the handler from
+  `arcade-storage-bridge.js`, `arcade-storage-core.js` and `index.html`, plus
+  the protocol note in `ARCADE_PLATFORM.md`.
+  Framework side: [#17](https://github.com/paulgibeault/paulgibeault.github.io/issues/17) (B11).
+
+- **Retire the spec-cue (chiptune) audio engine.** `Arcade.audio.cue()` and the
+  spec form of `play()` are superseded by graph cues sharing one convolution
+  room. Three apps still register spec cues and need graph packs designed and
+  ear-approved first; four have packs, and any in-app chiptune fallback path
+  goes with them. When no app registers a spec cue, cut SDK v4 without the
+  spec-voice scheduler, move the fleet to it, and delete `sdk/v3/`.
+  Plan: [plans/decouple-game-names-2026-07.md](plans/decouple-game-names-2026-07.md) §3a.
+
+- **Icon hosting.** Catalog entries still point at icons served from this repo's
+  `images/`. Each app now carries its own copy; flipping the catalog to
+  `/<gameId>/icon.png` needs the apps deployed first, or the launcher grid
+  breaks. One coordinated deploy, then `images/` keeps only launcher chrome.
+
+## Standing policy
+
+No deprecated-but-supported code. The catalog apps are the entire dependency on
+this framework — there is no unknown consumer to keep a legacy path alive for,
+so a superseded path is deleted the week its last consumer migrates. The only
+compatibility that gets a window at all is **player data at rest**, and that
+window is one active-migration release, scoped in `sdk/CHANGELOG.md` with its
+deletion already planned. See
+[plans/decouple-game-names-2026-07.md](plans/decouple-game-names-2026-07.md).

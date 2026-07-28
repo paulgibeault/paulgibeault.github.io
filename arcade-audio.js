@@ -1170,7 +1170,28 @@
     };
   }
 
+  // Publish the sound pack this page just loaded under one well-known handle.
+  //
+  // A pack is { name, ROOM, SENDS, CUES }. Tooling — the offline renderer, the
+  // analyzer, an audition timeline — needs to reach it without knowing which
+  // app is loaded, so it must not live under an app-specific global. Call this
+  // at the end of the pack file:
+  //
+  //   ArcadeAudioElements.registerPack({ name: 'my-app', ROOM, SENDS, CUES });
+  //
+  // Returns the pack, so it can wrap the literal directly. Registering twice
+  // replaces (a page has exactly one pack); the previous one is not merged.
+  function registerPack(pack) {
+    if (!pack || typeof pack !== 'object') throw new TypeError('registerPack: pack must be an object');
+    for (const k of ['ROOM', 'SENDS', 'CUES']) {
+      if (!pack[k] || typeof pack[k] !== 'object') throw new TypeError(`registerPack: pack.${k} must be an object`);
+    }
+    global.ArcadeSoundPack = pack;
+    return pack;
+  }
+
   global.ArcadeAudioElements = {
+    registerPack,
     rng, between, cents, env, noiseBuffer, impulseResponse, createBus, out,
     track, teardown,
     strike, rustle, pluck, pluckBuffer, creak, creakBuffer, droplet, body, thump,

@@ -1,6 +1,7 @@
 /* arcade-configs.js — launcher engine for the game-config exchange
  * (Arcade.configs / #config-exchange). Games export named config payloads
- * (sowduku packs, cardstock variants, …) as share codes / deep links (C1) or a
+ * (a puzzle pack, a deck variant, a level set) as share codes / deep links (C1)
+ * or a
  * direct peer push (C2); this engine ingests them, PROMPTS the user, and
  * delivers them into the target game frame once it's live.
  *

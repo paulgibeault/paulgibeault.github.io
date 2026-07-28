@@ -91,7 +91,7 @@ const deviceIdOf = (page) => page.evaluate(() => localStorage.getItem('arcade.v1
 const kickLb = (page, peerId) => page.evaluate((id) => window.__arcade.leaderboard.kick(id), peerId);
 const syncRecordKeys = (page) => page.evaluate(() => Object.keys(window.__arcade.sync._records()));
 
-const GAME = 'moon-lit', CAT = 'high';
+const GAME = 'test-game', CAT = 'high';
 const KEY = `arcade.v1.${GAME}.scores.${CAT}`;
 
 try {
@@ -134,7 +134,7 @@ try {
     // resurrect the pre-reset entries (peers keep their own copies).
     await H.evaluate((key) => {
         localStorage.removeItem(key);
-        window.__arcade.leaderboard.noteReset('moon-lit');
+        window.__arcade.leaderboard.noteReset('test-game');
     }, KEY);
     await kickLb(J, devOnH);
     const held = await waitFor(async () => {

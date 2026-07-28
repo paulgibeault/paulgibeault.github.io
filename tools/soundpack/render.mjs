@@ -6,7 +6,7 @@
 // is the shipped /arcade-audio.js itself, so the audition and the game run the
 // same code — no mockup-versus-shipped gap.
 //
-//   node tools/soundpack/render.mjs [packName] [--sr 48000] [--out DIR]
+//   node tools/soundpack/render.mjs --config <app>/soundpack.config.json
 //
 // Sections render independently and are concatenated with silence between, so
 // reverb tails never spill across a boundary and no single render has to hold
@@ -24,8 +24,8 @@
 // measured deterministic at 4 concurrent oscillators, nondeterministic at 8+
 // (oscillators, buffer sources, biquads, compressors and convolvers are all
 // individually bit-exact, within a process and across processes — it is the
-// concurrent fan-in that does it, presumably summation order). Across the full
-// moon-lit audition this shows up as ~300 samples of 27M differing by exactly
+// concurrent fan-in that does it, presumably summation order). Across a full
+// 27M-sample audition this shows up as ~300 samples differing by exactly
 // 1 LSB: -90 dBFS peak, ~109 dB under the signal, and inaudible.
 //
 // The practical consequence: DO NOT compare auditions with `shasum`. It reports
@@ -38,7 +38,11 @@
 // It exits 0 when the delta is within run-to-run noise and 1 when the sound
 // actually changed, so it can gate CI.
 
-import { chromium } from 'playwright';
+// playwright is imported lazily, AFTER the arguments are validated — see the
+// dynamic import further down. A top-level import would make `render.mjs` with
+// no arguments die on a missing module instead of printing usage, and would
+// couple the no-browser unit tier (which runs before `npm install` in CI) to a
+// browser toolchain it deliberately does not have.
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -49,35 +53,104 @@ const flag = (name, dflt) => {
   const i = argv.indexOf('--' + name);
   return i >= 0 && argv[i + 1] ? argv[i + 1] : dflt;
 };
-const packName = argv.find((a) => !a.startsWith('--') && argv[argv.indexOf(a) - 1]?.startsWith('--') !== true) || 'moon-lit';
-const SR = parseInt(flag('sr', '48000'), 10);
-const OUT_DIR = resolve(flag('out', join(HERE, 'out')));
-const VERSION = flag('version', 'v1');
 
-// The SHIPPED element library, not a copy — this is what makes an approved
-// audition bit-identical to what plays in the game.
+const configFlag = flag('config', null);
+if (!configFlag) {
+  console.error(`sound-pack renderer
+
+  node tools/soundpack/render.mjs --config <path/to/soundpack.config.json>
+                                  [--audition <key>] [--label <name>]
+                                  [--sr 48000] [--out <dir>]
+
+The config lives in the app that owns the pack, and every path inside it
+resolves relative to the config file. This tool has no notion of which apps
+exist and no default config — point it at one.
+
+  {
+    "name": "my-app",
+    "pack": "js/soundpack.js",
+    "auditions": { "full": "audio/audition.js", "short": "audio/audition-short.js" },
+    "out": "audio/auditions/out",
+    "sampleRate": 48000
+  }
+
+  --audition  key into "auditions" (default: the first one declared)
+  --label     output basename suffix (default: the audition key)
+              → <out>/<name>-<label>.{wav,INDEX.md,manifest.json}`);
+  process.exit(2);
+}
+
+const CONFIG_PATH = resolve(configFlag);
+const CONFIG_DIR = dirname(CONFIG_PATH);
+let config;
+try { config = JSON.parse(readFileSync(CONFIG_PATH, 'utf8')); }
+catch (e) { console.error(`render: cannot read config ${CONFIG_PATH}: ${e.message}`); process.exit(2); }
+
+const fromConfig = (p) => resolve(CONFIG_DIR, p);
+const required = (key) => {
+  if (!config[key]) { console.error(`render: config is missing required "${key}"`); process.exit(2); }
+  return config[key];
+};
+
+const packName = required('name');
+const auditions = required('auditions');
+const auditionKeys = Object.keys(auditions);
+if (!auditionKeys.length) { console.error('render: config declares no auditions'); process.exit(2); }
+
+const auditionKey = flag('audition', auditionKeys[0]);
+if (!auditions[auditionKey]) {
+  console.error(`render: no audition '${auditionKey}' in config (have: ${auditionKeys.join(', ')})`);
+  process.exit(2);
+}
+
+const LABEL = flag('label', auditionKey);
+const SR = parseInt(flag('sr', String(config.sampleRate || 48000)), 10);
+const OUT_DIR = resolve(flag('out', fromConfig(config.out || 'out')));
+
+// The SHIPPED element library and the SHIPPED audition archetypes — not copies.
+// Injecting the same arcade-audio.js the launcher serves is what makes an
+// approved audition bit-identical to what plays in the app.
 const graphSrc = readFileSync(join(HERE, '..', '..', 'arcade-audio.js'), 'utf8');
-// The pack itself belongs to the game that ships it, so the default path points
-// at a sibling game repo rather than a copy kept here — a duplicated pack would
-// drift from the one actually playing, which defeats the whole point of
-// auditioning. The audition timeline stays here: it is test material and has no
-// business being shipped to players.
-const packPath = resolve(flag('pack', join(HERE, '..', '..', '..', packName, 'js', 'soundpack.js')));
-const auditionPath = resolve(flag('audition', join(HERE, 'auditions', `${packName}.js`)));
+const auditionLibSrc = readFileSync(join(HERE, 'lib', 'audition.js'), 'utf8');
+// The pack and the timeline both belong to the app that ships them. A copy kept
+// here would drift from the one actually playing, which defeats the point of
+// auditioning at all.
+const packPath = fromConfig(required('pack'));
+const auditionPath = fromConfig(auditions[auditionKey]);
 const packSrc = readFileSync(packPath, 'utf8');
 const auditionSrc = readFileSync(auditionPath, 'utf8');
 
-console.log(`sound-pack renderer — ${packName} ${VERSION} @ ${SR} Hz`);
+console.log(`sound-pack renderer — ${packName} · ${auditionKey} → ${LABEL} @ ${SR} Hz`);
+console.log(`  config   ${CONFIG_PATH}`);
 console.log(`  pack     ${packPath}`);
 console.log(`  audition ${auditionPath}`);
+
+// Everything above this line is pure argument/config handling, so a bad
+// invocation reports itself without needing a browser installed.
+const { chromium } = await import('playwright');
 
 const browser = await chromium.launch();
 const page = await browser.newPage();
 page.on('pageerror', (e) => { console.error('page error:', e.message); });
 
+// Order matters only for the pack: registerPack() needs the element library.
+// The archetype library resolves the pack lazily, so it may load either side.
 await page.evaluate((src) => { (0, eval)(src); }, graphSrc);
+await page.evaluate((src) => { (0, eval)(src); }, auditionLibSrc);
 await page.evaluate((src) => { (0, eval)(src); }, packSrc);
 await page.evaluate((src) => { (0, eval)(src); }, auditionSrc);
+
+const ready = await page.evaluate(() => ({ pack: !!globalThis.ArcadeSoundPack, plan: !!globalThis.PACK }));
+if (!ready.pack) {
+  console.error(`render: ${packPath} did not register a pack.\n` +
+    '  The pack file must end with ArcadeAudioElements.registerPack({ name, ROOM, SENDS, CUES }).');
+  await browser.close(); process.exit(1);
+}
+if (!ready.plan) {
+  console.error(`render: ${auditionPath} did not publish a timeline.\n` +
+    '  The audition must end with ArcadeAudition.publish({ gap, tail, sections }).');
+  await browser.close(); process.exit(1);
+}
 
 const plan = await page.evaluate(() => {
   const P = globalThis.PACK;
@@ -205,15 +278,15 @@ header.write('data', 36);
 header.writeUInt32LE(dataBytes, 40);
 
 mkdirSync(OUT_DIR, { recursive: true });
-const wavPath = join(OUT_DIR, `${packName}-${VERSION}.wav`);
+const wavPath = join(OUT_DIR, `${packName}-${LABEL}.wav`);
 writeFileSync(wavPath, Buffer.concat([header, ...chunks.map((c) => Buffer.from(c.pcm.buffer, c.pcm.byteOffset, c.pcm.byteLength))]));
 
 // ── write the index ─────────────────────────────────────────────────────
 // Tenths matter: items are often under a second apart, and a whole-second
 // timestamp puts two different sounds at the same mark.
 const mmss = (s) => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, '0')}`;
-let md = `# ${packName} sound pack — audition ${VERSION}\n\n`;
-md += `\`${packName}-${VERSION}.wav\` · ${mmss(cursor)} · ${SR} Hz stereo\n\n`;
+let md = `# ${packName} sound pack — audition ${LABEL}\n\n`;
+md += `\`${packName}-${LABEL}.wav\` · ${mmss(cursor)} · ${SR} Hz stereo\n\n`;
 md += `Generated by \`tools/soundpack/render.mjs\`. Timestamps below are exact — quote one when something is wrong ("1:12 is too bright") and it can be fixed without re-auditioning the rest.\n\n`;
 for (const e of index) {
   if (e.kind === 'section') {
@@ -223,12 +296,13 @@ for (const e of index) {
     md += `- \`${mmss(e.at)}\` ${e.label}\n`;
   }
 }
-const idxPath = join(OUT_DIR, `${packName}-${VERSION}.INDEX.md`);
+const idxPath = join(OUT_DIR, `${packName}-${LABEL}.INDEX.md`);
 writeFileSync(idxPath, md);
 
 // Machine-readable manifest, so analyze.mjs can measure each item in isolation.
-writeFileSync(join(OUT_DIR, `${packName}-${VERSION}.manifest.json`),
-  JSON.stringify({ pack: packName, version: VERSION, sampleRate: SR, duration: cursor, index }, null, 1));
+const manifestPath = join(OUT_DIR, `${packName}-${LABEL}.manifest.json`);
+writeFileSync(manifestPath,
+  JSON.stringify({ pack: packName, label: LABEL, audition: auditionKey, sampleRate: SR, duration: cursor, index }, null, 1));
 
 console.log(`\n  ${wavPath}`);
 console.log(`  ${idxPath}`);

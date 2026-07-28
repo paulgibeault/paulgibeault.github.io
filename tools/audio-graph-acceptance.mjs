@@ -207,7 +207,7 @@ const collect = await page.evaluate(async () => {
     try { for (const call of Object.values(calls)) call({}); } catch { noCollectThrew = true; }
     try { for (const call of Object.values(calls)) call({ collect: 'nope' }); } catch { badCollectThrew = true; }
 
-    // The property the moon-lit bed depends on: everything collected can be
+    // The property every sustained bed depends on: everything collected can be
     // stopped, and stopping twice is safe (teardown may race the cue's own stop).
     const bin = [];
     E.stream(ctx, dest, 0, 4.0, { collect: bin });

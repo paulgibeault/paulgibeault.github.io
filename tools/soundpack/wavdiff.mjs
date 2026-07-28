@@ -31,8 +31,8 @@ if (files.length !== 2) {
 }
 
 // Anything at or below this peak difference is indistinguishable from the
-// renderer's own run-to-run variation. Measured at 1 LSB across the full
-// moon-lit audition; 2 gives a little headroom without hiding a real change,
+// renderer's own run-to-run variation. Measured at 1 LSB across a full
+// 27M-sample audition; 2 gives a little headroom without hiding a real change,
 // since the quietest audible edit moves hundreds of LSB.
 const THRESHOLD = parseInt(flag('threshold', '2'), 10);
 

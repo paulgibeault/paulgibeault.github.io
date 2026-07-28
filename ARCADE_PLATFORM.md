@@ -22,7 +22,7 @@ So **storage needs no bridge**. The launcher-to-game bridge only exists for thin
 Hosted at `https://paulgibeault.github.io/arcade-sdk.js` (one source of truth — all games are same-origin and the launcher controls deploys).
 
 ```js
-Arcade.init({ gameId: 'pi-game' });   // declares identity, runs handshake
+Arcade.init({ gameId: 'my-app' });   // declares identity, runs handshake
 await Arcade.ready;                    // resolves on welcome (or immediately standalone)
 
 // STORAGE — sync, identical standalone or framed
@@ -188,7 +188,7 @@ Arcade.context                        // { framed: boolean, version: number, sdk
 
 ```html
 <script src="https://paulgibeault.github.io/arcade-sdk.js"></script>
-<script>Arcade.init({ gameId: 'pi-game' });</script>
+<script>Arcade.init({ gameId: 'my-app' });</script>
 ```
 
 Existing `localStorage.setItem('myKey', ...)` calls can be migrated to `Arcade.state.set('myKey', ...)` opportunistically — until then, they still work, they just won't be namespaced into the export bundle.
@@ -273,7 +273,7 @@ focus-trap modal, prefixed with the app's catalog name.
 
 Twenty-five message types total (see GAME_INTEGRATION.md §14 for the full summary table). The launcher routes peer messages by `gameId` so multiple games could in principle multiplex one connection, though the current design assumes one foreground game at a time. Between launchers, presence frames (`{arcade:1, kind:'presence'|'presence-ack', gameId}`) announce that a game is mounted and listening; the receiving launcher surfaces them to the matching game as `arcade:peer.ready`.
 
-**Legacy compatibility shim:** a small number of older games (e.g. hecknsic) shipped their own postMessage-backed `localStorage` override before the SDK existed. The launcher still answers that game's `'ls-proxy-request'`/`'ls-proxy-response'` protocol (namespaced into `arcade.v1.<gameId>.ls.<key>`) purely so those games don't hang — this is launcher-side legacy support, not part of the `arcade:` protocol, and new games should use `Arcade.state.*` directly rather than rolling a shim of their own.
+**Legacy compatibility shim (scheduled for removal).** Some games predating the SDK shipped their own postMessage-backed `localStorage` override, which blocks their module init until it gets a reply. The launcher answers that `'ls-proxy-request'`/`'ls-proxy-response'` protocol (namespaced into `arcade.v1.<gameId>.ls.<key>`) purely so such a game does not hang forever. It is launcher-side legacy support, not part of the `arcade:` protocol; new games use `Arcade.state.*`. Retirement is tracked in ISSUES.md and gated on the last consumer migrating — at which point the handler is deleted outright, not deprecated.
 
 ---
 
@@ -546,7 +546,7 @@ The platform's posture is a **first-party fleet**: every catalog app is authored
 
 An app's own persistence rides the **storage bridge** instead: the SDK transparently proxies `Arcade.state/store/files/storage` over postMessage to the launcher, which enforces the namespace at the trust boundary — a frame can write only `arcade.v1.<its-gameId>.*`, the shared `arcade.v1.global.*` keys, and the `_meta.dev` flag; device-identity meta is readable (welcome snapshot) but not writable. Data lives under the same `arcade.v1.*` names as before, so export/import and every pre-existing save are untouched. Enforced by `tools/bridge-acceptance.mjs` in CI: the frame cannot open the key stores, the launcher can, and namespace violations are refused.
 
-What this buys concretely: **an XSS or supply-chain compromise in one game is now contained to that game's own data** instead of the whole origin (the sowduku stored-XSS was the precedent). It is still not multi-tenant isolation — apps remain first-party-trusted code, and the launcher document is the root of trust.
+What this buys concretely: **an XSS or supply-chain compromise in one game is now contained to that game's own data** instead of the whole origin. The precedent was a stored-XSS in a fleet game whose payload, pre-namespacing, could read every other game's saves. It is still not multi-tenant isolation — apps remain first-party-trusted code, and the launcher document is the root of trust.
 
 Two things remain **untrusted** as always, and keep their hard guards:
 - **Imported save files** — treated as hostile input (allowlist, checksum, per-key validation, staged commit; see below).
@@ -595,12 +595,12 @@ Save and load are the only places where data loss is possible. The plan treats t
   "appVersion": "1.0.0",
   "checksum": "sha256:<hex>",
   "data": {
-    "arcade.v1.pi-game.highScore": "42",
+    "arcade.v1.my-app.highScore": "42",
     "arcade.v1.global.theme": "\"dark\"",
     "...": "..."
   },
   "stores": {
-    "arcade.v1.sowduku.store.packs": { "pack-1": { "name": "…" } }
+    "arcade.v1.my-other-app.store.packs": { "pack-1": { "name": "…" } }
   },
   "files": {
     "arcade.v1.notes-app": [ { "name": "photo.jpg", "type": "image/jpeg", "size": 20481, "b64": "…" } ]

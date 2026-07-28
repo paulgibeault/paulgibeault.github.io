@@ -28,10 +28,10 @@ function shareEncode(obj, v) {
 }
 
 console.log('\nparseAppFragment (anchored, charset-gated)');
-ok(parseAppFragment('#app=moon-lit').app === 'moon-lit', 'plain #app parses the id');
-ok(parseAppFragment('#app=moon-lit').cfg === null, 'plain #app has null cfg');
-const pf = parseAppFragment('#app=sowduku&cfg=AbC-_123');
-ok(pf && pf.app === 'sowduku' && pf.cfg === 'AbC-_123', '#app&cfg parses both');
+ok(parseAppFragment('#app=game-a').app === 'game-a', 'plain #app parses the id');
+ok(parseAppFragment('#app=game-a').cfg === null, 'plain #app has null cfg');
+const pf = parseAppFragment('#app=game-b&cfg=AbC-_123');
+ok(pf && pf.app === 'game-b' && pf.cfg === 'AbC-_123', '#app&cfg parses both');
 ok(parseAppFragment('#app=x&cfg=' + 'A'.repeat(5000)) === null, 'oversized cfg (>4096) rejected');
 ok(parseAppFragment('#p2p-offer=xyz') === null, '#p2p-offer not matched (precedence preserved)');
 ok(parseAppFragment('#app=x&evil=1') === null, 'trailing junk rejected (anchored)');
@@ -42,9 +42,9 @@ ok(parseAppFragment(null) === null, 'non-string → null');
 
 console.log('\ndecodeShareCode (parity with SDK encode + pollution guard)');
 {
-    const code = shareEncode({ g: 'moon-lit', t: 'pack', d: { name: 'Weekend', boards: [{ code: 'A1' }] } }, 1);
+    const code = shareEncode({ g: 'game-a', t: 'pack', d: { name: 'Weekend', boards: [{ code: 'A1' }] } }, 1);
     const dec = decodeShareCode(code);
-    ok(dec && dec.v === 1 && dec.data.g === 'moon-lit' && dec.data.t === 'pack', 'round-trips an SDK-shaped code');
+    ok(dec && dec.v === 1 && dec.data.g === 'game-a' && dec.data.t === 'pack', 'round-trips an SDK-shaped code');
     ok(dec.data.d.boards[0].code === 'A1', 'nested payload preserved');
     ok(decodeShareCode('not valid base64!!') === null, 'bad charset → null');
     ok(decodeShareCode('') === null, 'empty → null');
@@ -57,23 +57,23 @@ console.log('\ndecodeShareCode (parity with SDK encode + pollution guard)');
 
 console.log('\nvalidateConfigPayload (transport shape only)');
 {
-    const ids = new Set(['moon-lit', 'sowduku']);
-    ok(validateConfigPayload({ g: 'moon-lit', t: 'pack', d: {} }, 1, ids).g === 'moon-lit', 'valid payload accepted');
+    const ids = new Set(['game-a', 'game-b']);
+    ok(validateConfigPayload({ g: 'game-a', t: 'pack', d: {} }, 1, ids).g === 'game-a', 'valid payload accepted');
     ok(validateConfigPayload({ g: 'unknown', t: 'pack', d: {} }, 1, ids) === null, 'game not in catalog rejected');
-    ok(validateConfigPayload({ g: 'moon-lit', t: 'BAD TYPE', d: {} }, 1, ids) === null, 'bad type charset rejected');
-    ok(validateConfigPayload({ g: 'moon-lit', t: 'pack' }, 1, ids) === null, 'missing d rejected');
-    ok(validateConfigPayload({ g: 'moon-lit', t: 'pack', d: { big: 'x'.repeat(CFG_DATA_MAX) } }, 1, ids) === null, 'oversized d rejected');
-    ok(validateConfigPayload({ g: 'moon-lit', t: 'pack', d: {} }, undefined, ids).v === 1, 'missing version defaults to 1');
-    ok(validateConfigPayload({ g: 'moon-lit', t: 'pack', d: {} }, 1, ['moon-lit']).g === 'moon-lit', 'array catalog id list works');
+    ok(validateConfigPayload({ g: 'game-a', t: 'BAD TYPE', d: {} }, 1, ids) === null, 'bad type charset rejected');
+    ok(validateConfigPayload({ g: 'game-a', t: 'pack' }, 1, ids) === null, 'missing d rejected');
+    ok(validateConfigPayload({ g: 'game-a', t: 'pack', d: { big: 'x'.repeat(CFG_DATA_MAX) } }, 1, ids) === null, 'oversized d rejected');
+    ok(validateConfigPayload({ g: 'game-a', t: 'pack', d: {} }, undefined, ids).v === 1, 'missing version defaults to 1');
+    ok(validateConfigPayload({ g: 'game-a', t: 'pack', d: {} }, 1, ['game-a']).g === 'game-a', 'array catalog id list works');
     ok(validateConfigPayload('nope', 1, ids) === null, 'non-object rejected');
 }
 
 console.log('\nvalidateConfigEnvelope (kind:config peer body)');
 {
-    const ids = new Set(['moon-lit']);
-    ok(validateConfigEnvelope({ arcade: 1, kind: 'config', v: 1, g: 'moon-lit', t: 'pack', d: {} }, ids).t === 'pack', 'valid envelope accepted');
+    const ids = new Set(['game-a']);
+    ok(validateConfigEnvelope({ arcade: 1, kind: 'config', v: 1, g: 'game-a', t: 'pack', d: {} }, ids).t === 'pack', 'valid envelope accepted');
     ok(validateConfigEnvelope({ g: 'unknown', t: 'pack', d: {} }, ids) === null, 'envelope game not in catalog rejected');
-    ok(validateConfigEnvelope({ g: 'moon-lit', t: 'pack', d: { big: 'x'.repeat(20000) } }, ids) === null, 'oversized envelope rejected');
+    ok(validateConfigEnvelope({ g: 'game-a', t: 'pack', d: { big: 'x'.repeat(20000) } }, ids) === null, 'oversized envelope rejected');
 }
 
 console.log('\nvalidateConfigsOp (arcade:configs.op shape gate)');

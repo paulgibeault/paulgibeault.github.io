@@ -40,10 +40,11 @@ import {
 export function initStorageBridge(host) {
     const postToIframe = host.postToIframe;
 
-    // localStorage proxy: hecknsic (and potentially other games) install a
-    // postMessage-backed shim that overrides window.localStorage when running
-    // in any iframe and blocks module init on a 'dump' reply. Without this
-    // handler the game hangs forever after rendering its static HUD.
+    // localStorage proxy (LEGACY — scheduled for removal, see ISSUES.md).
+    // Some pre-SDK games install a postMessage-backed shim that overrides
+    // window.localStorage in any iframe and block module init on a 'dump'
+    // reply; without this handler such a game hangs forever after rendering
+    // its static HUD. New games use Arcade.state and never reach this path.
     function handleLsProxyRequest(gameId, data, source, origin) {
         const requestId = data.requestId;
         const reply = { type: 'ls-proxy-response', requestId, ok: false };

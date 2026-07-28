@@ -11,7 +11,7 @@
  * dynamic string out of the HTML parser (see the toast-spoof note in
  * index.html's maybeMessageToast).
  *
- * Game URLs in catalog.json are root-relative ('/moon-lit/') and resolved
+ * Game URLs in catalog.json are root-relative ('/<gameId>/') and resolved
  * against location.origin here — the launcher works unmodified on GitHub
  * Pages, dev.sh staging, and the CI acceptance servers.
  */
