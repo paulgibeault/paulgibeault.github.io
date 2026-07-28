@@ -200,8 +200,21 @@ for (let si = 0; si < plan.sections.length; si++) {
       return P.CUES[it.cue](probe, o, 0, it.params || null, r) || 1.0;
     });
 
+    // Nothing is scheduled at exactly t=0. A gesture placed on the very first
+    // sample of an OfflineAudioContext renders about 10 dB down and with a
+    // measurably different spectrum from the identical gesture placed anywhere
+    // else — verified by rendering one `body` at several offsets: −28.6 dBFS at
+    // t=0, −18.4 dBFS at every other offset including 500 ms. Same family as
+    // the render-quantum automation problem `primed()` handles in
+    // arcade-audio.js, and it landed on the FIRST ITEM OF EVERY SECTION of
+    // every audition ever rendered here — so every ear pass in the fleet judged
+    // that item roughly half as loud as it actually plays.
+    //
+    // A lead-in is the mitigation, not the fix: the underlying behaviour is
+    // still there for any cue that schedules a layer at its own `when + 0`.
+    const LEAD = 0.25;
     const marks = [];
-    let t = 0;
+    let t = LEAD;
     for (let i = 0; i < section.items.length; i++) {
       marks.push(t);
       t += durs[i] + P.GAP;
