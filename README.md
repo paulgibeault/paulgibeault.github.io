@@ -5,9 +5,8 @@ A launcher for a small catalog of browser games, all served from
 with **shared storage**, **cross-device save files**, and **serverless P2P
 multiplayer** — without breaking anyone's ability to open a game standalone.
 
-Live: [paulgibeault.github.io](https://paulgibeault.github.io) ·
-Current lineup: Moon Lit, Pi Game, Silicon Syndicate, HecknSic, Cozy Solitaire,
-Sowdoku, P2P Chat.
+Live: [paulgibeault.github.io](https://paulgibeault.github.io) — the grid there
+is the current lineup, rendered from `catalog.json`.
 
 ---
 
@@ -98,7 +97,7 @@ opaque-frame storage bridge, and launcher-aware settings/lifecycle hints.
 
 ```sh
 ./dev.sh ../<your-game-repo>            # stage launcher + one game, same origin
-./dev.sh ../si-syn ../pi-game           # multiple games side-by-side
+./dev.sh ../my-app ../my-other-app      # multiple games side-by-side
 ./dev.sh stop                           # kill the dev server
 ```
 

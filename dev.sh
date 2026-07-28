@@ -4,7 +4,7 @@
 # single same-origin HTTP server, so the postMessage / iframe-pool / shared
 # localStorage handshake works end-to-end against your local edits.
 #
-#   ./dev.sh ../si-syn ../pi-game   build (if needed), stage, serve, open browser
+#   ./dev.sh ../my-app ../other     build (if needed), stage, serve, open browser
 #   ./dev.sh stop                   stop the running server
 #
 # Each game-dir argument:
@@ -54,8 +54,8 @@ sed_inplace() {
 
 # Echo the gameId a game declares via Arcade.init({ gameId: '...' }) in its
 # index.html, or nothing if none is found. The checkout's directory name is
-# NOT authoritative — a repo cloned as ../sow-duku must still mount at the
-# /sowduku/ slug the launcher buttons and acceptance runner use.
+# NOT authoritative — a repo cloned as ../my-app-checkout must still mount at
+# the /my-app/ slug the launcher buttons and acceptance runner use.
 detect_game_id() {
   local html="$1/index.html"
   [ -f "$html" ] || return 0
@@ -134,9 +134,9 @@ explicit :<gameId> suffix, the id declared by Arcade.init({ gameId }) in the
 game's index.html, or the directory basename.
 
 Examples:
-  ./dev.sh ../si-syn
-  ./dev.sh ../si-syn ../pi-game
-  ./dev.sh ../sow-duku-checkout:sowduku
+  ./dev.sh ../my-app
+  ./dev.sh ../my-app ../my-other-app
+  ./dev.sh ../my-app-checkout:my-app
   ./dev.sh new my-app          scaffold ../my-app from the starter template
   ./dev.sh stop
 

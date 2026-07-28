@@ -214,3 +214,30 @@ element library it produces is what makes games 2–7 fast.
 - Changing any game's cue *events* or call sites — this is about what the existing
   events sound like.
 - The other six games, until moon-lit is signed off (§8).
+
+---
+
+## Archive disposition (2026-07-28)
+
+The `soundpacks/chiptune/` directory — seven modules preserving each app's
+pre-overhaul cue tables, transcribed verbatim from the rejected `audio-retune`
+branches — has been **moved out of this repo**. Each module now lives in the app
+that owns it, as `audio/chiptune-archive.mjs`, provenance header intact.
+
+Why it moved: the launcher is a framework, and per-app design data sitting in it
+is a dependency pointing the wrong way (see
+[decouple-game-names-2026-07.md](decouple-game-names-2026-07.md)). Nothing
+loaded these files, so the move carries no runtime risk.
+
+What the archive is *for*, restated so it does not get lost with the directory:
+the cue values are a finished, coherent expression of what the old
+single-oscillator engine could do, and the design-intent comments record **why
+each sound is shaped the way it is**. That intent is the input to each app's
+graph pack — it survives the change of synthesis method, and it is the reason
+the files were kept rather than deleted. Three apps (`pi-game`, `si-syn`,
+`p2p-chat`) had not yet been given graph packs when the archive moved; theirs is
+the design record to work from.
+
+The "selectable retro profile" this archive was saved for, if it ever happens,
+is a graph pack that *sounds* like chiptune — square-wave elements through the
+shared room — not a reason to keep the spec-cue engine alive.

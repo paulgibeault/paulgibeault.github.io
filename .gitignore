@@ -4,3 +4,4 @@
 node_modules/
 .DS_Store
 tools/soundpack/out/
+tools/fixtures/soundpack-test/out/

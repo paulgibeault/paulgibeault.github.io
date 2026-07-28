@@ -57,8 +57,9 @@ export const MAX_IMPORT_BYTES = 64 * 1024 * 1024;
 export const PROBE_KEY = KEY_PREFIX + '_meta.probe';
 
 // ---- ls-proxy key namespace ----
-// hecknsic (and potentially other games) install a postMessage-backed shim
-// that overrides window.localStorage; per-game keys live under
+// LEGACY (scheduled for removal, see ISSUES.md). Some pre-SDK games install a
+// postMessage-backed shim that overrides window.localStorage; their keys live
+// under
 // arcade.v1.<gameId>.ls.<key> so they ride along with save/load bundling.
 export function lsPrefix(gameId) { return KEY_PREFIX + gameId + '.ls.'; }
 // A legacy ls-proxy key stores its sub-key verbatim, so it can contain

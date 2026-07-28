@@ -30,6 +30,27 @@ semver is for humans and URLs, never checked on the wire.
 
 ---
 
+## 3.11.0
+
+Companion element library (`arcade-audio.js`) gains **`registerPack(pack)`** —
+the one well-known handle for "the sound pack this page loaded".
+
+```js
+ArcadeAudioElements.registerPack({ name: 'my-app', ROOM, SENDS, CUES });
+// → window.ArcadeSoundPack
+```
+
+Before this, each app published its pack under a name only that app knew
+(`window.<AppName>Pack`), so every piece of tooling that wanted to reach a pack
+— the offline renderer, the analyzer, an audition timeline — had to be written
+per app. That is a framework depending on its consumers, backwards. The handle
+is now fixed and the tooling is app-agnostic; see `tools/soundpack/README.md`.
+
+Additive and unenforced: apps still holding their own global keep working. The
+soundpack toolchain reads `ArcadeSoundPack` only.
+
+---
+
 ## 3.10.0
 
 Companion element library (`arcade-audio.js`) gains one gesture and one

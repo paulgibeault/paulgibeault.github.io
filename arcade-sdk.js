@@ -28,7 +28,7 @@
  * USAGE
  *   <script src="/sdk/v3/arcade-sdk.js"></script>
  *   <script>
- *     Arcade.init({ gameId: 'pi-game' });
+ *     Arcade.init({ gameId: 'my-app' });
  *     await Arcade.ready;          // optional — settles after handshake
  *   </script>
  *
@@ -179,7 +179,7 @@
     // tools/sdk-version-unit.mjs enforces all three. Launcher↔SDK compat is
     // still negotiated by welcome.caps, never by this number; it exists for
     // humans (bug reports, CHANGELOG) and for the pinned-URL publish scheme.
-    var SDK_SEMVER = '3.10.0';
+    var SDK_SEMVER = '3.11.0';
     var HANDSHAKE_TIMEOUT_MS = 300;
     // Opaque-origin (sandboxed, no allow-same-origin) frames have no storage
     // to fall back to, so waiting longer for the launcher costs nothing and
@@ -668,8 +668,8 @@
     var shareApi = { encode: shareEncode, decode: shareDecode };
 
     // ─── Config exchange (Arcade.configs) ─────────────────────────
-    // Share/receive named game-config payloads (sowduku packs, cardstock
-    // variants, …) as share codes/deep links or via a direct push to a linked
+    // Share/receive named game-config payloads (a puzzle pack, a deck variant,
+    // a level set) as share codes/deep links or via a direct push to a linked
     // peer. The launcher validates transport shape + prompts the user; the GAME
     // MUST treat inbound `data` as HOSTILE — semantic-validate every field and
     // render only via textContent / Arcade.html.escape, never innerHTML.

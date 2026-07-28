@@ -17,7 +17,7 @@
  * (The companion CACHE_NAME-bump check needs a git base to diff against and
  * lives in tools/check-sw-bump.mjs — CI-only by nature.)
  */
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -161,8 +161,92 @@ function gateB() {
     }
 }
 
+// ---- Gate C: no fleet-game references outside catalog.json ----
+//
+// The framework must not know which games exist. catalog.json is the single
+// sanctioned place a game id may appear — it is launcher configuration, read at
+// runtime. Anywhere else (SDK, launcher modules, tooling, tests, docs, fixtures)
+// a game id is a reverse dependency: it makes framework code, or a framework
+// test, fail when a *game* is renamed or leaves the fleet.
+//
+// The id list is READ FROM the catalog rather than hardcoded, so a newly listed
+// game is guarded with no edit here. TOMBSTONES covers ids that have left the
+// catalog but whose stragglers should still be findable for one release.
+//
+// If a genuine need arises to name a game — it almost never does; prefer stating
+// the behavior and linking that repo's issue — the honest fix is to add the file
+// to ALLOW with a comment saying why, not to soften the pattern.
+
+const TOMBSTONES = [];       // ids removed from the catalog within the last release
+const ALLOW = new Set([
+    'catalog.json',          // the sanctioned registry itself
+]);
+// Prefixes exempt because they are DATED RECORD, not living surface. History
+// says what happened, and what happened involved named apps; rewriting it to
+// remove the names would make it a worse record and no cleaner a framework.
+// The rule for both: append-only. Nothing here is read at runtime, imported by
+// framework code, or used to decide behavior — the moment one of these files
+// starts driving something, it stops being a record and belongs under the gate.
+const ALLOW_PREFIX = [
+    'plans/',                // decision + remediation history, dated per round
+    'sdk/CHANGELOG.md',      // release history
+];
+
+// Directories that are not framework surface at all.
+const SKIP_DIRS = new Set(['node_modules', '.git', '.dev-stage', 'out', 'images', 'p2p']);
+const SCAN_EXT = /\.(js|mjs|json|sh|html|css|md)$/;
+
+function walk(dir, rel = '', acc = []) {
+    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+        if (ent.name.startsWith('.') && ent.name !== '.gitignore') continue;
+        const r = rel ? `${rel}/${ent.name}` : ent.name;
+        if (ent.isDirectory()) {
+            if (SKIP_DIRS.has(ent.name)) continue;
+            walk(join(dir, ent.name), r, acc);
+        } else if (SCAN_EXT.test(ent.name)) {
+            acc.push(r);
+        }
+    }
+    return acc;
+}
+
+function gateC() {
+    console.log('\nGate C — no fleet-game references outside catalog.json');
+    let doc;
+    try { doc = JSON.parse(readFileSync(join(ROOT, 'catalog.json'), 'utf8')); }
+    catch { ok(false, 'catalog.json parses (needed to derive the id list)'); return; }
+
+    const ids = [...(doc.games || []).map((g) => g && g.id).filter(Boolean), ...TOMBSTONES];
+    if (!ids.length) { ok(false, 'catalog has ids to check against'); return; }
+
+    // Match the id as a whole token: an id must not fire inside a longer slug
+    // that merely starts with it (`my-app` must not match `my-app-2`). \b is
+    // wrong here because '-' is a non-word character, so \bmy-app\b matches
+    // inside 'my-app-2'; hence the explicit non-[A-Za-z0-9-] bounds.
+    const patterns = ids.map((id) => ({
+        id,
+        re: new RegExp(`(^|[^A-Za-z0-9-])${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^A-Za-z0-9-]|$)`, 'i')
+    }));
+
+    const offenders = [];
+    for (const rel of walk(ROOT)) {
+        if (ALLOW.has(rel) || ALLOW_PREFIX.some((p) => rel.startsWith(p))) continue;
+        let src;
+        try { src = readFileSync(join(ROOT, rel), 'utf8'); } catch { continue; }
+        const hits = new Set();
+        for (const { id, re } of patterns) {
+            for (const line of src.split('\n')) if (re.test(line)) { hits.add(id); break; }
+        }
+        if (hits.size) offenders.push(`${rel} → ${[...hits].join(', ')}`);
+    }
+
+    ok(offenders.length === 0,
+        `no catalog-game ids outside the allowlist${offenders.length ? ':\n      ' + offenders.join('\n      ') : ''}`);
+}
+
 console.log('Repo drift gates — precache completeness + catalog schema (no browser)');
 gateA();
 gateB();
+gateC();
 console.log(`\n${fail ? `${fail} check(s) FAILED.` : `All ${pass} repo-gate checks passed.`}`);
 process.exit(fail ? 1 : 0);

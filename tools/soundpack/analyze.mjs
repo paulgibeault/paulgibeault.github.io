@@ -7,21 +7,34 @@
 // cue that is all hiss and no tone, a reverb that isn't reaching the mix, a bed
 // that drowns the cues) before a human spends a listen on them.
 //
-//   node tools/soundpack/analyze.mjs [packName] [--version v1] [--out DIR]
+//   node tools/soundpack/analyze.mjs <path/to/…manifest.json>
+//
+// The manifest is what render.mjs printed when it finished; the WAV is read
+// from alongside it. Both paths are explicit — this tool knows nothing about
+// which apps exist or where any of them keep their renders.
 
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
-const HERE = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
-const flag = (n, d) => { const i = argv.indexOf('--' + n); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
-const pack = argv.find((a) => !a.startsWith('--')) || 'moon-lit';
-const VERSION = flag('version', 'v1');
-const OUT = resolve(flag('out', join(HERE, 'out')));
+const manifestArg = argv.find((a) => !a.startsWith('--'));
+if (!manifestArg) {
+  console.error(`sound-pack analyzer
 
-const manifest = JSON.parse(readFileSync(join(OUT, `${pack}-${VERSION}.manifest.json`), 'utf8'));
-const raw = readFileSync(join(OUT, `${pack}-${VERSION}.wav`));
+  node tools/soundpack/analyze.mjs <path/to/<name>-<label>.manifest.json>
+
+Measures each item of a finished render and flags what shows up in numbers:
+inaudible items, clipping, all-hiss cues, a room that never arrives, a
+register plan that has collapsed. Not a substitute for ears.`);
+  process.exit(2);
+}
+
+const MANIFEST_PATH = resolve(manifestArg);
+const OUT = dirname(MANIFEST_PATH);
+const manifest = JSON.parse(readFileSync(MANIFEST_PATH, 'utf8'));
+const pack = manifest.pack;
+const LABEL = manifest.label;
+const raw = readFileSync(join(OUT, `${pack}-${LABEL}.wav`));
 const SR = manifest.sampleRate;
 
 const pcm = new Int16Array(raw.buffer, raw.byteOffset + 44, (raw.length - 44) / 2);
@@ -96,7 +109,7 @@ function rms(from, to) {
 
 const items = manifest.index.filter((e) => e.kind === 'item');
 
-console.log(`\n${pack} ${VERSION} — ${manifest.duration.toFixed(1)}s @ ${SR} Hz\n`);
+console.log(`\n${pack} · ${LABEL} — ${manifest.duration.toFixed(1)}s @ ${SR} Hz\n`);
 console.log('  item                                  peak    rms   centroid  >4kHz   tail');
 console.log('  ' + '─'.repeat(76));
 

@@ -3,14 +3,15 @@
 // tools/acceptance.mjs — Run the GAME_INTEGRATION §13 acceptance checklist
 // against a running staged launcher.
 //
-//   node tools/acceptance.mjs http://127.0.0.1:4791/si-syn/
+//   node tools/acceptance.mjs http://127.0.0.1:4791/my-app/
 //   node tools/acceptance.mjs --pool http://127.0.0.1:4791/
 //   node tools/acceptance.mjs --pool --serve --catalog tools/fixtures/ci-catalog.json
 //
 // Per-game mode (default): GAME_INTEGRATION §13 checks against the given game.
 // --pool mode: launcher-only test of the bounded LRU iframe pool (issue #7).
-//   Requires at least 3 games in the served catalog (e.g. `./dev.sh ../si-syn
-//   ../hecknsic ../pi-game`, or --serve with the committed CI fixture catalog).
+//   Requires at least 3 games in the served catalog (e.g. `./dev.sh ../my-app
+//   ../my-other-app ../my-third-app`, or --serve with the committed CI fixture
+//   catalog).
 //
 // Without --serve, assumes the URL is already reachable — typically by running
 // `./dev.sh ../<game-repo> [...]` in another shell, with the launcher at
@@ -74,7 +75,7 @@ const origin = parsed.origin;
 const segments = parsed.pathname.split('/').filter(Boolean);
 const gameId = poolMode ? null : segments[0];
 if (!poolMode && !gameId) {
-    console.error('URL must include a game path, e.g. /si-syn/');
+    console.error('URL must include a game path, e.g. /my-app/');
     process.exit(2);
 }
 const gameUrl = gameId ? `${origin}/${gameId}/` : null;

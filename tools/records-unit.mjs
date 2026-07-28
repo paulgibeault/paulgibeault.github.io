@@ -5,7 +5,7 @@
  * hostile. These tests pin exactly that: corrupt JSON skipped, non-array score
  * blobs skipped, non-finite scores filtered, stored sort never trusted (always
  * re-sorted by the category's order before the top-N cut), reset targeting the
- * right keys and nothing else (incl. the pi-game / pi-game-2 prefix trap), and
+ * right keys and nothing else (incl. the game-a / game-a-2 prefix trap), and
  * every formatter branch. No browser, no DOM — the core takes an injected
  * store. Auto-discovered by run-units.mjs; run: `npm test`.
  */
@@ -108,19 +108,19 @@ ok(countPopulated(collectGameData(store({}), 'empty')) === 0, 'empty game → 0'
 console.log('\nresetKeysFor — exact targeting, no prefix bleed');
 {
     const s = store({
-        [K('pi-game', 'scores.a')]: '[]',
-        [K('pi-game', 'records.b')]: '{}',
-        [K('pi-game', 'stats.c')]: '{}',
-        [K('pi-game', '_scoreOrders')]: '{}',
-        [K('pi-game', 'state')]: '{}',      // keep
-        [K('pi-game', '_sync')]: '{}',      // keep
-        [K('pi-game', '_noExport')]: '{}',  // keep
-        [K('pi-game', 'ls.foo')]: '{}',     // keep
-        [K('pi-game-2', 'scores.x')]: '[]'  // different game — the prefix trap
+        [K('game-a', 'scores.a')]: '[]',
+        [K('game-a', 'records.b')]: '{}',
+        [K('game-a', 'stats.c')]: '{}',
+        [K('game-a', '_scoreOrders')]: '{}',
+        [K('game-a', 'state')]: '{}',      // keep
+        [K('game-a', '_sync')]: '{}',      // keep
+        [K('game-a', '_noExport')]: '{}',  // keep
+        [K('game-a', 'ls.foo')]: '{}',     // keep
+        [K('game-a-2', 'scores.x')]: '[]'  // different game — the prefix trap
     });
-    eq(resetKeysFor(s, 'pi-game').sort(),
-        [K('pi-game', '_scoreOrders'), K('pi-game', 'records.b'), K('pi-game', 'scores.a'), K('pi-game', 'stats.c')].sort(),
-        'targets scores/records/stats/_scoreOrders only; spares state/_sync/_noExport/ls and pi-game-2');
+    eq(resetKeysFor(s, 'game-a').sort(),
+        [K('game-a', '_scoreOrders'), K('game-a', 'records.b'), K('game-a', 'scores.a'), K('game-a', 'stats.c')].sort(),
+        'targets scores/records/stats/_scoreOrders only; spares state/_sync/_noExport/ls and game-a-2');
 }
 
 console.log('\nrelevantKey');

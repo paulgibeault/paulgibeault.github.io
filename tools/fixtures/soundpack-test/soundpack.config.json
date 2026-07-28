@@ -1,0 +1,9 @@
+{
+  "name": "soundpack-test",
+  "pack": "pack.js",
+  "auditions": {
+    "full": "audition.js"
+  },
+  "out": "out",
+  "sampleRate": 48000
+}

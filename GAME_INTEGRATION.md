@@ -79,7 +79,7 @@ return empty (the snapshot hasn't arrived) and log a
 `read before Arcade.ready` console warning naming the key:
 
 ```js
-Arcade.init({ gameId: 'hecknsic' });
+Arcade.init({ gameId: 'my-app' });
 await Arcade.ready;     // resolves on welcome handshake (or after the standalone timeout)
 const saved = Arcade.state.get('savedGame');
 ```
@@ -160,8 +160,8 @@ clobbering an already-namespaced value:
 
 ```js
 Arcade.state.migrate('v1', () => {
-    Arcade.state.adopt('hecknsic_settings', 'settings');
-    Arcade.state.adopt('hecknsic_save', 'savedGame');
+    Arcade.state.adopt('myapp_settings', 'settings');
+    Arcade.state.adopt('myapp_save', 'savedGame');
 });
 ```
 
@@ -203,15 +203,15 @@ Arcade.state.migrate('v1', () => {
 
     // 1. Settings (raw object → namespaced). adopt() is the plain-move path and
     //    already handles the framed defer itself.
-    Arcade.state.adopt('hecknsic_settings', 'settings');
+    Arcade.state.adopt('myapp_settings', 'settings');
 
     // 2. Sticky player name → global
-    const name = readLegacy('hecknsic_player_name');
-    if (name) { Arcade.player.setName(name); dropLegacy('hecknsic_player_name'); }
+    const name = readLegacy('myapp_player_name');
+    if (name) { Arcade.player.setName(name); dropLegacy('myapp_player_name'); }
 
     // 3. Per-mode high scores → leaderboard API
     for (const mode of ['arcade', 'chill', 'puzzle']) {
-        const raw = readLegacy(`hecknsic_highscores_${mode}`);
+        const raw = readLegacy(`myapp_highscores_${mode}`);
         if (!raw) continue;
         try {
             const list = JSON.parse(raw);
@@ -219,7 +219,7 @@ Arcade.state.migrate('v1', () => {
                 for (const e of list) Arcade.scores.add(mode, e);
             }
         } catch (e) {}
-        dropLegacy(`hecknsic_highscores_${mode}`);
+        dropLegacy(`myapp_highscores_${mode}`);
     }
 });
 ```
@@ -427,7 +427,7 @@ To benefit:
 ### Canvas-rendered games
 
 - [ ] **Font scale**: multiply every `ctx.font` size by `Arcade.settings.fontScale()`. Re-render on `Arcade.onSettingsChange(...)`.
-- [ ] **Theme**: if you support both, branch palette/style choices on `Arcade.settings.theme()`. If your game has a single mandatory aesthetic (e.g. cozy-solitaire's cabin-warm palette), it's fine to opt out of theme — document this in the game's README.
+- [ ] **Theme**: if you support both, branch palette/style choices on `Arcade.settings.theme()`. If your game has a single mandatory aesthetic (a fixed period palette, say), it's fine to opt out of theme — document this in the game's README.
 - [ ] **Reduced motion**: gate canvas tweens, particle systems, and shader animations on `Arcade.settings.reducedMotion()`.
 - [ ] **Handedness**: if a game-controlled overlay (e.g. on-screen joystick, action palette) lives on the canvas, switch its anchor side based on `Arcade.settings.handedness()`.
 
@@ -644,8 +644,9 @@ must be escaped before it touches `innerHTML` or an HTML attribute.
   (`/^[\w-]+$/`) so a hostile value can't break out of the attribute or the
   `querySelector` string.
 
-This is a real, shipped-then-fixed bug class in this fleet (peer-id XSS in
-p2p-chat; shared-pack XSS in sowduku) — treat every off-device string as hostile.
+This is a real, shipped-then-fixed bug class in this fleet — twice: once via a
+peer-supplied display name rendered into the DOM, once via a shared config pack.
+Treat every off-device string as hostile.
 
 ---
 
@@ -802,8 +803,8 @@ Arcade.rng.hash('any string');            // FNV-1a → u32 (stable across devic
 
 // Daily puzzles. THE PLATFORM RULE: "today" is the DEVICE-LOCAL calendar
 // date — dailies roll at the player's midnight, not UTC's. Do not hand-roll
-// this with toISOString() (that's UTC): hecknsic (UTC) and sowduku (local)
-// disagreeing on "today" is the live bug this helper kills.
+// this with toISOString() (that's UTC): two games disagreeing on "today"
+// because one used UTC and one used local is the live bug this helper kills.
 Arcade.daily.dateStr();                   // 'YYYY-MM-DD', device-local
 const daily = Arcade.daily.seed();        // deterministic per game per day
 const bonus = Arcade.daily.seed('bonus'); // salts give independent streams
@@ -827,8 +828,8 @@ with `typeof Arcade.rng === 'function'` — everything here is purely local
 
 ## 7d. Config exchange — `Arcade.configs` (share game configs, packs, variants)
 
-Let players share and load a **named game configuration** — a sowduku pack, a
-cardstock card-game variant, a puzzle seed — over any channel (a link/code) or
+Let players share and load a **named game configuration** — a puzzle pack, a
+card-game variant, a level seed — over any channel (a link/code) or
 straight to a linked device. The launcher handles transport and consent; your
 game defines the config's shape.
 
@@ -893,8 +894,7 @@ anchor-triggered downloads from a sandboxed iframe.
 
 You do **not** need a postMessage storage shim — the SDK IS the shim when
 framed. If your game has a hand-rolled one (legacy from earlier protocol
-versions), delete it as part of the SDK adoption. (One older game, hecknsic,
-once shipped such a shim; the launcher still answers the
+versions), delete it as part of the SDK adoption. (One older game once shipped such a shim; the launcher still answers the
 `ls-proxy-request`/`ls-proxy-response` protocol purely for backward
 compatibility — not a pattern to copy.)
 
@@ -971,7 +971,7 @@ need):
 ```sh
 # from the launcher repo
 ./dev.sh ../<your-game-repo>            # one game
-./dev.sh ../si-syn ../pi-game           # multiple, served side-by-side
+./dev.sh ../my-app ../my-other-app      # multiple, served side-by-side
 ./dev.sh stop                           # kill the dev server
 ```
 
@@ -994,9 +994,9 @@ the launcher or the game URL once. The flag persists in
 SDK log every message they send or receive via `console.debug`:
 
 ```
-[Arcade launcher → si-syn] {type: "arcade:welcome", caps: [...], ...}
-[Arcade si-syn ←]          {type: "arcade:welcome", caps: [...], ...}
-[Arcade si-syn →]          {type: "arcade:hello", gameId: "si-syn"}
+[Arcade launcher → my-app] {type: "arcade:welcome", caps: [...], ...}
+[Arcade my-app ←]          {type: "arcade:welcome", caps: [...], ...}
+[Arcade my-app →]          {type: "arcade:hello", gameId: "my-app"}
 ```
 
 Useful when "did the welcome arrive yet?" is a real question — e.g. when a

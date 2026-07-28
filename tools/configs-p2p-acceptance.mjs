@@ -9,7 +9,8 @@
 //
 //   node tools/configs-p2p-acceptance.mjs
 //
-// Self-contained: local static server (real catalog), local ICE, loopback drop.
+// Self-contained: local static server, local ICE, loopback drop. Target game
+// ids are read from the served catalog, so no fleet game is named here.
 // Ports 4784 (http) / 4785 (drop).
 //
 // Exit code: 0 if all checks pass, 1 otherwise.
@@ -78,25 +79,34 @@ async function waitForConfigPrompt(page) {
 try {
     const { H, J } = await freshPair('cfg');
 
-    // ── accept path: A sends pi-game config → B prompts → Load → B opens it ──
-    const sent = await sendConfig(H, 'pi-game', { name: 'Shared Pack' });
+    // The two target ids come from the SERVED CATALOG, not from literals:
+    // validateConfigPayload rejects ids absent from the catalog, so hardcoding
+    // real game slugs here made a framework test fail whenever a game left the
+    // fleet. Any catalog with two entries exercises the same code path.
+    const [idAccept, idDecline] = await H.evaluate(() => window.__arcade.catalog.slice(0, 2).map((g) => g.id));
+    check('served catalog has two entries to exchange configs for',
+        !!idAccept && !!idDecline && idAccept !== idDecline, `${idAccept} / ${idDecline}`);
+
+    // ── accept path: A sends a config → B prompts → Load → B opens it ──
+    const sent = await sendConfig(H, idAccept, { name: 'Shared Pack' });
     check('sender reports ok + sent to 1 peer', sent && sent.ok === true && sent.sent === 1, JSON.stringify(sent));
     const promptText = await waitForConfigPrompt(J);
     check('receiver is prompted before anything loads', !!promptText && /configuration/i.test(promptText), promptText);
     await J.click('#arcade-dialog-ok'); // "Load"
-    const opened = await J.waitForFunction(() => window.__arcade.pool.mountedGameIds().indexOf('pi-game') !== -1, null, { timeout: 8000 })
+    const opened = await J.waitForFunction(
+        (id) => window.__arcade.pool.mountedGameIds().indexOf(id) !== -1, idAccept, { timeout: 8000 })
         .then(() => true).catch(() => false);
     check('accepting opens the target game on the receiver', opened);
 
-    // ── decline path: A sends moon-lit config → B declines → not opened ──
+    // ── decline path: A sends a second config → B declines → not opened ──
     await J.waitForTimeout(1500); // clear the per-peer prompt rate limit
-    const sent2 = await sendConfig(H, 'moon-lit', { name: 'Nope' });
+    const sent2 = await sendConfig(H, idDecline, { name: 'Nope' });
     check('second send also reports sent', sent2 && sent2.sent === 1);
     const declineText = await waitForConfigPrompt(J);
     check('receiver prompted for the second config', !!declineText);
     await J.click('#arcade-dialog-cancel'); // "No"
     await J.waitForTimeout(1500);
-    check('declining does not open the game', (await mounted(J, 'moon-lit')) === false);
+    check('declining does not open the game', (await mounted(J, idDecline)) === false);
 } catch (e) {
     check('run completed', false, (e && e.message) || String(e));
 } finally {
