@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write # version_bump pushes the bump commit back to main
   pages: write
   id-token: write
 
