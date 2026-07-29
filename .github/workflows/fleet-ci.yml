@@ -122,13 +122,26 @@ jobs:
             p.version = '$NEW';
             fs.writeFileSync('package.json', JSON.stringify(p, null, 2)+'\n');
           "
-          node -e "
-            const fs = require('fs');
-            const m = JSON.parse(fs.readFileSync('manifest.json'));
-            m.start_url = './index.html?v=$NEW';
-            fs.writeFileSync('manifest.json', JSON.stringify(m, null, 2)+'\n');
-          "
-          sed -i "s/v[0-9]\+\.[0-9]\+\.[0-9]\+/v$NEW/g" index.html
+          # Guarded like the sw.js rewrite below: not every app keeps a
+          # manifest at the repo root (one of them ships its PWA manifest as
+          # assets/favicon/site.webmanifest), and an unguarded readFileSync
+          # here fails the whole deploy the moment that app opts into
+          # version_bump. The point of this input is that a repo can adopt the
+          # standard one piece at a time.
+          if [ -f manifest.json ]; then
+            node -e "
+              const fs = require('fs');
+              const m = JSON.parse(fs.readFileSync('manifest.json'));
+              m.start_url = './index.html?v=$NEW';
+              fs.writeFileSync('manifest.json', JSON.stringify(m, null, 2)+'\n');
+            "
+            git add manifest.json
+          fi
+          # Version badge, where an app renders one. Same reasoning.
+          if [ -f index.html ]; then
+            sed -i "s/v[0-9]\+\.[0-9]\+\.[0-9]\+/v$NEW/g" index.html
+            git add index.html
+          fi
           # Service-worker cache identity. An app whose sw.js declares the
           # canonical `const APP_VERSION = '…';` line gets it rewritten here, so
           # every deploy changes sw.js's bytes — which is the only thing that
@@ -142,7 +155,10 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package.json manifest.json index.html
+          # Only package.json is unconditional — every app has one. The blocks
+          # above stage the files they actually rewrote, so naming manifest.json
+          # or index.html here would fail the deploy for an app that has neither.
+          git add package.json
           git diff --cached --quiet || git commit -m "chore: auto-bump to v$NEW [skip ci]"
           git push
           echo "Bumped $CURRENT → $NEW"
