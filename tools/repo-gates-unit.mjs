@@ -12,10 +12,14 @@
  *   Gate B — catalog.json schema: required fields, unique ids, root-relative
  *            urls, icons that exist on disk — checked without a browser, so
  *            a malformed entry fails CI before the render-test tier.
+ *   Gate D — service-worker version/cleanup shape: the APP_VERSION line still
+ *            matches what fleet CI's sed rewrites, CACHE_NAME derives from it,
+ *            and activate-time cleanup is filtered to this app's own prefix.
  *
  * No browser, no network. Run: `node tools/repo-gates-unit.mjs`.
- * (The companion CACHE_NAME-bump check needs a git base to diff against and
- * lives in tools/check-sw-bump.mjs — CI-only by nature.)
+ * (Gate D replaced tools/check-sw-bump.mjs, the diff gate that required a
+ * hand bump of CACHE_NAME. CI owns the version now, so the bump cannot be
+ * forgotten — but the rewrite can stop matching, which is what D catches.)
  */
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
@@ -261,9 +265,51 @@ function gateC() {
         `no catalog-game ids outside the allowlist${offenders.length ? ':\n      ' + offenders.join('\n      ') : ''}`);
 }
 
-console.log('Repo drift gates — precache completeness + catalog schema (no browser)');
+// ---- Gate D: service-worker version + cleanup shape ----
+
+// This is the CI contract, character for character. fleet-ci.yml guards with
+// `grep -q "^const APP_VERSION = '"` and rewrites with a `^`-anchored sed, so
+// re-indenting this line, switching to double quotes, or renaming the constant
+// all turn the deploy-time rewrite into a silent no-op. Nothing fails; the
+// cache name simply freezes, and every subsequent fix ships to an origin that
+// no returning player re-fetches — a green deploy that reaches nobody.
+const APP_VERSION_LINE = /^const APP_VERSION = '[^']*';$/m;
+
+function gateD() {
+    console.log('\nGate D — service-worker version + cleanup shape');
+    const sw = readFileSync(resolve(ROOT, 'sw.js'), 'utf8');
+
+    ok(APP_VERSION_LINE.test(sw),
+        "sw.js declares APP_VERSION in the exact form fleet-ci.yml's sed targets");
+
+    // Deliberately NOT an equality check against package.json. That version
+    // was tried and false-failed every PR left open across a deploy, because
+    // main auto-bumps underneath the branch. The shape is the invariant; the
+    // value is CI's business.
+    const prefix = (/^const CACHE_PREFIX = '([^']+)';$/m.exec(sw) || [])[1];
+    ok(!!prefix, 'sw.js declares a CACHE_PREFIX');
+
+    ok(/^const CACHE_NAME = `\$\{CACHE_PREFIX\}v\$\{APP_VERSION\}`;$/m.test(sw),
+        'CACHE_NAME interpolates APP_VERSION rather than hardcoding a version');
+
+    // The cross-game bug. caches.keys() is origin-scoped and the whole fleet
+    // shares paulgibeault.github.io, so a bare `name !== CACHE_NAME` filter
+    // deletes every sibling game's cache on each activation.
+    const cleanup = /\.filter\(\((\w+)\) => \1\.startsWith\(CACHE_PREFIX\) && \1 !== CACHE_NAME\)/.test(sw);
+    ok(cleanup, 'activate-time cleanup is filtered to CACHE_PREFIX (never deletes sibling apps\' caches)');
+
+    // Without this the launcher's update control has nothing to talk to, and
+    // a worker that installs correctly waits forever.
+    ok(sw.includes("'arcade:sw.skipWaiting'"),
+        'sw.js honours the arcade:sw.skipWaiting message the update control sends');
+    ok(!/^\s*self\.skipWaiting\(\);/m.test(sw),
+        'sw.js does not skipWaiting() unconditionally on install (that swaps the cache unannounced)');
+}
+
+console.log('Repo drift gates — precache completeness + catalog schema + SW shape (no browser)');
 gateA();
 gateB();
 gateC();
+gateD();
 console.log(`\n${fail ? `${fail} check(s) FAILED.` : `All ${pass} repo-gate checks passed.`}`);
 process.exit(fail ? 1 : 0);

@@ -28,3 +28,9 @@ jobs:
     uses: ./.github/workflows/fleet-ci.yml
     with:
       browsers: chromium chrome
+      # The launcher opted out of auto-bumping while sw.js carried a
+      # hand-numbered CACHE_NAME (bumping package.json would not have moved
+      # it). sw.js now derives its cache name from APP_VERSION, which this
+      # step rewrites — so the launcher's cache identity finally advances on
+      # every deploy, the same as every game's.
+      version_bump: true
