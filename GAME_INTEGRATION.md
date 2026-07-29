@@ -920,8 +920,8 @@ and the launcher live on the same origin, sloppy scopes will collide.
 
 Start from the reference worker at
 [`tools/templates/game-sw.js`](tools/templates/game-sw.js) — it encodes every
-rule below (scope-filtered fetch handler, version-keyed cache, own-caches-only
-cleanup).
+rule below (scope-filtered fetch handler, CI-owned cache version, own-caches-only
+cleanup, and the wait-then-be-told-to-activate contract).
 
 - [ ] `manifest.json` `"scope"` and `"start_url"` are scoped to `/<gameId>/`, not `/`.
 - [ ] If the game registers a service worker, register it with `{ scope: '/<gameId>/' }` and place `sw.js` inside that path.
@@ -947,6 +947,42 @@ cleanup).
   whole arcade's offline support. Filter cache deletions to your own
   version-keyed prefix (`<gameId>-*`) and never unregister workers you didn't
   register.
+
+  This is not a hypothetical. Four of the five workers on the origin shipped
+  the bare `key !== CACHE_NAME` filter, so every deploy of any one of them
+  silently wiped every other app's offline support — mutual destruction, with
+  nothing logged anywhere. It is also why going cache-first raises the stakes
+  rather than lowering them: more offline reliance means more damage each time
+  a sibling wipes you.
+
+- [ ] **Let CI own the cache version.** Declare it exactly as
+  `const APP_VERSION = '0.0.0';` — start of line, single quotes — and derive
+  the cache name from it, then set `version_bump: true` (and `contents: write`)
+  in your thin caller workflow. A hand-bumped counter drifts, and when it
+  drifts the origin serves a fix that no returning player ever executes: a
+  green deploy that reaches nobody. That has happened twice. If the line stops
+  matching, CI's `sed` silently stops firing, so assert its *shape* in a test —
+  not `APP_VERSION === package.json version`, which false-fails on any PR left
+  open across a deploy.
+
+- [ ] **Don't `skipWaiting()` on install.** Let the new worker wait, and handle
+  the `arcade:sw.skipWaiting` message instead:
+
+  ```js
+  self.addEventListener('message', (event) => {
+    if (event.data && event.data.type === 'arcade:sw.skipWaiting') self.skipWaiting();
+  });
+  ```
+
+  The launcher's update control ("Check for Updates", and the automatic
+  prompt) enumerates every registration on the origin, offers the player a
+  reload, and sends that message once they accept. Your game cannot do this
+  for itself — inside a launcher-sandboxed frame the SDK hands you an inert
+  `navigator.serviceWorker` stub whose `getRegistrations()` resolves empty and
+  whose `ready` never settles, so a per-game update button is dead code
+  everywhere but a standalone visit. **Omit the message handler and your
+  worker installs and then waits forever**, which is indistinguishable from
+  having no update at all.
 
 > The launcher's own service worker lives at `/sw.js` (root scope), caches only launcher-owned files (`index.html`, `arcade-sdk.js`, the `sdk/` pinned copies, `styles.css`, `p2p/`, launcher images), and its fetch handler path-filters to those same trees — requests for `/<gameId>/...` fall through untouched. The launcher SW is also skipped on loopback hosts (`localhost`, `127.x`, `::1`) so local-dev edits to launcher or SDK are never masked by stale cache.
 
