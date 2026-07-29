@@ -1095,16 +1095,24 @@ Requirements every app meets (the pipeline detects them; the repo provides them)
   zero-dep. (Apps that need more run vitest or their own browser-suite
   runner; the requirement is that suites live in `tests/` and gate the
   deploy, not that every app share one framework.)
-- **Every app proves its deploy artifact in its own test suite.** Two
-  shared files, copied as-is and identical across repos:
-  - `tools/stage.mjs` — the staging implementation (tracked files minus the
-    dev set). The deploy job runs exactly this module; nothing re-implements
-    it in workflow YAML.
-  - `tests/deploy-artifact.test.js` — stages into a temp dir with that same
-    module and asserts what came out: every literal `index.html` reference,
-    every `sw.js` precache entry, and every `manifest.json` icon is
-    published; launcher-root files (`/arcade-sdk.js`, `/arcade-audio.js`)
-    are *not* precached; dev files are *not* published.
+- **Every app proves its deploy artifact, using the same two files:**
+  - `tools/verify-artifact.mjs` — **byte-identical in every repo, no
+    exceptions.** Stages into a temp dir and asserts what came out: every
+    literal `index.html` reference, every `sw.js` precache entry and every
+    `manifest.json` icon is published; dev files are not. It is a plain
+    script rather than a test-framework file because the fleet runs three
+    different runners and all of them can call a script. Never edit one
+    copy — change the canonical file and re-copy it.
+  - `tools/stage.mjs` — **the only per-app part**, and the reason one
+    verifier fits every repo. It exports `stage(outDir)` and `ROOT`, and
+    the deploy job runs exactly this module; nothing re-implements staging
+    in workflow YAML. Copying tracked files, invoking a bundler, and
+    delegating to a curated file list all satisfy the same contract.
+
+  The one rule that flips by repo — a game must not precache the launcher's
+  SDK, while the launcher must — is detected, not configured: the verifier
+  checks whether the artifact ships `arcade-sdk.js` itself. That keeps the
+  file identical rather than adding a per-repo flag.
 
   Check the artifact, never the checkout. A repo-level existence check
   cannot catch a staging rule that drops a needed file — every file is
@@ -1118,11 +1126,9 @@ Requirements every app meets (the pipeline detects them; the repo provides them)
   tracked JS and JSON file parses) and is the floor an app with no
   game-logic suite still meets.
 
-  An app that owns its build owns this check too — it asserts the same
-  invariants against its own build output. A bundler that rewrites and
-  hashes asset paths satisfies the reference half by construction (an
-  unresolved import fails the build), so a literal-path assertion there
-  would be checking the wrong thing.
+  There are no exemptions. An app that owns its build points `stage()` at
+  that build and runs the same verifier against its output; this repo, which
+  is the platform rather than a game, does the same.
 - **The deploy artifact is always `dist/`.** An app with a `build` script
   must produce it. Every other app gets the standard staging: tracked files
   minus the dev set — `.github/`, `.claude/`, `tests/`, `test/`, `docs/`,
