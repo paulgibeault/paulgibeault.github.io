@@ -136,25 +136,82 @@ jobs:
           git push
           echo "Bumped $CURRENT → $NEW"
 
-      - name: Build
-        # Apps with a build script publish its output (dist/); static apps
-        # publish the checkout as-is. Detected, not declared, so an app can
-        # grow a build step without touching its workflow.
+      - name: Stage deploy artifact (dist)
+        # The artifact is ALWAYS dist/. An app with a build script produces it;
+        # everything else gets the standard staging — tracked files minus the
+        # dev set (workflows, tests, docs, scratch, tools, scripts, package
+        # files, markdown, local dev helpers). Dev files never ship.
         run: |
-          if [ -f package.json ]; then
+          if [ -f package.json ] && \
+             [ "$(node -p 'Boolean(require("./package.json").scripts?.build)')" = "true" ]; then
             if [ -f package-lock.json ]; then npm ci; else npm install; fi
-            npm run build --if-present
+            npm run build
+            [ -d dist ] || { echo "build script must produce dist/"; exit 1; }
+          else
+            node --input-type=module - <<'EOF'
+          import { execSync } from "node:child_process";
+          import fs from "node:fs";
+          import path from "node:path";
+          const DIST = "dist";
+          const EXCLUDE_DIRS = new Set([".github", ".claude", "node_modules",
+            "tests", "test", "docs", "scratch", "tools", "scripts"]);
+          const EXCLUDE_ROOT = new Set(["package.json", "package-lock.json",
+            ".gitignore", "go.sh", "ago"]);
+          const EXCLUDE_EXT = new Set([".md", ".py", ".pid"]);
+          fs.rmSync(DIST, { recursive: true, force: true });
+          const files = execSync("git ls-files -z", { encoding: "utf8" }).split("\0").filter(Boolean);
+          let staged = 0, skipped = 0;
+          for (const f of files) {
+            if (EXCLUDE_DIRS.has(f.split("/")[0]) ||
+                (!f.includes("/") && EXCLUDE_ROOT.has(f)) ||
+                (!f.includes("/") && /^test_/.test(f)) ||
+                EXCLUDE_EXT.has(path.extname(f))) { skipped++; continue; }
+            fs.mkdirSync(path.join(DIST, path.dirname(f)), { recursive: true });
+            fs.copyFileSync(f, path.join(DIST, f));
+            staged++;
+          }
+          console.log(`staged ${staged} files to dist/ (excluded ${skipped} dev files)`);
+          EOF
           fi
 
-      - name: Resolve artifact path
-        id: artifact
-        run: echo "path=$([ -d dist ] && echo dist || echo .)" >> "$GITHUB_OUTPUT"
+      - name: Verify deploy artifact
+        # The gate that makes staging safe: every sw.js precache entry and
+        # every local reference in index.html must exist in dist/, or the
+        # deploy fails here instead of shipping a broken install.
+        run: |
+          node --input-type=module - <<'EOF'
+          import fs from "node:fs";
+          import path from "node:path";
+          const DIST = "dist";
+          const missing = [];
+          const idx = path.join(DIST, "index.html");
+          if (fs.existsSync(idx)) {
+            for (const m of fs.readFileSync(idx, "utf8").matchAll(/(?:src|href)="([^"]+)"/g)) {
+              const u = m[1];
+              if (/^(https?:|\/\/|\/|data:|mailto:|#)/.test(u) || u.includes("${")) continue;
+              const clean = u.split(/[?#]/)[0];
+              if (clean && !fs.existsSync(path.join(DIST, clean))) missing.push(`index.html -> ${u}`);
+            }
+          } else missing.push("dist/index.html itself");
+          const sw = path.join(DIST, "sw.js");
+          if (fs.existsSync(sw)) {
+            for (const m of fs.readFileSync(sw, "utf8").matchAll(/['"]\.\/([^'"]*?)['"]/g)) {
+              const clean = m[1].split(/[?#]/)[0];
+              if (clean && !fs.existsSync(path.join(DIST, clean))) missing.push(`sw.js precache -> ./${m[1]}`);
+            }
+          }
+          if (missing.length) {
+            console.error("DEPLOY ARTIFACT INCOMPLETE:\n  " + missing.join("\n  "));
+            process.exit(1);
+          }
+          console.log("artifact verified: sw precache + index.html references all present");
+          EOF
 
       - uses: actions/configure-pages@v5
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: ${{ steps.artifact.outputs.path }}
+          path: dist
 
       - id: deployment
         uses: actions/deploy-pages@v4
