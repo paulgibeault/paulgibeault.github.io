@@ -11,8 +11,9 @@ permissions:
   pages: write
   id-token: write
 
+# Per-ref, so a PR run never cancels main's deploy.
 concurrency:
-  group: pages
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

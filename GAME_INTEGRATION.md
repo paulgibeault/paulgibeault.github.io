@@ -1052,6 +1052,98 @@ pre-deploy script if you want regression coverage.
 
 ---
 
+## 13a. CI/CD — the fleet standard
+
+Every app deploys through one shared pipeline,
+[`.github/workflows/fleet-ci.yml`](.github/workflows/fleet-ci.yml) in this
+repo: a `test` job gates a `deploy` job, pull requests run the gate but never
+deploy, and pushes to `main` deploy to GitHub Pages only after the gate
+passes. An app repo carries nothing but this thin caller at
+`.github/workflows/pages.yml`:
+
+```yaml
+# Thin caller for the fleet CI/CD standard. The pipeline lives in the
+# launcher repo (fleet-ci.yml); change it there and every app follows.
+name: CI & Deploy Pages
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Per-ref, so a PR run never cancels main's deploy.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fleet:
+    uses: paulgibeault/paulgibeault.github.io/.github/workflows/fleet-ci.yml@main
+```
+
+Requirements every app meets (the pipeline detects them; the repo provides them):
+
+- **Node 24** everywhere; `package.json` declares `"engines": { "node": ">=24" }`.
+- **Tests exist, live in `tests/`, and are the gate.** `package.json` has a
+  working `test` script — the fleet default is `node --test 'tests/*.test.js'`,
+  zero-dep. (Apps that need more run vitest or their own browser-suite
+  runner; the requirement is that suites live in `tests/` and gate the
+  deploy, not that every app share one framework.)
+- **Every app proves its deploy artifact in its own test suite.** Two
+  shared files, copied as-is and identical across repos:
+  - `tools/stage.mjs` — the staging implementation (tracked files minus the
+    dev set). The deploy job runs exactly this module; nothing re-implements
+    it in workflow YAML.
+  - `tests/deploy-artifact.test.js` — stages into a temp dir with that same
+    module and asserts what came out: every literal `index.html` reference,
+    every `sw.js` precache entry, and every `manifest.json` icon is
+    published; launcher-root files (`/arcade-sdk.js`, `/arcade-audio.js`)
+    are *not* precached; dev files are *not* published.
+
+  Check the artifact, never the checkout. A repo-level existence check
+  cannot catch a staging rule that drops a needed file — every file is
+  obviously present in a checkout. This shape was proved out in the fleet
+  after a live site shipped with no sound and a service worker whose
+  `install()` rejected; three lists have to agree (index.html's tags, the
+  precache list, and what the deploy publishes) and none of them check
+  each other.
+
+  `tests/repo-gates.test.js` complements it at the source level (every
+  tracked JS and JSON file parses) and is the floor an app with no
+  game-logic suite still meets.
+
+  An app that owns its build owns this check too — it asserts the same
+  invariants against its own build output. A bundler that rewrites and
+  hashes asset paths satisfies the reference half by construction (an
+  unresolved import fails the build), so a literal-path assertion there
+  would be checking the wrong thing.
+- **The deploy artifact is always `dist/`.** An app with a `build` script
+  must produce it. Every other app gets the standard staging: tracked files
+  minus the dev set — `.github/`, `.claude/`, `tests/`, `test/`, `docs/`,
+  `scratch/`, `tools/`, `scripts/`, `node_modules/`, package files,
+  `.gitignore`, `go.sh`/`ago`, root `test_*` files, and any `.md`/`.py`/
+  `.pid` — so dev files never ship to the public site.
+- **The artifact is verified before deploy**: every `sw.js` precache entry
+  and every local `src`/`href` in `index.html` must exist in `dist/`, or
+  the deploy fails instead of shipping a broken install.
+- **GitHub Pages source must be "GitHub Actions"** (Settings → Pages), not
+  "deploy from branch" — otherwise the legacy Jekyll build races this one.
+
+Opt-in inputs for apps that need more (pass under `with:` in the caller):
+`launcher: true` checks the launcher out inside the workspace (exported as
+`ARCADE_LAUNCHER`) and runs `npm run acceptance` after the app's tests;
+`browsers: "chromium webkit"` installs Playwright browsers for the test
+tier; `version_bump: true` auto-bumps the patch version on each deploy
+(requires `contents: write` in the caller's permissions).
+
+---
+
 ## 14. Reference
 
 - Platform design: [ARCADE_PLATFORM.md](ARCADE_PLATFORM.md)
