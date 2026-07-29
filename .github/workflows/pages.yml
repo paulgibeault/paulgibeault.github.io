@@ -1,3 +1,10 @@
+# Thin caller for the fleet CI/CD standard. The pipeline lives beside this
+# file (fleet-ci.yml) and every app in the fleet calls the same one.
+# See GAME_INTEGRATION.md §13a.
+#
+# This repo's tier used to be ~20 enumerated steps here. It lives in
+# tools/run-ci.mjs now, so `npm test` is the gate — the same contract every
+# game meets — and a laptop can run exactly what CI runs.
 name: CI & Deploy Pages
 
 on:
@@ -17,172 +24,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Gate: a broken PR fails here and never deploys. Runs on PRs and on push.
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 24
-
-      - name: Syntax-check core JS
-        run: |
-          set -e
-          for f in arcade-sdk.js arcade-p2p.js arcade-known-peers.js arcade-diag.js \
-                   arcade-storage-core.js arcade-storage-bridge.js arcade-ui-bridge.js arcade-save.js \
-                   arcade-sync-core.js arcade-sync.js arcade-catalog.js \
-                   arcade-envelope.js arcade-backup-core.js arcade-backup.js \
-                   arcade-local-backup-core.js arcade-local-backup.js arcade-user-identity.js \
-                   p2p/*.js tools/*.mjs; do
-            echo "checking $f"
-            node --check "$f"
-          done
-
-      - name: Unit tier (every tools/*-unit.mjs, discovered — no browser)
-        # Discovery, not enumeration: a new tools/<thing>-unit.mjs runs here
-        # with zero workflow edits. Includes repo-gates-unit.mjs (sw.js
-        # precache completeness + catalog.json schema).
-        run: node tools/run-units.mjs
-
-      - name: SW cache-version gate (precached asset changed ⇒ CACHE_NAME must bump)
-        run: |
-          git fetch --depth=1 origin main
-          node tools/check-sw-bump.mjs origin/main
-
-      - name: Install deps + browsers
-        run: |
-          npm install
-          npx playwright install --with-deps chromium chrome
-
-      - name: Store/files acceptance (IndexedDB + OPFS)
-        run: node tools/store-acceptance.mjs
-
-      - name: SDK helpers acceptance (rng determinism, local-daily rule, share codes)
-        run: node tools/sdk-helpers-acceptance.mjs
-
-      - name: Audio graph acceptance (graph cues, shared room, sustained beds, bus routing)
-        run: node tools/audio-graph-acceptance.mjs
-
-      - name: Storage-bridge acceptance (opaque-frame boundary + bridge round-trips)
-        run: node tools/bridge-acceptance.mjs
-
-      - name: UI-bridge acceptance (attributed dialogs, title, quit veto, openFile, copy)
-        run: node tools/ui-acceptance.mjs
-
-      - name: User-identity acceptance (Ed25519 in-browser, recovery round-trip, Identity panel)
-        run: node tools/user-identity-acceptance.mjs
-
-      - name: Cross-sign acceptance (userPub pinning, revoke push + gossip, silent auto-promote)
-        run: node tools/p2p-crosssign-acceptance.mjs
-
-      - name: Export/import roundtrip (store/files in save bundle; P2P excluded)
-        run: node tools/export-roundtrip-acceptance.mjs
-
-      - name: Export advanced acceptance (per-app scoping, encrypted export, checksum override)
-        run: node tools/export-advanced-acceptance.mjs
-
-      - name: Catalog acceptance (grid + profile render from catalog.json)
-        run: node tools/catalog-acceptance.mjs
-
-      - name: Launcher pool acceptance (bounded LRU iframe pool, CI fixture catalog)
-        run: node tools/acceptance.mjs --pool --serve --catalog tools/fixtures/ci-catalog.json
-
-      - name: Per-game acceptance (starter-app template — standalone + framed + offline)
-        run: >-
-          node tools/acceptance.mjs --serve
-          --catalog tools/fixtures/pergame-catalog.json
-          --mount starter-app=tools/fixtures/starter-app
-          http://127.0.0.1:4799/starter-app/
-
-      - name: P2P acceptance (real WebRTC, self-contained)
-        # Real-WebRTC negotiation is timing-sensitive under headless CI; retry a
-        # few times so a transient hiccup doesn't block the deploy. A genuine
-        # regression fails all attempts.
-        run: |
-          for i in 1 2 3; do
-            echo "::group::p2p-acceptance attempt $i"
-            if node tools/p2p-acceptance.mjs; then echo "::endgroup::"; exit 0; fi
-            echo "::endgroup::"
-            echo "attempt $i failed; retrying in 3s"
-            sleep 3
-          done
-          echo "p2p-acceptance failed after 3 attempts"
-          exit 1
-
-      - name: P2P multiseat acceptance (host + two joiners; targeted sends, roster, meta)
-        run: |
-          for i in 1 2 3; do
-            echo "::group::p2p-multiseat attempt $i"
-            if node tools/p2p-multiseat-acceptance.mjs; then echo "::endgroup::"; exit 0; fi
-            echo "::endgroup::"
-            echo "attempt $i failed; retrying in 3s"
-            sleep 3
-          done
-          echo "p2p-multiseat failed after 3 attempts"
-          exit 1
-
-      - name: "P2P reconnect acceptance (rendezvous heal, hang up, call, re-pair)"
-        # The ONLY automated coverage of the rendezvous subsystem (the highest-
-        # churn code in the repo). Same retry wrapper as the other WebRTC suites.
-        run: |
-          for i in 1 2 3; do
-            echo "::group::p2p-reconnect attempt $i"
-            if node tools/p2p-reconnect-acceptance.mjs; then echo "::endgroup::"; exit 0; fi
-            echo "::endgroup::"
-            echo "attempt $i failed; retrying in 3s"
-            sleep 3
-          done
-          echo "p2p-reconnect failed after 3 attempts"
-          exit 1
-
-      - name: "Arcade.sync acceptance (two-launcher state replication, LWW, exclusions)"
-        # Drives real WebRTC + rendezvous heal like the other p2p suites.
-        # Same retry wrapper (#28 WP5).
-        run: |
-          for i in 1 2 3; do
-            echo "::group::sync-acceptance attempt $i"
-            if node tools/sync-acceptance.mjs; then echo "::endgroup::"; exit 0; fi
-            echo "::endgroup::"
-            echo "attempt $i failed; retrying in 3s"
-            sleep 3
-          done
-          echo "sync-acceptance failed after 3 attempts"
-          exit 1
-
-      - name: "Backup acceptance (two-launcher bundle replication, consent, restore, retention)"
-        # Drives real WebRTC like the other p2p suites. Same retry wrapper.
-        run: |
-          for i in 1 2 3; do
-            echo "::group::backup-acceptance attempt $i"
-            if node tools/backup-acceptance.mjs; then echo "::endgroup::"; exit 0; fi
-            echo "::endgroup::"
-            echo "attempt $i failed; retrying in 3s"
-            sleep 3
-          done
-          echo "backup-acceptance failed after 3 attempts"
-          exit 1
-
-      - name: Local backup acceptance (rolling IDB snapshot, restore, backup-folder export)
-        run: node tools/local-backup-acceptance.mjs
-
-      # The full per-game §13 acceptance now runs above against the committed
-      # starter-app template fixture (issue #40). To exercise a REAL fleet game
-      # locally against the same suite:
-      #   ./dev.sh ../si-syn ../hecknsic ../pi-game
-      #   npm run acceptance -- http://127.0.0.1:4791/si-syn/
-
-  deploy:
-    needs: test
-    if: github.event_name != 'pull_request'
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: .
-      - id: deployment
-        uses: actions/deploy-pages@v4
+  fleet:
+    uses: ./.github/workflows/fleet-ci.yml
+    with:
+      browsers: chromium chrome
