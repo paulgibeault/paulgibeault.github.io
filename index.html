@@ -350,6 +350,13 @@
                 <span class="launcher-menu__item-tag" id="menu-multiplayer-status" hidden></span>
             </button>
         </div>
+        <div class="launcher-menu__section">
+            <button type="button" class="launcher-menu__item" id="menu-update" title="Check the launcher and every game for a new version">
+                <span class="launcher-menu__item-icon" aria-hidden="true">⟳</span>
+                <span class="launcher-menu__item-label">Check for Updates</span>
+                <span class="launcher-menu__item-tag" id="menu-update-status" hidden></span>
+            </button>
+        </div>
         <div class="launcher-menu__section" id="menu-install-section" hidden>
             <button type="button" class="launcher-menu__item" id="install-btn" title="Install as PWA">
                 <span class="launcher-menu__item-icon" aria-hidden="true">⤓</span>
@@ -1674,6 +1681,94 @@
             deferredPrompt = null;
             hideInstallUI();
         });
+    })();
+
+    // ==========================================
+    // UPDATES — the fleet's only service-worker update control
+    // ==========================================
+    // The canonical sw.js deliberately does NOT skipWaiting() on install, so
+    // a new build installs and then waits rather than swapping the cache under
+    // a running game. This block is what lets the player take it. Nothing else
+    // in the fleet can: getRegistrations() is origin-scoped, and a game in a
+    // launcher-sandboxed frame gets the SDK's inert stub instead of the real
+    // container — a per-game update button would be dead code in the frame.
+    // One control here covers the launcher and every game.
+    (function swUpdates() {
+        const btn = document.getElementById('menu-update');
+        const tag = document.getElementById('menu-update-status');
+        if (!btn) return;
+        // No loopback special-case on purpose. Dev unregisters its workers
+        // above, so checkAll() finds nothing and the control honestly reports
+        // "up to date" — whereas hiding the button on loopback would put the
+        // one control the whole fleet's updates flow through outside the reach
+        // of every test we run, which all serve from localhost.
+
+        const toast = (msg, opts) => window.__arcade && window.__arcade.showToast
+            && window.__arcade.showToast(msg, opts);
+        let applying = false;
+
+        function setTag(text) {
+            if (!tag) return;
+            tag.textContent = text || '';
+            if (text) tag.removeAttribute('hidden'); else tag.setAttribute('hidden', '');
+        }
+
+        // The one path that activates workers. Reloading is not optional: a
+        // worker that skips waiting also claims this page, so without the
+        // reload the launcher would be running old code against a new build's
+        // cache. The reload also remounts any framed game against its own
+        // freshly-activated worker.
+        async function applyAndReload(mod) {
+            if (applying) return;
+            applying = true;
+            setTag('updating…');
+            try {
+                const sent = await mod.apply(navigator);
+                if (!sent) { toast('Already up to date.'); setTag(''); applying = false; return; }
+                await mod.waitForControllerChange(navigator);
+            } catch (e) { /* reload anyway — a half-applied update is the worst state */ }
+            location.reload();
+        }
+
+        async function offerUpdate(mod, count) {
+            if (applying) return;
+            const what = count > 1 ? `${count} apps have updates` : 'An update is ready';
+            const answer = await (window.__arcade && window.__arcade.dialog
+                ? window.__arcade.dialog({
+                    message: `${what}. Reload now to install? Your saves are untouched.`,
+                    okLabel: 'Reload', cancelLabel: 'Later'
+                })
+                : Promise.resolve(true));
+            if (answer) applyAndReload(mod);
+            else setTag('update ready');   // stays flagged so they can take it later
+        }
+
+        btn.addEventListener('click', async () => {
+            if (applying) return;
+            if (window.__arcade && window.__arcade.closeLauncherMenu) window.__arcade.closeLauncherMenu();
+            setTag('checking…');
+            try {
+                const mod = await import('./arcade-updates.js');
+                const res = await mod.checkAll(navigator);
+                setTag('');
+                if (res.ready) { offerUpdate(mod, res.ready); return; }
+                // errors > 0 with nothing ready almost always means offline —
+                // saying "up to date" then would be a lie the player acts on.
+                toast(res.errors ? 'Could not check for updates — you may be offline.' : 'Everything is up to date.',
+                    res.errors ? { error: true } : undefined);
+            } catch (e) {
+                setTag('');
+                toast('Could not check for updates.', { error: true });
+            }
+        });
+
+        // Automatic prompt: catches a worker that installed on its own (the
+        // browser re-fetches sw.js periodically) without the player having to
+        // know this menu exists. watch() suppresses first installs, so a
+        // brand-new visitor is never asked to reload a page they just opened.
+        import('./arcade-updates.js').then((mod) => {
+            mod.watch(navigator, (scopes) => offerUpdate(mod, scopes.length));
+        }).catch(() => {});
     })();
 </script>
 

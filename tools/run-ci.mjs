@@ -83,19 +83,18 @@ run("deploy-artifact", ["tools/verify-artifact.mjs"]);
 run("units", ["tools/run-units.mjs"]);
 
 // ---- service-worker cache-version gate ------------------------------------
-if (wanted("sw-bump")) {
-  // CI checks out a single shallow branch, so on a PR origin/main is not
-  // there until we ask for it. Fetch first — silently skipping this gate on
-  // PRs would retire it exactly where it earns its keep.
-  spawnSync("git", ["fetch", "--depth=1", "origin", "main"], { cwd: ROOT, stdio: "ignore" });
-  const hasBase = spawnSync("git", ["rev-parse", "--verify", "origin/main"],
-    { cwd: ROOT, stdio: "ignore" }).status === 0;
-  if (hasBase) run("sw-bump", ["tools/check-sw-bump.mjs", "origin/main"]);
-  else {
-    console.error("\n===== sw-bump ===== FAIL: cannot resolve origin/main to diff against");
-    results.push(["sw-bump", "FAIL"]);
-  }
-}
+// RETIRED. This ran tools/check-sw-bump.mjs, which failed a PR that touched a
+// precached asset without hand-bumping sw.js's CACHE_NAME. The gate existed
+// only because the version was hand-maintained; fleet CI now rewrites
+// APP_VERSION on every deploy, so the bump can no longer be forgotten and
+// there is nothing left for a diff gate to catch.
+//
+// What replaced it is not nothing: repo-gates-unit.mjs Gate D asserts sw.js
+// still declares APP_VERSION in exactly the form CI's sed targets, and derives
+// CACHE_NAME from it. That is the invariant that actually matters — if the
+// line stops matching, the rewrite stops firing silently, which is precisely
+// how a green deploy once reached no returning player at all. A shape
+// assertion catches that; a bump-diff never could.
 
 // ---- acceptance tier ------------------------------------------------------
 if (!process.env.SKIP_BROWSER) {

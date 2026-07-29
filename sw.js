@@ -1,4 +1,26 @@
-const CACHE_NAME = 'paul-arcade-v67';
+/* Paul's Arcade launcher service worker.
+ *
+ * Shares the fleet's version/cleanup/skip-waiting contract with every game's
+ * sw.js (GAME_INTEGRATION §10 carries the canonical copy) but NOT its fetch
+ * strategy: the launcher stays network-first with a cached fallback, because
+ * it is the shell that decides which build of everything else the player gets.
+ */
+
+// Written by fleet CI on every deploy (fleet-ci.yml, "Bump patch version").
+// DO NOT EDIT BY HAND — a hand-maintained constant drifts, and when it drifts
+// the origin serves a fix that no returning player ever executes. That is not
+// hypothetical; it stranded a game's players for two releases and is why this
+// line is CI-owned. tools/repo-gates-unit.mjs Gate D pins its exact shape,
+// because if it stops matching CI's sed the rewrite silently stops firing —
+// which is indistinguishable from a repo that never adopted it.
+const APP_VERSION = '0.0.0';
+
+// Every cache this app has ever owned starts with this prefix — including the
+// old hand-numbered 'paul-arcade-v67' names, so the switch to a version-
+// derived name still cleans them up. Cleanup is filtered to it; see activate.
+const CACHE_PREFIX = 'paul-arcade-';
+const CACHE_NAME = `${CACHE_PREFIX}v${APP_VERSION}`;
+
 // Network-first timeout: on lie-fi, stop waiting on the network and serve the
 // cached shell/asset so first paint stays bounded.
 const NET_TIMEOUT_MS = 5000;
@@ -17,6 +39,7 @@ const ASSETS_TO_CACHE = [
   './arcade-router.js',
   './arcade-known-peers.js',
   './arcade-diag.js',
+  './arcade-updates.js',
   './arcade-storage-core.js',
   './arcade-storage-bridge.js',
   './arcade-save.js',
@@ -60,7 +83,13 @@ const ASSETS_TO_CACHE = [
 ];
 
 self.addEventListener('install', (event) => {
-  self.skipWaiting();
+  // Deliberately NOT skipWaiting(). The new worker installs and waits; the
+  // update control in index.html ("Check for Updates", and the automatic
+  // prompt) spots it and offers an explicit reload, then sends the message
+  // below once the player accepts. Activating unannounced would swap the
+  // cache under a running game — and it would also mean the launcher, the one
+  // page that can apply the whole fleet's updates, never has an update of its
+  // own to demonstrate the flow with.
   event.waitUntil((async () => {
     const cache = await caches.open(CACHE_NAME);
     // Game icons come from the catalog — the single authoritative game list.
@@ -84,15 +113,24 @@ self.addEventListener('install', (event) => {
   })());
 });
 
+self.addEventListener('message', (event) => {
+  // Sent by the update control in index.html once the player accepts a reload.
+  if (event.data && event.data.type === 'arcade:sw.skipWaiting') self.skipWaiting();
+});
+
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((cacheNames) => {
       return Promise.all(
-        cacheNames.map((cacheName) => {
-          if (cacheName !== CACHE_NAME) {
-            return caches.delete(cacheName);
-          }
-        })
+        cacheNames
+          // ONLY our own caches. caches.keys() is origin-scoped and the whole
+          // fleet shares paulgibeault.github.io, so the bare `name !==
+          // CACHE_NAME` filter this used to have deleted every game's cache on
+          // each launcher activation — and each game's worker did the same
+          // back. Every app silently destroying every other app's offline
+          // support, on every deploy.
+          .filter((name) => name.startsWith(CACHE_PREFIX) && name !== CACHE_NAME)
+          .map((name) => caches.delete(name))
       );
     })
   );
