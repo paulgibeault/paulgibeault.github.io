@@ -306,10 +306,32 @@ function gateD() {
         'sw.js does not skipWaiting() unconditionally on install (that swaps the cache unannounced)');
 }
 
+// ---- Gate E: version_bump needs push permission ----
+
+function gateE() {
+    console.log('\nGate E — version_bump implies contents: write');
+    let yml;
+    try { yml = readFileSync(resolve(ROOT, '.github/workflows/pages.yml'), 'utf8'); }
+    catch { ok(false, 'pages.yml is readable'); return; }
+
+    const wantsBump = /^\s*version_bump:\s*true\s*$/m.test(yml);
+    const canPush = /^\s*contents:\s*write\b/m.test(yml);
+
+    // Learned the expensive way: the launcher opted into version_bump without
+    // this, and the deploy job ran the whole bump, committed it, and THEN died
+    // 403 on push. The test tier was green, the merge looked clean, and the
+    // site simply never updated. A reusable workflow inherits the caller's
+    // permissions, so the grant has to live here, next to the opt-in.
+    ok(!wantsBump || canPush,
+        'pages.yml enabling version_bump also grants `contents: write` ' +
+        '(without it the bump commits and then fails to push, after tests pass)');
+}
+
 console.log('Repo drift gates — precache completeness + catalog schema + SW shape (no browser)');
 gateA();
 gateB();
 gateC();
 gateD();
+gateE();
 console.log(`\n${fail ? `${fail} check(s) FAILED.` : `All ${pass} repo-gate checks passed.`}`);
 process.exit(fail ? 1 : 0);
