@@ -1087,6 +1087,10 @@ jobs:
     uses: paulgibeault/paulgibeault.github.io/.github/workflows/fleet-ci.yml@main
 ```
 
+This repo calls the same pipeline, with `uses: ./.github/workflows/fleet-ci.yml`
+— a workflow in the same repository is referenced by relative path, not by
+`owner/repo@ref`. It is the identical pipeline either way.
+
 Requirements every app meets (the pipeline detects them; the repo provides them):
 
 - **Node 24** everywhere; `package.json` declares `"engines": { "node": ">=24" }`.
