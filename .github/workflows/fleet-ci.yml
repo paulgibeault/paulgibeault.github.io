@@ -31,9 +31,9 @@ on:
       version_bump:
         description: >-
           Auto-bump the patch version on each deploy — package.json,
-          manifest.json start_url cache-buster, and the version badge in
-          index.html — and push the commit back. The caller must grant
-          `contents: write`.
+          manifest.json start_url cache-buster, the version badge in
+          index.html, and sw.js's APP_VERSION where the app declares it —
+          and push the commit back. The caller must grant `contents: write`.
         type: boolean
         default: false
 
@@ -129,6 +129,17 @@ jobs:
             fs.writeFileSync('manifest.json', JSON.stringify(m, null, 2)+'\n');
           "
           sed -i "s/v[0-9]\+\.[0-9]\+\.[0-9]\+/v$NEW/g" index.html
+          # Service-worker cache identity. An app whose sw.js declares the
+          # canonical `const APP_VERSION = '…';` line gets it rewritten here, so
+          # every deploy changes sw.js's bytes — which is the only thing that
+          # triggers install → activate → drop the stale cache. Leaving this to
+          # a hand-maintained constant shipped a fix to the origin that no
+          # returning player ever executed (hecknsic#50/#52).
+          # No-op for an app with no sw.js, or one that has not adopted the line.
+          if [ -f sw.js ] && grep -q "^const APP_VERSION = '" sw.js; then
+            sed -i "s/^const APP_VERSION = '[^']*';/const APP_VERSION = '$NEW';/" sw.js
+            git add sw.js
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add package.json manifest.json index.html
