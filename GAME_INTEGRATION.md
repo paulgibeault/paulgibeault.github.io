@@ -1095,18 +1095,31 @@ Requirements every app meets (the pipeline detects them; the repo provides them)
   zero-dep. (si-syn runs vitest and sow-duku runs a browser-suite runner;
   the requirement is that suites exist in `tests/` and gate the deploy, not
   that every app share one framework.)
-- **Every app carries `tests/repo-gates.test.js`**, the shared structural
-  suite: every tracked JS and JSON file parses, every local `index.html`
-  reference resolves, every `sw.js` precache entry exists, and
-  `manifest.json` icons resolve. It is discovery-driven and identical
-  across repos — copy it as-is; it tests whatever the repo actually has.
-  This is the floor an app with no game-logic suite still meets. (The
-  pipeline's own `node --check` fallback exists only so a brand-new repo
-  can't deploy untested before this file lands.) Two apps are exempt
-  because they already gate the same thing better: si-syn's vite build
-  fails on an unresolved reference, and sow-duku's `test_deploy_staging.js`
-  holds its published file set against what `index.html` and `sw.js`
-  actually request.
+- **Every app proves its deploy artifact in its own test suite.** Two
+  shared files, copied as-is and identical across repos:
+  - `tools/stage.mjs` — the staging implementation (tracked files minus the
+    dev set). The deploy job runs exactly this module; nothing re-implements
+    it in workflow YAML.
+  - `tests/deploy-artifact.test.js` — stages into a temp dir with that same
+    module and asserts what came out: every literal `index.html` reference,
+    every `sw.js` precache entry, and every `manifest.json` icon is
+    published; launcher-root files (`/arcade-sdk.js`, `/arcade-audio.js`)
+    are *not* precached; dev files are *not* published.
+
+  Check the artifact, never the checkout. A repo-level existence check
+  cannot catch a staging rule that drops a needed file — every file is
+  obviously present in a checkout. This is the shape sow-duku's
+  `test_deploy_staging.js` proved out after a live site shipped with no
+  sound and a service worker whose `install()` rejected.
+
+  `tests/repo-gates.test.js` complements it at the source level (every
+  tracked JS and JSON file parses) and is the floor an app with no
+  game-logic suite still meets.
+
+  Apps that own their build own this check: sow-duku's
+  `test_deploy_staging.js` is the original, and si-syn's vite build fails
+  on an unresolved reference and rewrites asset paths, so a literal-path
+  assertion would be checking the wrong thing.
 - **The deploy artifact is always `dist/`.** An app with a `build` script
   must produce it. Every other app gets the standard staging: tracked files
   minus the dev set — `.github/`, `.claude/`, `tests/`, `test/`, `docs/`,
