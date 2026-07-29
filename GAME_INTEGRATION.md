@@ -1102,7 +1102,11 @@ Requirements every app meets (the pipeline detects them; the repo provides them)
   across repos — copy it as-is; it tests whatever the repo actually has.
   This is the floor an app with no game-logic suite still meets. (The
   pipeline's own `node --check` fallback exists only so a brand-new repo
-  can't deploy untested before this file lands.)
+  can't deploy untested before this file lands.) Two apps are exempt
+  because they already gate the same thing better: si-syn's vite build
+  fails on an unresolved reference, and sow-duku's `test_deploy_staging.js`
+  holds its published file set against what `index.html` and `sw.js`
+  actually request.
 - **The deploy artifact is always `dist/`.** An app with a `build` script
   must produce it. Every other app gets the standard staging: tracked files
   minus the dev set — `.github/`, `.claude/`, `tests/`, `test/`, `docs/`,
