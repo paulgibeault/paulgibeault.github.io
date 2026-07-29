@@ -172,6 +172,18 @@
     shelf.frequency.value = o.shelfHz || 6000;
     shelf.gain.value = o.shelfDb == null ? -4 : o.shelfDb;
 
+    // PLATFORM CONSTRAINT (same family as the primed() note above): Chromium
+    // initialises a DynamicsCompressorNode's internal gain low and releases it
+    // up toward unity over the first ~250 ms a context renders. It is
+    // unconditional — measured identically with input 26 dB below this
+    // threshold, so it is warm-up, not gain reduction — and it is why anything
+    // heard in a context's first quarter second arrives quieter and, because
+    // the room tail lands after the ramp, wetter. Offline, the renderer's
+    // 0.25 s section lead-in absorbs it entirely (tools/soundpack/render.mjs).
+    // Live it can only bite a cue fired within ~250 ms of the AudioContext
+    // being created or resumed, which the SDK's gesture-gated start makes
+    // vanishingly rare. The initial state is not scriptable, so this is
+    // documented rather than fixed. Root-caused in launcher #106.
     comp.threshold.value = -14;
     comp.knee.value = 12;
     comp.ratio.value = 2.5;

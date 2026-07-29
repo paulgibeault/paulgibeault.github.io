@@ -200,18 +200,25 @@ for (let si = 0; si < plan.sections.length; si++) {
       return P.CUES[it.cue](probe, o, 0, it.params || null, r) || 1.0;
     });
 
-    // Nothing is scheduled at exactly t=0. A gesture placed on the very first
-    // sample of an OfflineAudioContext renders about 10 dB down and with a
-    // measurably different spectrum from the identical gesture placed anywhere
-    // else — verified by rendering one `body` at several offsets: −28.6 dBFS at
-    // t=0, −18.4 dBFS at every other offset including 500 ms. Same family as
-    // the render-quantum automation problem `primed()` handles in
-    // arcade-audio.js, and it landed on the FIRST ITEM OF EVERY SECTION of
-    // every audition ever rendered here — so every ear pass in the fleet judged
-    // that item roughly half as loud as it actually plays.
+    // Nothing is scheduled in the context's first quarter second. Root-caused
+    // (launcher #106): the bus's DynamicsCompressorNode initialises its
+    // internal gain LOW and releases it up toward unity over the first
+    // ~250 ms of any fresh context — Chromium warm-up behaviour, unconditional
+    // (identical with input 26 dB below the threshold, so it is not gain
+    // reduction), settling on the compressor's own release constant. Isolated
+    // by probing every bus component at several offsets: sources, envelopes,
+    // biquads and the convolver are flat; the compressor alone reproduces the
+    // ramp (a 20 ms burst: −18.7 dBFS at t=0 → −13.3 at 50 ms → −11.1 from
+    // 250 ms on). Before the lead-in it landed on the FIRST ITEM OF EVERY
+    // SECTION of every audition rendered here, judged ~7–10 dB quieter (and
+    // wetter/darker, since the reverb tail arrives after the ramp) than it
+    // plays. See the platform-constraint note on createBus in arcade-audio.js.
     //
-    // A lead-in is the mitigation, not the fix: the underlying behaviour is
-    // still there for any cue that schedules a layer at its own `when + 0`.
+    // The warm-up is anchored to the CONTEXT's first 250 ms, not to any cue's
+    // own scheduling — `when + 0` inside a cue is fine — so this lead-in is a
+    // complete fix for offline renders, and is permanent because the
+    // compressor's initial state is not scriptable. Do not shrink it below
+    // the settle time measured above.
     const LEAD = 0.25;
     const marks = [];
     let t = LEAD;
