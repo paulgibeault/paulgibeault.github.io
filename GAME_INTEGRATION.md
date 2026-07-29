@@ -1092,9 +1092,9 @@ Requirements every app meets (the pipeline detects them; the repo provides them)
 - **Node 24** everywhere; `package.json` declares `"engines": { "node": ">=24" }`.
 - **Tests exist, live in `tests/`, and are the gate.** `package.json` has a
   working `test` script — the fleet default is `node --test 'tests/*.test.js'`,
-  zero-dep. (si-syn runs vitest and sow-duku runs a browser-suite runner;
-  the requirement is that suites exist in `tests/` and gate the deploy, not
-  that every app share one framework.)
+  zero-dep. (Apps that need more run vitest or their own browser-suite
+  runner; the requirement is that suites live in `tests/` and gate the
+  deploy, not that every app share one framework.)
 - **Every app proves its deploy artifact in its own test suite.** Two
   shared files, copied as-is and identical across repos:
   - `tools/stage.mjs` — the staging implementation (tracked files minus the
@@ -1108,18 +1108,21 @@ Requirements every app meets (the pipeline detects them; the repo provides them)
 
   Check the artifact, never the checkout. A repo-level existence check
   cannot catch a staging rule that drops a needed file — every file is
-  obviously present in a checkout. This is the shape sow-duku's
-  `test_deploy_staging.js` proved out after a live site shipped with no
-  sound and a service worker whose `install()` rejected.
+  obviously present in a checkout. This shape was proved out in the fleet
+  after a live site shipped with no sound and a service worker whose
+  `install()` rejected; three lists have to agree (index.html's tags, the
+  precache list, and what the deploy publishes) and none of them check
+  each other.
 
   `tests/repo-gates.test.js` complements it at the source level (every
   tracked JS and JSON file parses) and is the floor an app with no
   game-logic suite still meets.
 
-  Apps that own their build own this check: sow-duku's
-  `test_deploy_staging.js` is the original, and si-syn's vite build fails
-  on an unresolved reference and rewrites asset paths, so a literal-path
-  assertion would be checking the wrong thing.
+  An app that owns its build owns this check too — it asserts the same
+  invariants against its own build output. A bundler that rewrites and
+  hashes asset paths satisfies the reference half by construction (an
+  unresolved import fails the build), so a literal-path assertion there
+  would be checking the wrong thing.
 - **The deploy artifact is always `dist/`.** An app with a `build` script
   must produce it. Every other app gets the standard staging: tracked files
   minus the dev set — `.github/`, `.claude/`, `tests/`, `test/`, `docs/`,
