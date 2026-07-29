@@ -1090,13 +1090,19 @@ jobs:
 Requirements every app meets (the pipeline detects them; the repo provides them):
 
 - **Node 24** everywhere; `package.json` declares `"engines": { "node": ">=24" }`.
-- **Tests exist and are the gate.** `package.json` has a working `test`
-  script — the fleet default is `node --test 'tests/*.test.js'`, zero-dep,
-  suites in `tests/`. An app with nothing else testable still carries
-  structural gates (every JS file parses, index.html references resolve,
-  sw.js precache entries exist, JSON manifests parse). The pipeline's own
-  floor (`node --check` over tracked JS) only exists so a brand-new repo
-  can't deploy untested before its first suite lands.
+- **Tests exist, live in `tests/`, and are the gate.** `package.json` has a
+  working `test` script — the fleet default is `node --test 'tests/*.test.js'`,
+  zero-dep. (si-syn runs vitest and sow-duku runs a browser-suite runner;
+  the requirement is that suites exist in `tests/` and gate the deploy, not
+  that every app share one framework.)
+- **Every app carries `tests/repo-gates.test.js`**, the shared structural
+  suite: every tracked JS and JSON file parses, every local `index.html`
+  reference resolves, every `sw.js` precache entry exists, and
+  `manifest.json` icons resolve. It is discovery-driven and identical
+  across repos — copy it as-is; it tests whatever the repo actually has.
+  This is the floor an app with no game-logic suite still meets. (The
+  pipeline's own `node --check` fallback exists only so a brand-new repo
+  can't deploy untested before this file lands.)
 - **The deploy artifact is always `dist/`.** An app with a `build` script
   must produce it. Every other app gets the standard staging: tracked files
   minus the dev set — `.github/`, `.claude/`, `tests/`, `test/`, `docs/`,
