@@ -1,0 +1,160 @@
+# The fleet CI/CD standard — one pipeline, every arcade app.
+#
+# Each app repo carries a thin caller (see GAME_INTEGRATION.md §CI) that
+# `uses:` this workflow @main. Change the pipeline here and the whole fleet
+# follows on its next run; nothing is copy-pasted into app repos, so nothing
+# drifts.
+#
+# Shape: a `test` job gates a `deploy` job. Pull requests run the gate and
+# never deploy; pushes to main deploy only after the gate passes. Apps opt
+# into extras through inputs instead of forking the pipeline.
+
+name: Fleet CI & Deploy
+
+on:
+  workflow_call:
+    inputs:
+      launcher:
+        description: >-
+          Check out the arcade launcher inside the workspace (exported as
+          ARCADE_LAUNCHER) for suites that stage the launcher-and-game
+          origin, and run `npm run acceptance` (the launcher's integration
+          checklist) after the app's own tests.
+        type: boolean
+        default: false
+      browsers:
+        description: >-
+          Playwright browsers the test tier needs, space-separated
+          (e.g. "chromium webkit"). Empty skips the browser install.
+        type: string
+        default: ""
+      version_bump:
+        description: >-
+          Auto-bump the patch version on each deploy — package.json,
+          manifest.json start_url cache-buster, and the version badge in
+          index.html — and push the commit back. The caller must grant
+          `contents: write`.
+        type: boolean
+        default: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      ARCADE_LAUNCHER: ${{ inputs.launcher && format('{0}/.launcher', github.workspace) || '' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check out the launcher beside the app
+        if: ${{ inputs.launcher }}
+        uses: actions/checkout@v5
+        with:
+          repository: paulgibeault/paulgibeault.github.io
+          path: .launcher
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then npm ci
+          elif [ -f package.json ]; then npm install
+          fi
+          if [ -n "$ARCADE_LAUNCHER" ]; then (cd "$ARCADE_LAUNCHER" && npm ci); fi
+
+      - name: Install Playwright browsers
+        if: ${{ inputs.browsers != '' }}
+        # Each checkout pins its own Playwright; installing for both sides of
+        # a launcher-staged run only costs a download on a version mismatch.
+        run: |
+          npx playwright install --with-deps ${{ inputs.browsers }}
+          if [ -n "$ARCADE_LAUNCHER" ]; then
+            (cd "$ARCADE_LAUNCHER" && npx playwright install --with-deps chromium)
+          fi
+
+      - name: Test
+        # The gate. An app with a test script runs it; an app without one
+        # gets the floor gate — every tracked JS file must at least parse.
+        # Nothing deploys untested, and adding a real suite later needs no
+        # workflow change.
+        run: |
+          if [ -f package.json ] && \
+             [ "$(node -p 'Boolean(require("./package.json").scripts?.test)')" = "true" ]; then
+            npm test
+          else
+            echo "No test script — syntax-checking every tracked JS file"
+            git ls-files '*.js' '*.mjs' | while read -r f; do
+              echo "checking $f"
+              node --check "$f"
+            done
+          fi
+
+      - name: Arcade integration acceptance
+        if: ${{ inputs.launcher }}
+        run: npm run acceptance
+
+  deploy:
+    needs: test
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Bump patch version
+        if: ${{ inputs.version_bump }}
+        run: |
+          CURRENT=$(node -p "require('./package.json').version")
+          NEW=$(node -e "
+            const [maj,min,pat] = '$CURRENT'.split('.').map(Number);
+            console.log(maj+'.'+min+'.'+(pat+1));
+          ")
+          node -e "
+            const fs = require('fs');
+            const p = JSON.parse(fs.readFileSync('package.json'));
+            p.version = '$NEW';
+            fs.writeFileSync('package.json', JSON.stringify(p, null, 2)+'\n');
+          "
+          node -e "
+            const fs = require('fs');
+            const m = JSON.parse(fs.readFileSync('manifest.json'));
+            m.start_url = './index.html?v=$NEW';
+            fs.writeFileSync('manifest.json', JSON.stringify(m, null, 2)+'\n');
+          "
+          sed -i "s/v[0-9]\+\.[0-9]\+\.[0-9]\+/v$NEW/g" index.html
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json manifest.json index.html
+          git diff --cached --quiet || git commit -m "chore: auto-bump to v$NEW [skip ci]"
+          git push
+          echo "Bumped $CURRENT → $NEW"
+
+      - name: Build
+        # Apps with a build script publish its output (dist/); static apps
+        # publish the checkout as-is. Detected, not declared, so an app can
+        # grow a build step without touching its workflow.
+        run: |
+          if [ -f package.json ]; then
+            if [ -f package-lock.json ]; then npm ci; else npm install; fi
+            npm run build --if-present
+          fi
+
+      - name: Resolve artifact path
+        id: artifact
+        run: echo "path=$([ -d dist ] && echo dist || echo .)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ steps.artifact.outputs.path }}
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

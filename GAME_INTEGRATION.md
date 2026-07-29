@@ -1052,6 +1052,60 @@ pre-deploy script if you want regression coverage.
 
 ---
 
+## 13a. CI/CD — the fleet standard
+
+Every app deploys through one shared pipeline,
+[`.github/workflows/fleet-ci.yml`](.github/workflows/fleet-ci.yml) in this
+repo: a `test` job gates a `deploy` job, pull requests run the gate but never
+deploy, and pushes to `main` deploy to GitHub Pages only after the gate
+passes. An app repo carries nothing but this thin caller at
+`.github/workflows/pages.yml`:
+
+```yaml
+# Thin caller for the fleet CI/CD standard. The pipeline lives in the
+# launcher repo (fleet-ci.yml); change it there and every app follows.
+name: CI & Deploy Pages
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Per-ref, so a PR run never cancels main's deploy.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fleet:
+    uses: paulgibeault/paulgibeault.github.io/.github/workflows/fleet-ci.yml@main
+```
+
+Conventions the pipeline assumes (all detected, none configured):
+
+- **Node 24** everywhere.
+- **`npm test` is the gate.** No test script yet? Every tracked `.js`/`.mjs`
+  file must at least parse (`node --check`) — nothing deploys untested.
+- **`npm run build` → `dist/` if present**, otherwise the repo root is the
+  deploy artifact as-is.
+- **GitHub Pages source must be "GitHub Actions"** (Settings → Pages), not
+  "deploy from branch" — otherwise the legacy Jekyll build races this one.
+
+Opt-in inputs for apps that need more (pass under `with:` in the caller):
+`launcher: true` checks the launcher out inside the workspace (exported as
+`ARCADE_LAUNCHER`) and runs `npm run acceptance` after the app's tests;
+`browsers: "chromium webkit"` installs Playwright browsers for the test
+tier; `version_bump: true` auto-bumps the patch version on each deploy
+(requires `contents: write` in the caller's permissions).
+
+---
+
 ## 14. Reference
 
 - Platform design: [ARCADE_PLATFORM.md](ARCADE_PLATFORM.md)
