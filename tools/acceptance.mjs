@@ -230,13 +230,14 @@ async function runPerGame() {
             gameKeys.length > 0,
             gameKeys.length ? '' : `keys: ${allKeys.slice(0, 6).join(', ')}`);
 
-        // 4 — no legacy non-namespaced keys
-        // Allowlist: launcher's pre-migration fontScale fallback.
+        // 4 — nothing lands outside the arcade.v1.* namespace
+        // Allowlist: 'fontScale' — the launcher's own un-namespaced fallback
+        // key (index.html reads it beside arcade.v1.global.fontScale).
         const ALLOW = new Set(['fontScale']);
         const stragglers = allKeys.filter(
             (k) => k && !k.startsWith('arcade.v1.') && !ALLOW.has(k)
         );
-        record(4, 'no legacy non-namespaced keys remain',
+        record(4, 'no non-namespaced keys written',
             stragglers.length === 0,
             stragglers.length ? `stragglers: ${stragglers.join(', ')}` : '');
 
