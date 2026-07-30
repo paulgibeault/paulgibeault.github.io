@@ -263,21 +263,11 @@ for arg in "$@"; do
 done
 
 # ─── start server ──────────────────────────────────────────────────────
-python3 - "$PORT" "$STAGE_DIR" > "$LOG_FILE" 2>&1 <<'PYSRV' &
-import functools, http.server, sys
-# Cache-Control: no-store — Safari's heuristic caching over a header-less
-# python http.server served a STALE module during live debugging twice.
-# ACAO * — game iframes are sandboxed OPAQUE-origin (no allow-same-origin),
-# so their module scripts / fetch()es arrive as CORS requests with
-# Origin: null; GitHub Pages sends this header in production, match it here.
-class NoStore(http.server.SimpleHTTPRequestHandler):
-    def end_headers(self):
-        self.send_header('Cache-Control', 'no-store')
-        self.send_header('Access-Control-Allow-Origin', '*')
-        super().end_headers()
-http.server.ThreadingHTTPServer(('127.0.0.1', int(sys.argv[1])),
-    functools.partial(NoStore, directory=sys.argv[2])).serve_forever()
-PYSRV
+# The no-store/ACAO handler lives in tools/dev-server.py — shared with the
+# .claude/launch.json preview entries so BOTH dev flows send the same
+# headers (a header-less python http.server served stale modules during
+# live debugging more than once; see the script's header comment).
+python3 "$LAUNCHER_DIR/tools/dev-server.py" "$PORT" "$STAGE_DIR" > "$LOG_FILE" 2>&1 &
 NEW_PID=$!
 echo "$NEW_PID" > "$PID_FILE"
 
