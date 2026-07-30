@@ -577,11 +577,18 @@ A bounded LRU map of recently-played games, all kept mounted, toggled via `hidde
 
 **Cap policy:**
 - Default cap is **2** — keeps back-and-forth between two games instant (the common case) without unbounded growth as the catalog expands.
-- User-tunable via the *Keep in Memory* numeric input in the launcher menu. The user types any positive integer; the launcher clamps to `[1, gameCount]` where `gameCount` is the number of launcher buttons. A value at the cap (e.g. `5` when the catalog has 5 games) effectively disables eviction. Persisted at `arcade.v1.global.poolCap`.
+- User-tunable via the *Open Games* numeric input in the launcher menu. The user types any positive integer; the launcher clamps to `[1, gameCount]` where `gameCount` is the number of launcher buttons. A value at the cap (e.g. `5` when the catalog has 5 games) effectively disables eviction. Persisted at `arcade.v1.global.poolCap`.
 - The active game is **never** evicted, even at cap=1.
 - Lowering the cap trims excess entries immediately, not on the next launch.
 
 **What survives eviction:** persistent state is in `arcade.v1.<gameId>.*` localStorage and is untouched. A re-launched game does a fresh load and restores user-visible progress via the SDK's normal init path. Only in-memory state (audio decode buffers, scroll position, ephemeral UI state) is lost.
+
+**Warm-pool chrome (live surfaces):** the pool's shape is visible in two places, both re-rendered from `arcade-pool.js`'s `onPoolChanged` notification (fired on mount, eviction, active-game change, and label change; behavior contract: `tools/tabs-acceptance.mjs`):
+
+- **Launcher grid** — a tile whose game is mounted glows (`.launcher-btn--live`) and carries a pulsing **LIVE** badge: relaunching that game is instant.
+- **Game topbar tabs** — every in-memory app renders as a tab (`#game-topbar-tabs`, left of the hamburger), so the tab count always matches *Open Games*. A game with a catalog `icon` renders an icon-only tab; otherwise the tab shows its label — the app-set title (`Arcade.ui.setTitle`) when present, else the catalog name (icon tabs surface the label via `title`/`aria-label`). The active game's tab is highlighted (`aria-current`) and inert; clicking any other tab is a warm `showGame` switch — no remount, no loading veil.
+
+An actual live *snapshot* on the tile is deliberately not attempted: game frames are sandboxed with an opaque origin, and a parent document cannot rasterize a cross-origin iframe. A thumbnail would need SDK cooperation (the game capturing its own canvas and posting it) — an SDK feature, not launcher chrome.
 
 **Why this matters:** WebGL contexts are a limited resource per page (browsers may drop the oldest if too many are alive); hidden iframes that haven't implemented `onSuspend` correctly keep burning CPU/battery. The cap bounds both costs regardless of catalog size and protects against misbehaving games.
 

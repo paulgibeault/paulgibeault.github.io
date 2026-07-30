@@ -12,6 +12,7 @@
       "id": "bridge-test",
       "name": "Bridge Test",
       "subtitle": "CI fixture",
+      "icon": "/images/icon-192.png",
       "url": "/tools/fixtures/bridge-test/"
     },
     {

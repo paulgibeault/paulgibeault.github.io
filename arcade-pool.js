@@ -45,6 +45,14 @@ export function initIframePool(host) {
     // launcher are made only for these.
     const helloedGames = new Set();
     const helloListeners = []; // fn(gameId) — fired when a game completes hello (config delivery seam)
+    // Pool-shape subscribers (launcher live badges + topbar tabs): fired when
+    // the mounted set, the active game, or a pool entry's label changes. A
+    // notification carries no payload — listeners re-read through the pool
+    // API, so they can never hold a frame handle.
+    const poolChangeListeners = [];
+    function notifyPoolChanged() {
+        for (const fn of poolChangeListeners) { try { fn(); } catch (e) {} }
+    }
     let activeGameId = null;
     const POOL_CAP_DEFAULT = 2;
 
@@ -97,6 +105,7 @@ export function initIframePool(host) {
             // UI bridge state (quit hook) dies with the frame — a fresh
             // mount re-registers after its handshake.
             host.clearGameUi(lruId);
+            notifyPoolChanged();
         }
     }
 
@@ -173,6 +182,7 @@ export function initIframePool(host) {
         // Defer focus so the iframe receives keyboard input.
         setTimeout(() => { try { entry.iframe.focus(); } catch (e) {} }, 0);
         setAppFragment(gameId);
+        notifyPoolChanged();
     }
 
     function hideGameView() {
@@ -187,6 +197,7 @@ export function initIframePool(host) {
             postToIframe(previousGameId, { type: 'arcade:lifecycle.suspend' });
         }
         setAppFragment(null);
+        notifyPoolChanged();
     }
 
     // ---- game loading / error overlay (G-ux-1) ----
@@ -279,6 +290,8 @@ export function initIframePool(host) {
         if (gameId === activeGameId) {
             topbarTitle.textContent = entry.customTitle || entry.name || "Paul's Arcade";
         }
+        // A suspended frame's custom title is its tab label — keep tabs fresh.
+        notifyPoolChanged();
     }
 
     return {
@@ -305,7 +318,11 @@ export function initIframePool(host) {
         getActiveGameId: () => activeGameId,
         getGameName: (gameId) => { const e = pool.get(gameId); return e ? (e.name || '') : ''; },
         // name + src for toast/relaunch affordances — never the entry itself,
-        // so nothing outside this module can touch a frame handle.
-        getGameInfo: (gameId) => { const e = pool.get(gameId); return e ? { name: e.name, src: e.src } : null; }
+        // so nothing outside this module can touch a frame handle. `label` is
+        // the tab-facing display name (app-set title wins over catalog name).
+        getGameInfo: (gameId) => { const e = pool.get(gameId); return e ? { name: e.name, src: e.src, label: e.customTitle || e.name } : null; },
+        // Subscribe to pool-shape changes (mount/evict/active/label) — the
+        // launcher's live-tile badges and topbar tabs re-render on this.
+        onPoolChanged: (fn) => { poolChangeListeners.push(fn); return () => { const i = poolChangeListeners.indexOf(fn); if (i >= 0) poolChangeListeners.splice(i, 1); }; }
     };
 }
