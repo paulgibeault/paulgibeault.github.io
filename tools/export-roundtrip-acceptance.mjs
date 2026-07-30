@@ -81,9 +81,14 @@ try {
     }, GID);
 
     // ── Export (capture download) ──
+    // The export form lives inside the Game Data dialog; defaults are
+    // "Everything (whole arcade)" + no passphrase = the plain full export.
     const [dl] = await Promise.all([
         page.waitForEvent('download'),
-        page.evaluate(() => document.getElementById('btn-save').click()),
+        page.evaluate(() => {
+            window.__arcade.backupDialog.open();
+            document.getElementById('backup-export-run').click();
+        }),
     ]);
     const bundle = JSON.parse(await readFile(await dl.path(), 'utf8'));
     check('export bundle is schema v2', bundle.schemaVersion === 2, 'got ' + bundle.schemaVersion);

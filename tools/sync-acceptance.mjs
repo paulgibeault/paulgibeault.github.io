@@ -451,8 +451,8 @@ try {
     // 7. THE 'arcade-sync' IDB EXISTS ON A DEVICE THAT SYNCED, AND IS ABSENT
     //    FROM A SAVE EXPORT (structural exclusion is unit-tested in
     //    sync-unit's STORE_DB_RE assertion; this proves the browser-visible
-    //    half end-to-end since export-roundtrip-acceptance.mjs's #btn-save
-    //    click + download-capture pattern is cheap to reuse here).
+    //    half end-to-end — exportSave() + the download-capture pattern; the
+    //    dialog UI itself is proven in export-roundtrip-acceptance.mjs).
     {
         console.log("\n  ['arcade-sync' IDB exists after syncing; never appears in a save export]");
         const s = await freshPair('F');
@@ -467,7 +467,7 @@ try {
 
         const [dl] = await Promise.all([
             s.H.waitForEvent('download'),
-            s.H.evaluate(() => document.getElementById('btn-save').click())
+            s.H.evaluate(() => window.__arcade.save.exportSave())
         ]);
         const bundle = JSON.parse(await readFile(await dl.path(), 'utf8'));
         const bundleStr = JSON.stringify(bundle);
@@ -509,7 +509,7 @@ try {
         // B's save export — the bundle's journal must carry the tombstone.
         const [dl] = await Promise.all([
             s.J.waitForEvent('download'),
-            s.J.evaluate(() => document.getElementById('btn-save').click())
+            s.J.evaluate(() => window.__arcade.save.exportSave())
         ]);
         const bundleJson = await readFile(await dl.path(), 'utf8');
         const bBundle = JSON.parse(bundleJson);

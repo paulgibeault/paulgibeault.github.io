@@ -19,9 +19,9 @@ implementer's checklist.
 
 **The authoritative game list is [`catalog.json`](catalog.json).** The launcher
 grid, the profile page's game cards, and the service worker's icon precache all
-render from it — the old hand-mirrored copies are gone.
+render from it.
 
-**Registering a new game** takes exactly three steps, none of them HTML edits:
+**Registering a new game** takes exactly two steps, no HTML edits:
 
 1. Add one entry to `catalog.json`: `id`, `name`, `subtitle`, `icon`
    (`/<gameId>/icon.png`), `url` (root-relative, `/<gameId>/`), plus an
@@ -33,7 +33,9 @@ render from it — the old hand-mirrored copies are gone.
    make sure the icon ends up in the published output (a repo-root file that
    never reaches `dist/` is the way this goes wrong). The launcher degrades to
    a text-only tile if it 404s.
-3. Bump `CACHE_NAME` in `sw.js` so installed launchers refresh their precache.
+
+Nothing to bump: fleet CI stamps `sw.js`'s `APP_VERSION` on every launcher
+deploy, so installed launchers pick up the new catalog automatically.
 
 **Deep links.** `https://paulgibeault.github.io/#app=<gameId>` boots the
 launcher straight into that game — ids resolve only through `catalog.json`
@@ -53,11 +55,10 @@ Drop two lines into `<head>` of `index.html`, before any game script that touche
 ```
 
 Use the **major-pinned** path (`/sdk/v3/...`): it keeps serving SDK v3 even
-after a breaking v4 ships, so a launcher deploy can never brick a game that
-hasn't migrated. `/arcade-sdk.js` is the evergreen alias (always the newest
-major) — existing games loading it keep working, but new integrations should
-pin. Within a major, launcher↔SDK feature compatibility is negotiated at
-runtime by `welcome.caps`, never by version numbers.
+after a breaking v4 ships, so a launcher deploy can never brick a game still
+on v3. `/arcade-sdk.js` is the evergreen alias (always the newest major) —
+integrations should pin. Within a major, launcher↔SDK feature compatibility
+is negotiated at runtime by `welcome.caps`, never by version numbers.
 
 Use a **root-relative** URL, not the absolute
 `https://paulgibeault.github.io/...` form. Both work in production, but
@@ -93,12 +94,10 @@ hydrate synchronously before init returns. But write for the framed contract:
 a pre-ready `state.set` whose key turns out to exist in stored state is
 DISCARDED in favor of the stored value (so an early `getOrInit` default can
 never clobber a real save) — another reason boot code belongs after `ready`.
-`Arcade.state.migrate(...)` may be called before `ready` (the SDK defers the
-callback until the snapshot arrives when framed).
 
 `Arcade.context.framed` is stable at `ready` for launcher mounts (sandboxed
 frames wait a full 2 s for the welcome, and the launcher answers in
-milliseconds). The one residual race is a legacy same-origin embed whose
+milliseconds). The one residual race is a same-origin embed whose
 welcome loses the 300 ms standalone timeout — if that happens, `framed` flips
 after `ready` and `Arcade.onFramedChange(fn)` fires with the new value, so a
 game that branches on `framed` at boot can re-run that branch instead of
@@ -106,14 +105,16 @@ missing the flip.
 
 ---
 
-## 3. Storage — migrate to namespaced keys
+## 3. Storage — namespaced keys
 
-The launcher's save/load file only round-trips keys that match
-`arcade.v1.<gameId>.<key>` (and `arcade.v1.global.<key>`). Anything else is
-silently dropped on import, so old keys won't survive a cross-device save.
+All game state lives under `arcade.v1.<gameId>.<key>` (and
+`arcade.v1.global.<key>` for genuinely shared values) — the save/export
+bundle only round-trips keys matching that shape, and anything else is
+silently dropped on import. The SDK enforces the namespace for you; never
+touch `localStorage` directly.
 
-- [ ] Replace `localStorage.getItem('foo')` with `Arcade.state.get('foo')`.
-- [ ] Replace `localStorage.setItem('foo', JSON.stringify(v))` with `Arcade.state.set('foo', v)` (the SDK handles JSON).
+- [ ] Read with `Arcade.state.get('foo')` — never `localStorage.getItem`.
+- [ ] Write with `Arcade.state.set('foo', v)` — the SDK handles JSON encoding.
 - [ ] Use `Arcade.state.getOrInit('settings', DEFAULTS)` instead of hand-rolling deep-merge-with-defaults.
 - [ ] Use `Arcade.global.*` only for things genuinely shared across games (e.g. a theme preference). Default to `Arcade.state.*`.
 - [ ] If the launcher imports a save while the game is open, re-read state:
@@ -149,84 +150,6 @@ silently dropped on import, so old keys won't survive a cross-device save.
   `Arcade.storage.estimate()` returns `{ usage, quota }` if you need to show it.
   (The launcher already calls `navigator.storage.persist()` on boot to keep the
   origin's data from being evicted under pressure.)
-
-### One-shot migration of legacy keys
-
-`Arcade.state.migrate(version, fn)` runs `fn` exactly once per `(gameId, version)`
-— the SDK records a sentinel at `arcade.v1.<gameId>._migrated.<version>` so
-subsequent loads skip.
-
-For the common "move one legacy key into the namespace" case,
-`Arcade.state.adopt(legacyKey, newKey?)` is a one-liner: it reads the legacy
-key, writes it under `arcade.v1.<gameId>.<newKey>` (JSON-parsing the old raw
-string unless you pass `{ json: false }`), and deletes the original — without
-clobbering an already-namespaced value:
-
-```js
-Arcade.state.migrate('v1', () => {
-    Arcade.state.adopt('myapp_settings', 'settings');
-    Arcade.state.adopt('myapp_save', 'savedGame');
-});
-```
-
-> **Framed caveat (pre-namespace legacy keys).** A legacy, non-namespaced key
-> lives in the *real* origin's `localStorage`, which an in-launcher (opaque-
-> origin) frame cannot read. `adopt()` detects this and does **not** let the
-> migration complete there — the SDK withholds the `_migrated` sentinel so the
-> move finishes on the next **standalone** visit to the game's own URL (where the
-> legacy data is reachable), instead of marking the migration done and orphaning
-> the save. Migrations that only touch already-namespaced `arcade.v1.*` keys work
-> identically framed or standalone. Do **not** call raw `localStorage.getItem`
-> inside a migration — it throws in a framed game; always go through `adopt()` /
-> `Arcade.state.*`.
-
-Version bumps *within* the namespace need no new machinery — use a fresh
-migrate sentinel and rewrite in place:
-
-```js
-Arcade.state.migrate('v2-board-shape', () => {
-    const s = Arcade.state.get('savedGame');
-    if (s && !Array.isArray(s.board)) Arcade.state.set('savedGame', upgradeBoard(s));
-});
-```
-
-For anything more involved (renamed score categories, per-mode splits), use
-the full form:
-
-```js
-Arcade.state.migrate('v1', () => {
-    // Guarded legacy read: raw localStorage THROWS in an opaque (framed) game.
-    // Throwing here is deliberate — it aborts the migration WITHOUT burning the
-    // _migrated sentinel, so it re-runs and completes on a standalone visit
-    // where the legacy keys are actually reachable (see the framed caveat above).
-    const readLegacy = (k) => {
-        try { return localStorage.getItem(k); }
-        catch (e) { throw new Error('legacy storage unreachable in a framed game — will complete standalone'); }
-    };
-    const dropLegacy = (k) => { try { localStorage.removeItem(k); } catch (e) {} };
-
-    // 1. Settings (raw object → namespaced). adopt() is the plain-move path and
-    //    already handles the framed defer itself.
-    Arcade.state.adopt('myapp_settings', 'settings');
-
-    // 2. Sticky player name → global
-    const name = readLegacy('myapp_player_name');
-    if (name) { Arcade.player.setName(name); dropLegacy('myapp_player_name'); }
-
-    // 3. Per-mode high scores → leaderboard API
-    for (const mode of ['arcade', 'chill', 'puzzle']) {
-        const raw = readLegacy(`myapp_highscores_${mode}`);
-        if (!raw) continue;
-        try {
-            const list = JSON.parse(raw);
-            if (Array.isArray(list)) {
-                for (const e of list) Arcade.scores.add(mode, e);
-            }
-        } catch (e) {}
-        dropLegacy(`myapp_highscores_${mode}`);
-    }
-});
-```
 
 ---
 
@@ -291,9 +214,8 @@ Ground rules:
 - **Both sides must opt in.** Sync only runs for a device pair the user
   enabled on BOTH devices (the 🔄 toggle in the launcher's Multiplayer
   dialog). Your opt-in list only marks which keys are eligible.
-- **Own-namespace keys only.** `global.*`, `_meta.*`, SDK sidecars, and the
-  legacy `.ls.` subtree never sync. `Arcade.store`/`Arcade.files` data does
-  not sync in v1.
+- **Own-namespace keys only.** `global.*`, `_meta.*`, and SDK sidecars never
+  sync. `Arcade.store`/`Arcade.files` data does not sync in v1.
 - **Values are capped at 64 KB** (JSON-encoded). Oversized values simply
   don't replicate (logged in dev mode) — keep synced keys small.
 - **Deletes replicate** (`Arcade.state.remove` on one device removes the key
@@ -318,7 +240,7 @@ Ground rules:
 - [ ] For a **single personal best per category** (best time for a mode, fewest moves, high percentage) — one value, not a ranked list — use `Arcade.records` rather than bending `scores`. `Arcade.records.best(category, { value, direction, format?, label? })` writes only when the value improves; `direction` is `'higher'` (scores) or `'lower'` (times, move counts), so the record is self-describing and the launcher's **Records** sheet can render it with no per-game code. This is the first-class replacement for the `scores.add(cat, { score: -timeMs })`-then-re-negate trick. `format` is `'duration-ms' | 'integer' | 'percentage'`. Read back with `Arcade.records.get(category)` / `Arcade.records.list()`.
   - **Which of the three?** `scores` = a sorted leaderboard with many entrants (top-N, names). `records` = one best-ever value per category, self-describing. `stats` = mutable counters/blobs (games played, streaks) that you own the formatting of.
 - [ ] For best-per-thing records (best time per board code, best score per level), stamp each entry with `key` and read back with `Arcade.scores.best(category, key)`. If you need a full keyed map rather than a ranked list, `Arcade.stats` is the blessed home — `Arcade.stats.update(category, prev => ({ ...prev, [boardCode]: bestMs }))`.
-- [ ] If your game tracks counters (games played / won / streak / best time), use `Arcade.stats.update(category, prev => next)` for atomic-style updates and `Arcade.stats.get(category)` to read. When adding a new field to an existing stats category, use `Arcade.stats.getOrInit(category, DEFAULTS)` instead of `get` — it deep-merges defaults under the stored value so saves from older versions pick up newly-added fields without a migration.
+- [ ] If your game tracks counters (games played / won / streak / best time), use `Arcade.stats.update(category, prev => next)` for atomic-style updates and `Arcade.stats.get(category)` to read. When adding a new field to an existing stats category, use `Arcade.stats.getOrInit(category, DEFAULTS)` instead of `get` — it deep-merges defaults under the stored value so existing saves pick up newly-added fields automatically.
 
 ---
 
@@ -342,7 +264,7 @@ every change. The SDK applies the visual ones to the game's `<html>` for free:
   Arcade.audio.play({ type: 'noise', dur: 0.2, gain: 0.15 });          // inline spec
   Arcade.audio.play([{ freq: 523, dur: 0.1 }, { freq: 784, dur: 0.1 }]); // timed sequence
   ```
-  spec = `{ type:'sine'|'square'|'sawtooth'|'triangle'|'noise', freq, toFreq?, dur, gain, attack?, release? }`. Fire-and-forget; silent + cheap when the user has muted (`audioVolume` 0). (Feature-detect on older launcher-served SDKs with `typeof Arcade.audio !== 'undefined'`.)
+  spec = `{ type:'sine'|'square'|'sawtooth'|'triangle'|'noise', freq, toFreq?, dur, gain, attack?, release? }`. Fire-and-forget; silent + cheap when the user has muted (`audioVolume` 0).
 
 - [ ] **Environmental sound → graph cues (SDK 3.6.0+).** A spec cue is one
   oscillator with an envelope. That palette is a chiptune synthesizer by
@@ -581,8 +503,8 @@ Arcade.ui.toast('Network down',   { kind: 'error', duration: 4000 });
 
 The sandbox **no-ops `window.confirm`/`prompt`** inside game frames, so the
 SDK provides real modals rendered by the launcher (#35). All of these need
-the launcher's `ui.bridge` capability (`Arcade.peer.caps()`); against an
-older launcher they resolve as if cancelled instead of hanging. Standalone,
+the launcher's `ui.bridge` capability (`Arcade.peer.caps()`); when the cap
+is absent they resolve as if cancelled instead of hanging. Standalone,
 each falls back to the native equivalent.
 
 ```js
@@ -666,15 +588,13 @@ Arcade.peer.status();              // 'unavailable' | 'idle' | 'connecting' | 'c
 Arcade.peer.onStatus(s => ...);    // gate multiplayer UI on this (your game's ATTACHED PARTY — see below)
 Arcade.peer.caps();                // launcher capability flags: feature-detect additive features
                                    // ('peer.sendTo', 'peer.roster', 'peer.meta', 'peer.party',
-                                   // 'storage.bridge', 'ui.bridge', 'configs.bridge'); [] standalone or older launcher
+                                   // 'storage.bridge', 'ui.bridge', 'configs.bridge'); [] standalone
 Arcade.peer.send({ move: 'e4' });  // broadcast; JSON-safe payload; false unless connected/interrupted
 Arcade.peer.send(hand, { to });    // targeted: only deviceId `to` receives it (cap 'peer.sendTo')
 Arcade.peer.onMessage((payload, fromPeer, meta) => ...);  // fromPeer = sender's stable deviceId;
                                    // meta = { relayed, to: 'me'|'all' } (cap 'peer.meta')
 
 Arcade.peer.self();                // { deviceId, name } for THIS device (null before first pairing)
-Arcade.peer.remote();              // DEPRECATED — most recently seen remote device, or null.
-                                   //   Single-peer helper; prefer peers() (roster, multi-seat aware).
 Arcade.peer.peers();               // [{ deviceId, name, status, direct }] — the multi-peer roster
 Arcade.peer.onPeersChange(r => ...);  // full roster on any join/leave/rename/status change
 Arcade.peer.onReady(({ deviceId }) => ...);  // remote has THIS game mounted & listening
@@ -823,10 +743,7 @@ const parsed = Arcade.share.decode(userInput);
 if (parsed && parsed.v === 2) load(parsed.data);
 ```
 
-`Arcade.random.seeded(seed)` remains as a legacy alias of the stateless
-variant; prefer `Arcade.rng`. Feature-detect on older launcher-served SDKs
-with `typeof Arcade.rng === 'function'` — everything here is purely local
-(no launcher messages involved).
+Everything here is purely local — no launcher messages involved.
 
 ---
 
@@ -893,14 +810,11 @@ anchor-triggered downloads from a sandboxed iframe.
 - [ ] No top-level navigation (`window.top.location = ...`) — it will be blocked.
 - [ ] No `window.open` to internal links; use in-game UI for help/about screens.
 - [ ] If the game requests fullscreen, request it on a user gesture only and target the game's own root element.
-- [ ] **Never touch `window.localStorage` / `indexedDB` / OPFS / `caches` directly in code that runs framed** — in an opaque-origin frame the property access itself throws `SecurityError`. Go through `Arcade.state/store/files`; wrap any unavoidable legacy probe in try/catch.
+- [ ] **Never touch `window.localStorage` / `indexedDB` / OPFS / `caches` directly in code that runs framed** — in an opaque-origin frame the property access itself throws `SecurityError`. Go through `Arcade.state/store/files`; wrap any unavoidable direct probe in try/catch.
 - [ ] ES modules and `fetch()`ed assets load fine framed — GitHub Pages (and the dev servers) send `Access-Control-Allow-Origin: *`, which opaque-origin CORS requests need.
 
 You do **not** need a postMessage storage shim — the SDK IS the shim when
-framed. If your game has a hand-rolled one (legacy from earlier protocol
-versions), delete it as part of the SDK adoption. (One older game once shipped such a shim; the launcher still answers the
-`ls-proxy-request`/`ls-proxy-response` protocol purely for backward
-compatibility — not a pattern to copy.)
+framed.
 
 ---
 
@@ -1052,7 +966,7 @@ A game is considered integrated when all of the following pass:
 - [ ] Loads inside the launcher iframe with no console errors.
 - [ ] `Arcade.context.framed === true` when launched from the launcher; `false` when opened directly.
 - [ ] At least one piece of game state writes to a key matching `arcade.v1.<gameId>.*` (verify in DevTools → Application → Local Storage).
-- [ ] No legacy non-namespaced keys remain after first load (your `Arcade.state.migrate('v1', ...)` ran successfully — check the `arcade.v1.<gameId>._migrated.v1` sentinel).
+- [ ] Nothing lands outside the namespace: after first load, every localStorage key the game wrote matches `arcade.v1.<gameId>.*`.
 - [ ] Launcher Save → exported JSON contains the game's keys; Launcher Load of that file restores them and the game reflects the restored state (after `onStateReplaced` or page reload).
 - [ ] Changing the launcher's font scale visibly resizes text in the game without a reload.
 - [ ] Switching to launcher view and back fires `onSuspend` then `onResume`; the game pauses while hidden and resumes cleanly.
@@ -1062,7 +976,7 @@ A game is considered integrated when all of the following pass:
 - [ ] Standalone URL (`https://paulgibeault.github.io/<gameId>/`) still works exactly as before.
 - [ ] Service worker (if any) does not intercept requests for the SDK (`/sdk/v3/arcade-sdk.js` / `/arcade-sdk.js`) or other launcher assets (no `[Arcade SDK]` warning in console).
 - [ ] `Arcade.peer.caps()` inside the launcher frame reports the full documented capability list (§14) — the caps contract arrived intact.
-- [ ] The game keeps working when a cap is absent (older launcher): gate every capability-backed feature on `Arcade.peer.caps()`, never assume the full list.
+- [ ] The game keeps working when a cap is absent: gate every capability-backed feature on `Arcade.peer.caps()`, never assume the full list.
 
 ### Automated check
 
@@ -1085,6 +999,11 @@ npm run acceptance -- http://127.0.0.1:4791/<gameId>/
 Output is one line per check (✓/✗) with a brief detail when something
 fails. Exit code is non-zero if any check fails — wire it into a per-game
 pre-deploy script if you want regression coverage.
+
+This checklist covers *your game's* integration. Testing the *platform
+itself* (launcher, save/backup/sync engines, P2P) is a separate, larger
+surface — see [TESTING.md](TESTING.md) in the launcher repo for the full CI
+gate and every local configuration.
 
 ---
 
@@ -1179,7 +1098,7 @@ Requirements every app meets (the pipeline detects them; the repo provides them)
   and every local `src`/`href` in `index.html` must exist in `dist/`, or
   the deploy fails instead of shipping a broken install.
 - **GitHub Pages source must be "GitHub Actions"** (Settings → Pages), not
-  "deploy from branch" — otherwise the legacy Jekyll build races this one.
+  "deploy from branch" — otherwise GitHub's default Jekyll build races this one.
 
 Opt-in inputs for apps that need more (pass under `with:` in the caller):
 `launcher: true` checks the launcher out inside the workspace (exported as
@@ -1206,7 +1125,7 @@ change the meaning of an existing message.
 
 All messages namespaced `arcade:`. Origin guard: launcher frames are
 opaque-origin, so the SDK pins the origin of the first `welcome` from
-`window.parent` and requires it on every later message (standalone/legacy
+`window.parent` and requires it on every later message (standalone/
 same-origin embeds keep the `origin === window.location.origin` rule). The
 launcher only acts on messages from iframes it mounted via the pool, and
 requires their origin to be the sandboxed literal `'null'`.
@@ -1226,7 +1145,7 @@ parent → child:  arcade:peer.status        { status }               // this ga
 parent → child:  arcade:peer.message       { payload, fromPeer, meta }  // fromPeer = sender deviceId;
                                            // meta = { relayed, to: 'me'|'all' }
 parent → child:  arcade:peer.roster        { peers }                // attached party's roster on any change
-parent → child:  arcade:peer.identity      { deviceId, name }       // roster update (legacy single-peer)
+parent → child:  arcade:peer.identity      { deviceId, name }       // single-entry roster update (peer.roster carries the full set)
 parent → child:  arcade:peer.ready         { deviceId, name }       // remote same-game listening
 parent → child:  arcade:peer.queue         { depth, limit, overflowed }
 child  → parent: arcade:peer.send          { payload, to? }         // to = target deviceId (targeted)

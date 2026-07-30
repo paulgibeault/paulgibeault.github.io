@@ -315,31 +315,15 @@
             </label>
         </div>
         <div class="launcher-menu__section">
-            <div class="launcher-menu__heading">Game Data</div>
             <button type="button" class="launcher-menu__item" id="menu-records" title="View leaderboards and personal records across every game on this device">
                 <span class="launcher-menu__item-icon" aria-hidden="true">🏆</span>
                 <span class="launcher-menu__item-label">Records</span>
             </button>
-            <button type="button" class="launcher-menu__item" id="btn-save" title="Export all arcade save data to a JSON file">
-                <span class="launcher-menu__item-icon" aria-hidden="true">↧</span>
-                <span class="launcher-menu__item-label">Export to File</span>
-            </button>
-            <button type="button" class="launcher-menu__item" id="btn-load" title="Import arcade save data from a JSON file">
-                <span class="launcher-menu__item-icon" aria-hidden="true">↥</span>
-                <span class="launcher-menu__item-label">Import from File</span>
-            </button>
-            <input type="file" id="file-load" accept="application/json,.json" style="display:none">
-            <button type="button" class="launcher-menu__item" id="btn-save-advanced" title="Export just one app, or encrypt the export with a passphrase">
-                <span class="launcher-menu__item-icon" aria-hidden="true">🔐</span>
-                <span class="launcher-menu__item-label">Export App / Encrypted…</span>
-            </button>
-            <button type="button" class="launcher-menu__item" id="btn-restore-local-backup" title="Restore the most recent automatic local backup stored on this device">
-                <span class="launcher-menu__item-icon" aria-hidden="true">🕑</span>
-                <span class="launcher-menu__item-label">Restore Last Backup</span>
-            </button>
-            <button type="button" class="launcher-menu__item" id="btn-choose-backup-folder" title="Choose a folder on this device for periodic dated backup exports (Chromium only)">
-                <span class="launcher-menu__item-icon" aria-hidden="true">📁</span>
-                <span class="launcher-menu__item-label" id="btn-choose-backup-folder-label">Backup Folder: Off</span>
+        </div>
+        <div class="launcher-menu__section">
+            <button type="button" class="launcher-menu__item" id="menu-backup" title="View, export, import, and restore your arcade save data">
+                <span class="launcher-menu__item-icon" aria-hidden="true">💾</span>
+                <span class="launcher-menu__item-label">Game Data…</span>
             </button>
         </div>
         <div class="launcher-menu__section">
@@ -506,6 +490,76 @@
         <footer class="records-dialog__footer">
             <button type="button" class="records-dialog__reset" id="records-dialog-reset" hidden>Reset all records for this game</button>
         </footer>
+    </div>
+</div>
+
+<!-- ========== GAME DATA DIALOG ========== -->
+<!-- The one Game Data menu item: view stored data, restore (automatic local
+     backup / file / trusted-peer backups stored here), one export form
+     (whole-arcade or per-app, optional passphrase), and the automatic-backup
+     controls. Static shell only — arcade-backup-ui.js renders the dynamic
+     parts; #btn-load/#file-load, #btn-restore-local-backup, and
+     #btn-choose-backup-folder keep their ids because arcade-save.js and
+     arcade-local-backup.js self-wire them exactly as they did when these
+     buttons lived in the menu. -->
+<div class="connections-dialog backup-dialog" id="backup-dialog" hidden>
+    <div class="connections-dialog__panel" role="dialog" aria-modal="true" aria-labelledby="backup-dialog-title">
+        <header class="connections-dialog__header">
+            <h2 id="backup-dialog-title">💾 Game Data</h2>
+            <button type="button" class="connections-dialog__close" id="backup-dialog-close" aria-label="Close">✕</button>
+        </header>
+        <div class="connections-dialog__scroll">
+
+            <p class="backup-dialog__status" id="backup-dialog-status" role="status">Checking automatic backups…</p>
+
+            <details class="backup-dialog__viewer" id="backup-view-data">
+                <summary>🔍 View stored data</summary>
+                <div class="backup-dialog__viewer-body" id="backup-view-data-body"></div>
+            </details>
+
+            <div class="launcher-menu__heading backup-dialog__heading">Restore</div>
+            <div class="backup-dialog__list">
+                <button type="button" class="backup-dialog__row" id="btn-restore-local-backup"
+                        title="Restore the most recent automatic backup stored on this device">
+                    <span class="backup-dialog__row-icon" aria-hidden="true">🕑</span>
+                    <span class="backup-dialog__row-label">Last automatic backup
+                        <span class="backup-dialog__row-meta" id="backup-local-when"></span></span>
+                </button>
+                <button type="button" class="backup-dialog__row" id="btn-load"
+                        title="Import arcade save data from a JSON file">
+                    <span class="backup-dialog__row-icon" aria-hidden="true">↥</span>
+                    <span class="backup-dialog__row-label">Import from file…</span>
+                </button>
+                <input type="file" id="file-load" accept="application/json,.json" style="display:none">
+                <div id="backup-restore-peers"></div>
+            </div>
+
+            <div class="launcher-menu__heading backup-dialog__heading">Export</div>
+            <form id="backup-export-form" class="backup-dialog__form">
+                <label class="backup-dialog__field" for="backup-export-scope">
+                    <span>What to export</span>
+                    <select id="backup-export-scope" class="backup-dialog__select">
+                        <option value="">Everything (whole arcade)</option>
+                    </select>
+                </label>
+                <label class="backup-dialog__field" for="backup-export-passphrase">
+                    <span>Passphrase <em>(optional — encrypts the file)</em></span>
+                    <input type="password" id="backup-export-passphrase" class="backup-dialog__input"
+                           autocomplete="new-password" placeholder="Leave blank for plain JSON">
+                </label>
+                <button type="submit" class="backup-dialog__run" id="backup-export-run">↧ Export to file</button>
+            </form>
+
+            <div class="launcher-menu__heading backup-dialog__heading">Automatic backups</div>
+            <p class="backup-dialog__hint">A snapshot of your arcade data is kept on this device
+                automatically about once a day; the newest few are kept. Restore the latest above.</p>
+            <button type="button" class="backup-dialog__row" id="btn-choose-backup-folder"
+                    title="Choose a folder on this device for periodic dated backup exports (Chromium only)">
+                <span class="backup-dialog__row-icon" aria-hidden="true">📁</span>
+                <span class="backup-dialog__row-label" id="btn-choose-backup-folder-label">Backup Folder: Off</span>
+            </button>
+
+        </div>
     </div>
 </div>
 
@@ -960,9 +1014,6 @@
         };
 
         const launcherGrid = document.getElementById('launcher-grid-container');
-        const btnSave = document.getElementById('btn-save');
-        const btnLoad = document.getElementById('btn-load');
-        const fileLoad = document.getElementById('file-load');
         const toast = document.getElementById('launcher-toast');
         const viewLauncher = window.__arcade.viewLauncher;
 
@@ -1919,6 +1970,7 @@
     import { initLeaderboards } from './arcade-leaderboard.js';
     import { initBackupEngine } from './arcade-backup.js';
     import { initLocalBackupEngine } from './arcade-local-backup.js';
+    import { initBackupDialog } from './arcade-backup-ui.js';
     import { initUiBridge } from './arcade-ui-bridge.js';
     import { validateToast, validateUiOp } from './arcade-envelope.js';
 
@@ -1985,6 +2037,19 @@
         showToast: storageHost.showToast
     });
     window.__arcade.localBackup.maybeSnapshot().catch(() => {});
+    // Game Data dialog (arcade-backup-ui.js): the one menu surface over the
+    // engines above — read-only viewer, restore list, export form. Wired
+    // after localBackup so every host capability already exists.
+    window.__arcade.backupDialog = initBackupDialog({
+        save: window.__arcade.save,
+        localBackup: window.__arcade.localBackup,
+        backup: window.__arcade.backup,
+        getCatalog: () => window.__arcade.catalog,
+        showToast: storageHost.showToast,
+        closeLauncherMenu: () => { if (window.__arcade.closeLauncherMenu) window.__arcade.closeLauncherMenu(); }
+    });
+    const menuBackupBtn = document.getElementById('menu-backup');
+    if (menuBackupBtn) menuBackupBtn.addEventListener('click', () => window.__arcade.backupDialog.open());
     storageHost.replayPendingStorageMessages();
 </script>
 
@@ -2382,7 +2447,7 @@
             const backupOn = peer.backupTarget === true;
             backupBtn.textContent = backupOn ? '💾' : '📴';
             backupBtn.title = backupOn
-                ? 'Backups are ON — this device keeps their last saves, yours back up to theirs — tap to turn off'
+                ? 'Backups are ON — this device keeps their last saves, yours back up to theirs — tap to turn off. Restore lives in menu → Game Data.'
                 : 'Backups are OFF — tap to back up to each other, no cloud (the other device will be asked to allow it)';
             backupBtn.setAttribute('aria-label', (backupOn ? 'Disable' : 'Enable') + ' peer backups for ' + displayName);
             backupBtn.addEventListener('click', () => {
@@ -2392,21 +2457,10 @@
             });
             if (!revoked) icons.appendChild(backupBtn);
 
-            // Any peer that ever engaged the backup feature keeps its restore
-            // entry — turning the toggle off must not orphan generations
-            // already stored (the button toasts "no backups yet" when empty).
-            if (peer.backupTarget !== undefined) {
-                const restoreBtn = document.createElement('button');
-                restoreBtn.type = 'button';
-                restoreBtn.className = 'connections-row__icon-btn';
-                restoreBtn.textContent = '📥';
-                restoreBtn.title = 'Restore ' + displayName + '\'s latest backup stored on this device (if any)';
-                restoreBtn.setAttribute('aria-label', 'Restore the latest backup from ' + displayName);
-                restoreBtn.addEventListener('click', () => {
-                    if (window.__arcade.backup) window.__arcade.backup.restoreLatest(id).catch(() => {});
-                });
-                icons.appendChild(restoreBtn);
-            }
+            // Restoring a stored peer backup moved to the Game Data dialog's
+            // Restore section (arcade-backup-ui.js) — one restore surface for
+            // local, file, and peer backups. The toggle above stays here with
+            // the rest of the per-connection trust controls.
 
             const renameBtn = document.createElement('button');
             renameBtn.type = 'button';

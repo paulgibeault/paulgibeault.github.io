@@ -230,23 +230,30 @@ async function runPerGame() {
             gameKeys.length > 0,
             gameKeys.length ? '' : `keys: ${allKeys.slice(0, 6).join(', ')}`);
 
-        // 4 — no legacy non-namespaced keys
-        // Allowlist: launcher's pre-migration fontScale fallback.
+        // 4 — nothing lands outside the arcade.v1.* namespace
+        // Allowlist: 'fontScale' — the launcher's own un-namespaced fallback
+        // key (index.html reads it beside arcade.v1.global.fontScale).
         const ALLOW = new Set(['fontScale']);
         const stragglers = allKeys.filter(
             (k) => k && !k.startsWith('arcade.v1.') && !ALLOW.has(k)
         );
-        record(4, 'no legacy non-namespaced keys remain',
+        record(4, 'no non-namespaced keys written',
             stragglers.length === 0,
             stragglers.length ? `stragglers: ${stragglers.join(', ')}` : '');
 
         // 5 — launcher save → exported JSON contains game keys.
-        // #btn-save lives inside a collapsed menu; click via evaluate so we
-        // don't depend on Playwright's actionability checks for a button that
-        // becomes visible only after the user opens the menu.
+        // The export form lives inside the Game Data dialog; open it and
+        // submit with the defaults (Everything, no passphrase) via evaluate
+        // so we don't depend on Playwright's actionability checks.
         const dlPromise = page.waitForEvent('download', { timeout: 5_000 }).catch(() => null);
-        await page.evaluate(() => document.getElementById('btn-save')?.click());
+        await page.evaluate(() => {
+            window.__arcade.backupDialog?.open();
+            document.getElementById('backup-export-run')?.click();
+        });
         const dl = await dlPromise;
+        // Close the dialog again — later checks click page elements for real,
+        // and an open overlay would intercept them.
+        await page.evaluate(() => window.__arcade.backupDialog?.close());
         if (!dl) {
             record(5, 'launcher save → exported JSON contains game keys', false,
                 'save did not produce a download');

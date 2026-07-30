@@ -2,12 +2,12 @@
 //
 // tools/export-advanced-acceptance.mjs — end-to-end proof of the per-app +
 // passphrase-encrypted export flow (#29): a single real launcher page (no
-// P2P), driving the "Export App / Encrypted…" button through its two
-// window.__arcade.dialog prompts (scope, then passphrase), proving the
-// downloaded file is a real encrypted envelope, that decrypting it restores
-// ONLY the chosen app's data, that a wrong passphrase fails closed, and that
-// a checksum-mismatched plaintext file is a hard reject unless the user
-// explicitly confirms the override warning.
+// P2P), driving the Game Data dialog's export form (scope select + optional
+// passphrase field), proving the downloaded file is a real encrypted
+// envelope, that decrypting it restores ONLY the chosen app's data, that a
+// wrong passphrase fails closed, and that a checksum-mismatched plaintext
+// file is a hard reject unless the user explicitly confirms the override
+// warning.
 //
 //   node tools/export-advanced-acceptance.mjs
 //
@@ -84,19 +84,26 @@ try {
         await window.__ea.idbPut('arcade.v1.' + gidA + '.store.notes', 'note1', { text: 'hello-a' });
     }, { gidA: GID_A, gidB: GID_B });
 
-    // ── 1. Scoped + encrypted export via "Export App / Encrypted…" ──
+    // ── 1. Scoped + encrypted export via the Game Data dialog's form ──
+    // Scope options populate async on open — wait for both seeded apps
+    // before selecting, or the selectOption races the refresh.
+    await page.evaluate(() => window.__arcade.backupDialog.open());
+    await page.waitForFunction(({ gidA, gidB }) => {
+        const opts = [...document.getElementById('backup-export-scope').options].map((o) => o.value);
+        return opts.includes(gidA) && opts.includes(gidB);
+    }, { gidA: GID_A, gidB: GID_B }, { timeout: 8000 });
+    check('scope select lists both seeded apps', true);
     const [dl1] = await Promise.all([
         page.waitForEvent('download'),
         (async () => {
-            await page.evaluate(() => document.getElementById('btn-save-advanced').click());
-            const scopeMsg = await waitDialogMessage(page);
-            check('scope prompt lists both seeded apps', scopeMsg.includes(GID_A) && scopeMsg.includes(GID_B), scopeMsg);
-            await answerDialog(page, GID_A);
-            const passMsg = await waitDialogMessage(page);
-            check('passphrase prompt follows the scope prompt', passMsg.toLowerCase().includes('passphrase'), passMsg);
-            await answerDialog(page, PASSPHRASE);
+            await page.selectOption('#backup-export-scope', GID_A);
+            await page.fill('#backup-export-passphrase', PASSPHRASE);
+            await page.click('#backup-export-run');
         })()
     ]);
+    const passCleared = await page.$eval('#backup-export-passphrase', (el) => el.value);
+    check('passphrase field is cleared after the export', passCleared === '');
+    await page.evaluate(() => window.__arcade.backupDialog.close());
     const encPath = await dl1.path();
     const encBundle = JSON.parse(await readFile(encPath, 'utf8'));
     check('exported file is a real encrypted envelope', encBundle.format === 'pauls-arcade-save-enc' && encBundle.v === 1, JSON.stringify(Object.keys(encBundle)));
@@ -133,19 +140,18 @@ try {
     check('wrong passphrase does not re-prompt (single attempt, no retry loop)', dialogStillUp === false);
 
     // ── 4. Checksum-override: plain export, hand-edit, re-import ──
+    // Default form (Everything + blank passphrase) = the plain full export.
     const [dl2] = await Promise.all([
         page.waitForEvent('download'),
-        (async () => {
-            await page.evaluate(() => document.getElementById('btn-save-advanced').click());
-            await waitDialogMessage(page);
-            await answerDialog(page, ''); // blank scope = everything
-            await waitDialogMessage(page);
-            await answerDialog(page, ''); // blank passphrase = plaintext
-        })()
+        page.evaluate(() => {
+            window.__arcade.backupDialog.open();
+            document.getElementById('backup-export-run').click();
+        })
     ]);
+    await page.evaluate(() => window.__arcade.backupDialog.close());
     const plainPath = await dl2.path();
     const plainBundle = JSON.parse(await readFile(plainPath, 'utf8'));
-    check('blank scope + blank passphrase exports a plain, unscoped bundle',
+    check('default form (Everything, no passphrase) exports a plain, unscoped bundle',
         plainBundle.format !== 'pauls-arcade-save-enc' && !!plainBundle.data['arcade.v1.' + GID_A + '.state.progress']);
 
     const tamperedKey = 'arcade.v1.' + GID_A + '.state.progress';
