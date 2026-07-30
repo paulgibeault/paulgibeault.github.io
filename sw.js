@@ -24,65 +24,23 @@ const CACHE_NAME = `${CACHE_PREFIX}v${APP_VERSION}`;
 // Network-first timeout: on lie-fi, stop waiting on the network and serve the
 // cached shell/asset so first paint stays bounded.
 const NET_TIMEOUT_MS = 5000;
-const ASSETS_TO_CACHE = [
+// GENERATED, not maintained — tools/stage.mjs rewrites the region below from
+// the files this deploy actually publishes (tools/inject-precache.mjs). Adding
+// a module to the SDK no longer means remembering to list it here, which is
+// the edit the fleet kept forgetting. To publish something without caching it,
+// add it to PRECACHE_EXCLUDE in tools/stage.mjs.
+//
+// Game icons are still NOT part of this: they're derived from catalog.json at
+// install time (below), because they belong to the catalog rather than to the
+// artifact. Everything else the launcher ships is now listed automatically.
+//
+// What is checked in is a placeholder; loopback skips the worker entirely.
+// arcade:precache-begin
+const ASSETS = [
   './',
   './index.html',
-  './profile.html',
-  './styles.css',
-  './manifest.json',
-  './arcade-sdk.js',
-  './sdk/v3/arcade-sdk.js',
-  './arcade-audio.js',
-  './sdk/v3/arcade-audio.js',
-  './arcade-rng.js',
-  './arcade-p2p.js',
-  './arcade-pool.js',
-  './arcade-router.js',
-  './arcade-known-peers.js',
-  './arcade-diag.js',
-  './arcade-updates.js',
-  './arcade-storage-core.js',
-  './arcade-storage-bridge.js',
-  './arcade-save.js',
-  './arcade-sync-core.js',
-  './arcade-sync.js',
-  './arcade-leaderboard-core.js',
-  './arcade-leaderboard.js',
-  './arcade-configs-core.js',
-  './arcade-configs.js',
-  './arcade-envelope.js',
-  './arcade-backup-core.js',
-  './arcade-backup.js',
-  './arcade-local-backup-core.js',
-  './arcade-local-backup.js',
-  './arcade-backup-ui.js',
-  './arcade-ui-bridge.js',
-  './arcade-user-identity.js',
-  './arcade-catalog.js',
-  './arcade-records-core.js',
-  './arcade-records.js',
-  './catalog.json',
-  './p2p/p2p-addon.js',
-  './p2p/p2p-ui.js',
-  './p2p/p2p-core.js',
-  './p2p/sdp-codec.js',
-  './p2p/p2p-addon.css',
-  './p2p/rendezvous-crypto.js',
-  './p2p/rendezvous-carriers.js',
-  './p2p/rendezvous.js',
-  './p2p/rendezvous-episode-core.js',
-  './p2p/vendor/qrcode.min.js',
-  './p2p/vendor/html5-qrcode.min.js',
-  './images/icon-192.png',
-  './images/icon-512.png',
-  // Game icons are NOT listed here — they're derived from catalog.json at
-  // install time (below), so adding a game never means editing this file.
-  // These three belong to profile.html's non-arcade project cards, which
-  // stay hand-maintained.
-  './images/qrcodep2p.png',
-  './images/zibaldone.png',
-  './images/usai.png'
 ];
+// arcade:precache-end
 
 self.addEventListener('install', (event) => {
   // Deliberately NOT skipWaiting(). The new worker installs and waits; the
@@ -109,7 +67,7 @@ self.addEventListener('install', (event) => {
     // if any single request 404s (a renamed/removed file), which would strand
     // offline users on the previous version with no diagnostic. Per-asset
     // add() tolerates gaps and logs them.
-    await Promise.all([...ASSETS_TO_CACHE, ...icons].map((asset) =>
+    await Promise.all([...ASSETS, ...icons].map((asset) =>
       cache.add(asset).catch((e) => { console.warn('[sw] precache skipped', asset, e && e.message); })
     ));
   })());

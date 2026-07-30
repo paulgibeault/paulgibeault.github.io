@@ -37,14 +37,27 @@ node tools/run-ci.mjs p2p sync        # only stages whose name contains a substr
 SKIP_BROWSER=1 node tools/run-ci.mjs  # syntax + artifact + units only (no Playwright needed)
 ```
 
-Two curated lists inside `run-ci.mjs` shape the acceptance tier — check the
-source for the current membership:
+Nothing inside `run-ci.mjs` enumerates the acceptance tier. Every
+`tools/*-acceptance.mjs` runs, and the one behavior that varies is derived from
+the suite itself: a suite that imports `lib/p2p-test-harness.mjs` negotiates
+real WebRTC, so it retries up to 3 attempts (timing-sensitive under headless
+CI; a genuine regression fails all attempts). Anything else gets one attempt.
 
-- `FLAKY` — real-WebRTC suites retried up to 3 attempts (timing-sensitive
-  under headless CI; a genuine regression fails all attempts)
-- `NOT_YET_IN_CI` — suites that exist but are visibly skipped pending triage
-  (reported as `skipped:` in the summary, so they're excluded loudly, not
-  invisibly absent)
+Retries are therefore a property of what a suite *does*, not of a list someone
+remembered to update — the previous hand-kept list had drifted to five names
+while nine suites were on the harness.
+
+In CI (and only in CI), every other browser suite gets a single retry as well:
+shared runners vary enough between runs that a launcher boot which fits a wait
+budget at one moment misses double that budget minutes later. A genuine
+regression still fails every attempt. Locally there are no retries at all —
+flakiness at the desk should be loud enough to get studied, not absorbed.
+
+The one exception is `MANUAL_ONLY`: suites that pass locally but cannot run on
+CI hardware, skipped **only when `CI` is set** and always with the evidence
+written beside the entry (currently just `p2p-multiparty` — its relayed-gossip
+check starves on a 2-core runner). Locally, `npm test` still runs them; the CI
+summary prints each one with its reason, so the exclusion stays loud.
 
 ## Configuration B — units only: `npm run test:units`
 

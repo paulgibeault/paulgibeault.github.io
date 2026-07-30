@@ -8,17 +8,20 @@ addressed to other maintainers).
 
 | Issue | Theme | Severity |
 | ----- | ----- | -------- |
-| [#108 — WP3: spec-cue scheduler retirement path (cache turnover, SDK v4)](https://github.com/paulgibeault/paulgibeault.github.io/issues/108) | SDK lifecycle | MED |
-| [#113 — Five acceptance suites have never run in CI](https://github.com/paulgibeault/paulgibeault.github.io/issues/113) | CI coverage | HIGH |
 | [#114 — Nothing in CI asserts a game actually renders — a blank game ships green](https://github.com/paulgibeault/paulgibeault.github.io/issues/114) | CI coverage | MED |
-| [#120 — Docs finalization: GAME_INTEGRATION.md audit](https://github.com/paulgibeault/paulgibeault.github.io/issues/120) | Documentation | MED |
 | [#39 — SDK pattern-lift batch (tween/fx, canvas.autosize, SW template, guide, fmt, undo, …)](https://github.com/paulgibeault/paulgibeault.github.io/issues/39) | SDK ergonomics | LOW |
 
-(Closed since the last revision of this table: #17, #106, #107 — the security
-batch, the t=0 root-cause + fleet re-audition, and the WP2 graph packs all
-landed; the t=0 cause was Chromium's DynamicsCompressorNode warm-up, the
-renderer's 0.25 s section lead-in is the complete offline fix, documented on
-`createBus` in `arcade-audio.js`.)
+(Closed since the last revision of this table: #17, #106, #107, #108, #113,
+#120 — the security batch, the t=0 root-cause + fleet re-audition, the WP2
+graph packs, the spec-cue seam, the acceptance-tier coverage gap, and the docs
+finalization all landed.
+The t=0 cause was Chromium's DynamicsCompressorNode warm-up, the renderer's
+0.25 s section lead-in is the complete offline fix, documented on `createBus`
+in `arcade-audio.js`. #113 closed by deriving retry policy from the harness
+import rather than a hand-kept list, which switched all five suites on. #108
+closed without an SDK v4 cut: nothing queued needs a major, and what the work
+package was really holding — the cache-turnover criterion — is now the standing
+expand/migrate/contract playbook in GAME_INTEGRATION.md §2.)
 
 Historical context for all of the above: the eight-part platform review of
 2026-07-06, indexed in [plans/README.md](plans/README.md).
@@ -30,30 +33,22 @@ side* is what is blocked. Each names the condition, not a schedule: under the
 closed-fleet policy the framework side is deleted as soon as the app side merges
 and its acceptance passes, with no deprecation window.
 
-- **Retire the spec-cue (chiptune) audio engine.** `Arcade.audio.cue()` and the
-  spec form of `play()` are superseded by graph cues sharing one convolution
-  room. **All seven catalog apps now ship a graph pack** — the last three
-  landed 2026-07-28, joining the four approved earlier (the per-app rollout is
-  recorded in [#107](https://github.com/paulgibeault/paulgibeault.github.io/issues/107)).
-  What still holds this open
-  is the other half of the condition: every one of the seven also registers
-  spec cues on its **fallback path**, for a player on a service-worker cache
-  stale enough to be missing `/arcade-audio.js`. Those paths are the last
-  consumer of the spec-voice scheduler and they go when it does. When the
-  fleet's caches have turned over far enough to drop them, cut SDK v4 without
-  the spec-voice scheduler, move the fleet to it, and delete `sdk/v3/`.
-  **Pinning posture (decided 2026-07-30, #120/#108 item 1): the fleet loads
-  the EVERGREEN aliases** (`/arcade-sdk.js` + `/arcade-audio.js`) — all seven
-  apps; the one previously major-pinned app migrated off `/sdk/v3/` to match.
-  The closed fleet moves together at each major cut rather than pinning per
-  app; compatibility
-  inside a major stays runtime-negotiated by `welcome.caps`. Consequence for
-  the v4 cut above: the cut is sequenced WITH the fleet migration (evergreen
-  followers move the moment v4 ships), so the spec-cue fallback deletion and
-  the v4 deploy land as one coordinated change, gated on the cache-turnover
-  criterion.
-  Work package: [#108](https://github.com/paulgibeault/paulgibeault.github.io/issues/108).
-  Plan: [plans/decouple-game-names-2026-07.md](plans/decouple-game-names-2026-07.md) §3a.
+*(No open seams.)*
+
+The last entry here — "retire the spec-cue (chiptune) audio engine" — is gone
+rather than updated, because the condition it was waiting on stopped existing.
+It tracked framework code (`Arcade.audio.cue()` and the spec form of `play()`)
+blocked on apps migrating off it. Two things ended that: the fallback paths
+that were the last incidental consumers were deleted fleet-wide, and one app
+adopted the chiptune voice as its deliberate sound identity rather than as
+degraded mode. So the spec-cue engine has a real, permanent consumer and is not
+pending removal — there is nothing blocked, which is the only thing this
+section tracks.
+
+What remained of the work package was the pinning posture (decided: evergreen,
+§2) and the cache-turnover criterion, which is not a seam either — it is the
+standing playbook for cutting any major, now written down in
+GAME_INTEGRATION.md §2 rather than held open as a pending decision.
 
 ## Standing policy
 

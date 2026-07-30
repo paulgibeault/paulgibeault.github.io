@@ -12,6 +12,7 @@
 //
 //   stage(outDir) -> { outDir }   // produce the deploy artifact in outDir
 //   ROOT                          // repo root
+//   PRECACHE_EXCLUDE              // optional; published but not precached
 //
 // Three lists have to agree and none of them check each other: index.html's
 // tags, the service worker's precache list, and what the deploy publishes.
@@ -19,11 +20,21 @@
 // them — every file is obviously present in a checkout. So stage for real
 // and read what came out.
 //
+// Since stage() generates the precache list from the artifact
+// (tools/inject-precache.mjs), the old direction of that check — "every
+// precached file is published" — can no longer fail; it is now a property of
+// how the list is built. The direction that CAN still fail is the reverse,
+// and it is the one that actually strands players offline: a file the deploy
+// publishes and the worker never caches. That is asserted below, with
+// PRECACHE_EXCLUDE as the app's written-down list of deliberate omissions.
+//
 // Usage: node tools/verify-artifact.mjs [--keep <dir>]
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { stage, ROOT } from "./stage.mjs";
+import { artifactFiles, isExcluded } from "./inject-precache.mjs";
+import * as staging from "./stage.mjs";
+const { stage, ROOT } = staging;
 
 /** Literal local src/href targets — an expression built in JS isn't a filename. */
 function indexRefs(dir) {
@@ -63,6 +74,22 @@ export function verify(dir) {
   for (const entry of sw.entries) {
     // "" is "./" — the directory itself, served as index.html.
     if (!has(entry || "index.html")) bad.push(`sw.js precaches ./${entry}, the deploy drops it`);
+  }
+
+  // The reverse: a published file the worker never caches is a file that is
+  // there online and gone on a plane. Silent by construction — every gate the
+  // fleet had was green while a bundled entry point sat outside the cache —
+  // so the artifact is what gets asked, and the only accepted answer for a
+  // missing file is that the app declared it missing on purpose.
+  if (fs.existsSync(path.join(dir, "sw.js"))) {
+    const cached = new Set(sw.entries.map((e) => e || "index.html"));
+    const exclude = staging.PRECACHE_EXCLUDE || [];
+    for (const f of artifactFiles(dir)) {
+      if (f === "sw.js" || f.split("/").some((s) => s.startsWith("."))) continue;
+      if (cached.has(f) || isExcluded(f, exclude)) continue;
+      bad.push(`the deploy publishes ${f}, sw.js never caches it ` +
+        `(precache it, or name it in PRECACHE_EXCLUDE in tools/stage.mjs)`);
+    }
   }
   // The game↔launcher boundary, checked from whichever side this repo is on.
   // A game loads /arcade-sdk.js and /arcade-audio.js from the launcher origin

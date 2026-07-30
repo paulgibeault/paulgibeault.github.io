@@ -68,6 +68,34 @@ out — but that is the exception, not the standard. Within a major,
 launcher↔SDK feature compatibility is negotiated at runtime by
 `welcome.caps`, never by version numbers.
 
+**Cutting a new major, when one is ever needed.** Evergreen has a consequence
+worth writing down before it bites: because every app follows the alias, a
+breaking cut reaches the whole fleet the moment it deploys. There is no
+staggered rollout to hide behind and no per-app canary. What makes that safe is
+not a waiting period on the SDK — it is that the SDK is never the only thing
+that changed.
+
+Sequence it expand → migrate → contract:
+
+1. **Expand.** Ship the new behavior in the current major, alongside the old
+   one. Nothing breaks; both paths work.
+2. **Migrate.** Move every app onto the new path and deploy them. Each app is
+   compatible with the old and the new SDK at this point, so the order does not
+   matter and a straggler is not a broken game.
+3. **Wait for cache turnover.** A returning player runs the app shell their
+   service worker cached, which can lag the deploy by however long it takes
+   them to open the game again. Give it a couple of weeks past the last app
+   deploy — the point is not a magic number, it is that the shells in the wild
+   have all seen step 2 before the SDK stops serving step 1. There is no
+   backend to measure this from; GitHub Pages serves static files and the fleet
+   collects nothing, so the criterion is time, deliberately.
+4. **Contract.** Cut the major, delete the old path, deploy. Every app follows
+   the alias on its next load and every shell already speaks the new path.
+
+An app that genuinely cannot make step 2 in time is what the major-pinned
+escape hatch is for. Using it should be a decision someone writes down, not a
+default.
+
 Use a **root-relative** URL, not the absolute
 `https://paulgibeault.github.io/...` form. Both work in production, but
 root-relative also resolves correctly when a local-dev harness stages the
@@ -514,12 +542,19 @@ loop.running();          // is it currently scheduled?
 loop.dispose();          // detach lifecycle listeners when done for good
 ```
 
-> **Available, not yet exercised.** No catalog game runs on `Arcade.loop`
-> yet — the existing games' private particle/tween rAF loops are what block
-> adoption, and untangling those is one work package with the tween/fx lift
-> tracked in [#39](https://github.com/paulgibeault/paulgibeault.github.io/issues/39).
-> New games should start on it; it is exactly the suspend/delta bookkeeping
-> §6a asks for.
+`kick()` is the whole dirty-flag story: a renderer that is normally parked
+calls it to draw one frame after state changes, and `start()`/`stop()` switch
+it to continuous only while something is actually animating. There is no
+separate idle mode to reach for.
+
+> **This is the fleet standard, not an option.** Every catalog game with a
+> frame loop runs on `Arcade.loop`. Two things it buys that a hand-rolled loop
+> repeatedly failed to: `start()` is idempotent, so a wake-up path cannot stack
+> a second concurrent loop and orphan the first (that bug shipped, and doubled
+> one game's frame rate permanently after any restart); and one place owns the
+> suspend/resume legs, which is where the divergence lived — the fleet had a
+> game cancelling on `visibilitychange`, a game relying only on `onSuspend`,
+> and a game that never cancelled at all.
 
 For timers, `Arcade.session.setTimeout(fn, ms)` / `Arcade.session.setInterval(fn, ms)`
 freeze while suspended (remaining time is preserved and re-armed on resume)
@@ -579,7 +614,7 @@ launch is a **fresh page load**, identical to opening the standalone URL.
 Even before eviction, while a game sits hidden in the pool it should hold as
 little as possible:
 
-- [ ] Pause `requestAnimationFrame` loops in `onSuspend` (don't just skip rendering — cancel the rAF and re-request it in `onResume`).
+- [ ] Use `Arcade.loop` (§6a) rather than pausing a hand-rolled `requestAnimationFrame` loop in `onSuspend`. If you do hand-roll one, cancelling the rAF is the requirement — skipping the render inside a still-scheduled frame keeps holding an animation slot.
 - [ ] `audio.suspend()` your `AudioContext`. A suspended context still exists but stops the audio thread.
 - [ ] Release WebGL contexts you don't need. Browsers cap the number of live WebGL contexts per page; the launcher's pool can have several at once. If your game has multiple canvases, share one context, or call `loseContext()` on transient ones.
 - [ ] Clear `setInterval` / `setTimeout` chains on suspend; restart on resume. Forgotten intervals are the #1 source of battery drain in hidden iframes.
@@ -1023,15 +1058,50 @@ cleanup, and the wait-then-be-told-to-activate contract).
   not `APP_VERSION === package.json version`, which false-fails on any PR left
   open across a deploy.
 
-- [ ] **Bundled app? The precache list can't be hand-maintained.** A build
-  whose module graph deploys under content-hashed names has nothing stable to
-  list. The pattern: keep `sw.js` at the **repo root** (CI's version rewrite
-  only touches `./sw.js`), ship it into the artifact root from your build
-  config, precache only the shell and unhashed public assets, and let the
-  fetch handler's runtime fill cache each hashed asset on first use — after
-  one online visit the build is fully cached, and a new deploy's new hashes
-  miss the old cache by construction. Build-time precache injection is the
-  eventual fleet-wide replacement ([#39](https://github.com/paulgibeault/paulgibeault.github.io/issues/39)).
+- [ ] **Don't hand-maintain the precache list — generate it.** Give `sw.js` a
+  generated region and let `tools/stage.mjs` fill it from the artifact it just
+  staged:
+
+  ```js
+  // arcade:precache-begin
+  const ASSETS = [
+    './',
+    './index.html',
+  ];
+  // arcade:precache-end
+  ```
+
+  `tools/inject-precache.mjs` (identical fleet-wide) rewrites what is between
+  the markers; call it as the last step of `stage()`. What is checked in is a
+  placeholder — service workers are off on loopback, so a dev checkout never
+  reads it.
+
+  This is what makes a **bundled** app ordinary. A module graph deployed under
+  content-hashed names has nothing stable to hand-list, and the old workaround
+  — precache the shell, let runtime fill catch the rest — meant a player's
+  first visit had to be online. The generator already knows the hashed names,
+  because it reads the finished artifact. Keep `sw.js` at the **repo root**
+  (CI's version rewrite only touches `./sw.js`) and ship it into the artifact
+  root from your build config; nothing else differs.
+
+  To publish a file without caching it, export `PRECACHE_EXCLUDE` from
+  `tools/stage.mjs` — exact paths, `dir/` prefixes, or `*.ext` suffixes.
+  Diagnostics, provenance archives and licence text are the usual entries.
+  `verify-artifact.mjs` fails the build on any published file that is neither
+  precached nor named there, so an omission is a decision you write down rather
+  than one nobody notices.
+
+- [ ] **Precache with per-asset `add()`, not `addAll()`.** `addAll()` rejects
+  the entire install if any single entry 404s, so one missing file costs every
+  returning player their whole offline shell — silently. Catch per asset and
+  log; a gap should cost one file.
+
+- [ ] **Match the cache with `ignoreSearch`.** The generated list holds
+  filenames, which carry no query string. If your markup asks for a file with a
+  cache-busting `?v=` suffix, a strict match misses every time and falls
+  through to the network — an app that looks fully precached and is entirely
+  offline-broken. (Those suffixes are also redundant once CI owns
+  `APP_VERSION`: it keys the whole cache per deploy.)
 
 - [ ] **Don't `skipWaiting()` on install.** Let the new worker wait, and handle
   the `arcade:sw.skipWaiting` message instead:
@@ -1220,11 +1290,15 @@ Requirements every app meets (the pipeline detects them; the repo provides them)
 - **Every app proves its deploy artifact, using the same two files:**
   - `tools/verify-artifact.mjs` — **byte-identical in every repo, no
     exceptions.** Stages into a temp dir and asserts what came out: every
-    literal `index.html` reference, every `sw.js` precache entry and every
-    `manifest.json` icon is published; dev files are not. It is a plain
-    script rather than a test-framework file because the fleet runs three
-    different runners and all of them can call a script. Never edit one
-    copy — change the canonical file and re-copy it.
+    literal `index.html` reference and every `manifest.json` icon is
+    published, every published file is precached unless the app names it in
+    `PRECACHE_EXCLUDE`, and dev files are not published. It is a plain script
+    rather than a test-framework file because the fleet runs three different
+    runners and all of them can call a script. Never edit one copy — change
+    the canonical file and re-copy it.
+  - `tools/inject-precache.mjs` — **byte-identical in every repo**, called at
+    the end of `stage()`. Writes the worker's precache list from the staged
+    artifact, so the list cannot drift from what deploys.
   - `tools/stage.mjs` — **the only per-app part**, and the reason one
     verifier fits every repo. It exports `stage(outDir)` and `ROOT`, and
     the deploy job runs exactly this module; nothing re-implements staging
@@ -1257,9 +1331,10 @@ Requirements every app meets (the pipeline detects them; the repo provides them)
   `scratch/`, `tools/`, `scripts/`, `node_modules/`, package files,
   `.gitignore`, `go.sh`/`ago`, root `test_*` files, and any `.md`/`.py`/
   `.pid` — so dev files never ship to the public site.
-- **The artifact is verified before deploy**: every `sw.js` precache entry
-  and every local `src`/`href` in `index.html` must exist in `dist/`, or
-  the deploy fails instead of shipping a broken install.
+- **The artifact is verified before deploy**: every local `src`/`href` in
+  `index.html` must exist in `dist/`, and every file `dist/` publishes must be
+  precached or explicitly excluded — or the deploy fails instead of shipping a
+  broken install, or one that works online and breaks offline.
 - **GitHub Pages source must be "GitHub Actions"** (Settings → Pages), not
   "deploy from branch" — otherwise GitHub's default Jekyll build races this one.
 

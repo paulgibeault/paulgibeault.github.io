@@ -16,8 +16,15 @@ import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { injectPrecache } from "./inject-precache.mjs";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+// Published, deliberately not precached. The launcher's site IS the platform's
+// documentation, so prose ships and is linked — but a player offline wants the
+// arcade to boot, not the self-hosting guide, and precaching every doc would
+// spend their cache budget on reading material. Prose is fetched live.
+export const PRECACHE_EXCLUDE = ["*.md", "plans/", "docs/", "LICENSE", "NOTICE"];
 
 const EXCLUDE_DIRS = new Set([".github", ".claude", "node_modules",
   "tests", "test", "scratch", "tools", "scripts"]);
@@ -44,7 +51,10 @@ export function stage(outDir) {
     fs.copyFileSync(path.join(ROOT, f), path.join(out, f));
     staged++;
   }
-  return { outDir: out, staged, total: files.length };
+  // Last, so it sees the finished artifact — the precache list is written
+  // from what is actually about to deploy, not from what anyone believes is.
+  const precached = injectPrecache(out, { exclude: PRECACHE_EXCLUDE });
+  return { outDir: out, staged, total: files.length, precached: precached?.length ?? 0 };
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${path.resolve(process.argv[1])}`).href) {

@@ -19,21 +19,31 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const node = process.execPath;
 
-// Real-WebRTC negotiation is timing-sensitive under headless CI; these retry
-// so a transient hiccup doesn't fail the run. A genuine regression fails all
-// attempts.
-const FLAKY = new Set([
-  "p2p-acceptance.mjs", "p2p-multiseat-acceptance.mjs",
-  "p2p-reconnect-acceptance.mjs", "sync-acceptance.mjs", "backup-acceptance.mjs",
-]);
+// Real-WebRTC negotiation is timing-sensitive under headless CI; a suite that
+// negotiates retries so a transient hiccup doesn't fail the run. A genuine
+// regression fails all attempts.
+//
+// DETECTED, not enumerated — the same rule the artifact verifier follows. The
+// property that earns a retry is "drives peer connections through the shared
+// P2P harness", and the import is that property, so it is the test. A
+// hand-kept list drifts silently in the direction that hurts: it was five
+// names while NINE suites sat on the harness, so the four unlisted ones ran
+// with zero retries purely because nobody remembered to add them.
+const HARNESS = "lib/p2p-test-harness.mjs";
+const negotiates = (file) =>
+  fs.readFileSync(path.join(ROOT, "tools", file), "utf8").includes(HARNESS);
 
-// Acceptance suites that exist but have never run in CI. Listed explicitly so
-// they are visibly excluded rather than invisibly absent — they predate this
-// runner and need triage before being switched on (issue: fleet CI).
-const NOT_YET_IN_CI = new Set([
-  "configs-acceptance.mjs", "configs-p2p-acceptance.mjs",
-  "leaderboard-acceptance.mjs", "records-acceptance.mjs",
-  "p2p-multiparty-acceptance.mjs",
+// Suites that run locally but not in CI, each with the evidence for why.
+// This is enumeration-with-a-reason, which is different from the FLAKY list
+// this file used to carry: that was a drifting cache of a detectable property;
+// this is a decision, and the reason is the entry. An entry with a fixed
+// underlying cause gets deleted, not kept.
+const MANUAL_ONLY = new Map([
+  ["p2p-multiparty-acceptance.mjs",
+    "M8's relayed-identity-gossip wait times out on CI runners: device A sees " +
+    "indirect={} after 20s, 3/3 attempts (four Chromium instances on a 2-core " +
+    "runner), while the suite passes locally in ~11s. Until the gossip-under-" +
+    "load behavior is investigated, run it by hand: npm run p2p-multiparty"],
 ]);
 
 // Suites that need arguments rather than a bare invocation.
@@ -106,8 +116,16 @@ if (!process.env.SKIP_BROWSER) {
     .filter((f) => f.endsWith("-acceptance.mjs"))
     .sort();
   for (const f of suites) {
-    if (NOT_YET_IN_CI.has(f)) { results.push([f, "skipped"]); continue; }
-    run(f, [`tools/${f}`], { retries: FLAKY.has(f) ? 2 : 0 });
+    if (process.env.CI && MANUAL_ONLY.has(f)) { results.push([f, "skipped"]); continue; }
+    // Every suite here boots real launcher contexts in a real browser, and on
+    // shared CI runners the wall-clock for that varies wildly between runs —
+    // one evening the same branch saw a suite pass at a 10s wait, then miss a
+    // doubled 20s wait half an hour later, while a long-stable suite flapped
+    // beside it. One CI retry absorbs a degraded-runner episode; a genuine
+    // regression still fails both attempts. Locally there are no retries on
+    // purpose: at the desk, flakiness should be loud enough to get studied.
+    const retries = negotiates(f) ? 2 : (process.env.CI ? 1 : 0);
+    run(f, [`tools/${f}`], { retries });
   }
 } else {
   console.log("\nSKIP_BROWSER set — acceptance tier skipped");
@@ -118,7 +136,7 @@ const failed = results.filter(([, s]) => s === "FAIL");
 const skipped = results.filter(([, s]) => s === "skipped");
 console.log("\n" + "=".repeat(72));
 console.log(`${results.length - failed.length - skipped.length} passed, ${failed.length} failed` +
-  (skipped.length ? `, ${skipped.length} skipped (not yet in CI)` : ""));
-for (const [n] of skipped) console.log(`  skipped: ${n}`);
+  (skipped.length ? `, ${skipped.length} manual-only (skipped in CI)` : ""));
+for (const [n] of skipped) console.log(`  manual-only: ${n} — ${MANUAL_ONLY.get(n)}`);
 for (const [n] of failed) console.log(`  FAILED:  ${n}`);
 process.exit(failed.length ? 1 : 0);
