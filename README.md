@@ -16,7 +16,7 @@ is the current lineup, rendered from `catalog.json`.
 ┌─────────────────────────────────────────────────────────────┐
 │ index.html — the launcher                                   │
 │  • iframe pool (bounded LRU, instant relaunch)               │
-│  • save/load to file, settings menu, Multiplayer panel       │
+│  • Game Data dialog (view/export/restore), Multiplayer panel │
 │  • routes postMessage between games and the P2P bridge       │
 ├─────────────────────────────────────────────────────────────┤
 │ arcade-sdk.js — window.Arcade, loaded by every game          │

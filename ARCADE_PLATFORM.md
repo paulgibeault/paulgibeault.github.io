@@ -456,7 +456,9 @@ SAME checksummed export a save-file download produces (`arcade-save.js`
 over a launcher-level `{ arcade:1, kind:'backup', v:1, op }` envelope
 (`offer → accept/decline → chunk×parts → ack`, 64 KB chunks, ≤512 parts). The
 receiver keeps the newest **3 generations per sender** in the device-local
-`arcade-backup` IndexedDB; 📥 restores the latest through the full save-import
+`arcade-backup` IndexedDB; the Game Data dialog's Restore section lists every
+sender with stored generations (bridge-free — `listStoredSenders()` reads the
+IDB and known-peers only) and restores the latest through the full save-import
 gate chain (validate, confirm, auto-backup, snapshot/rollback commit). Engine:
 `arcade-backup.js` (`initBackupEngine(host)`), pure validator/chunking/
 retention in `arcade-backup-core.js` (Node-tested by `tools/backup-unit.mjs`).
@@ -501,10 +503,14 @@ boundary as the Save/Load buttons themselves.
   primitive). Engine: `arcade-local-backup.js` (`initLocalBackupEngine(host)`);
   pure staleness/key-format helpers in `arcade-local-backup-core.js`
   (Node-tested by `tools/local-backup-unit.mjs`).
-- **Restore:** "Restore Last Backup" in the Game Data menu rides the exact
-  same import gate chain as a file load or peer restore (validate → confirm →
-  auto-backup → snapshot/rollback commit) — never a second, weaker path.
-- **Optional on-disk folder (Chromium):** "Backup Folder: Off/<name>" grants a
+- **Restore:** "Last automatic backup" in the Game Data dialog's Restore
+  section rides the exact same import gate chain as a file load or peer
+  restore (validate → confirm → auto-backup → snapshot/rollback commit) —
+  never a second, weaker path. The dialog opens with a status line ("Last
+  automatic backup: <time> · N kept") so the safety net is visible before
+  it's ever needed.
+- **Optional on-disk folder (Chromium):** "Backup Folder: Off/<name>" (under
+  the dialog's Automatic backups section) grants a
   real on-disk folder via the File System Access API (feature-detected and
   hidden entirely where absent). Every successful snapshot cycle also tries a
   dated export into the granted folder, pruned to the same 3-generation cap,
@@ -656,12 +662,26 @@ If a user reports lost data:
 2. The auto-backup uses the exact same format as a normal export — they can re-import it through the same UI.
 3. The launcher could optionally keep the last N auto-backups in IndexedDB as a belt-and-suspenders measure, but that's a follow-on; downloaded files are the canonical recovery medium.
 
+### The Game Data dialog — one surface for view/export/restore
+
+Everything above is reachable from a single menu item, **"Game Data…"**
+(`arcade-backup-ui.js`; the menu's only other data-adjacent item is Records,
+a read-only viewer that stands alone). The dialog opens with the
+automatic-backup status line, then: a collapsible **read-only data viewer**
+(per-app groups of localStorage keys with pretty-printed values, store record
+counts, file sizes — built from `arcade-save.js buildDataView()`, metadata
+only, lazily on first expand), a **Restore** section (last automatic backup /
+import from file / stored trusted-peer backups), one **Export** form, and the
+**Automatic backups** controls. The per-peer backup *toggles* stay in the
+Multiplayer dialog with the rest of the trust controls; only restore lives
+here.
+
 ### Per-app export & optional encryption (IMPLEMENTED, #29)
 
-The plain "Export to File" button is unchanged — instant, whole-arcade, plaintext. A second menu item, **"Export App / Encrypted…"**, opens two optional prompts before downloading:
+The Game Data dialog's Export form replaces the old pair of menu items ("Export to File" + "Export App / Encrypted…") with one flow and two optional controls; the defaults (Everything, blank passphrase) are the instant whole-arcade plaintext export:
 
-- **Scope** — pick one app (from the list of every app with data on this device) or leave blank for everything. A per-app export filters `data`/`stores`/`files` to that app's `arcade.v1.<appId>.` prefix and — deliberately — excludes `_meta`/`global` entirely, since per-app data shouldn't carry device identity or shared settings.
-- **Passphrase (optional)** — leave blank for a plain-text file identical in spirit to the regular export; enter a passphrase and the whole bundle is wrapped in a new envelope:
+- **Scope select** — "Everything (whole arcade)" or one app (the options are every app *with data* on this device — `listExportableAppIds()`, not the catalog — labeled with catalog names where known). A per-app export filters `data`/`stores`/`files` to that app's `arcade.v1.<appId>.` prefix and — deliberately — excludes `_meta`/`global` entirely, since per-app data shouldn't carry device identity or shared settings.
+- **Passphrase field (optional)** — leave blank for a plain-text file; enter a passphrase and the whole bundle is wrapped in a new envelope:
   ```json
   { "format": "pauls-arcade-save-enc", "v": 1, "kdf": "PBKDF2-SHA256", "iterations": 250000,
     "salt": "<base64>", "iv": "<base64>", "ciphertext": "<base64>" }
@@ -670,7 +690,7 @@ The plain "Export to File" button is unchanged — instant, whole-arcade, plaint
 
 On import, `#file-load` detects the `pauls-arcade-save-enc` envelope before any of the normal shape gates run, prompts for the passphrase (masked input), decrypts, and then re-enters the exact same gates 4–10 pipeline as a plain file — a decrypted import is never a second, weaker path. A wrong passphrase is a single-attempt failure (toast; no retry loop) — the user re-opens Import from File to try again.
 
-Verified by `tools/export-advanced-acceptance.mjs` (scoped + encrypted export/import round trip proving app-exclusion, wrong-passphrase failure, and the checksum-override accept/decline paths) plus the `encryptBundleJson`/`decryptBundleJson`/override cases in `tools/save-validation-unit.mjs`; both in CI.
+Verified by `tools/export-advanced-acceptance.mjs` (scoped + encrypted export/import round trip through the dialog's form, proving app-exclusion, wrong-passphrase failure, and the checksum-override accept/decline paths), `tools/backup-dialog-acceptance.mjs` (dialog chrome, status line, data viewer, bridge-free peer restore, DB-creation guard), plus the `encryptBundleJson`/`decryptBundleJson`/override cases in `tools/save-validation-unit.mjs`; all in CI.
 
 ---
 
