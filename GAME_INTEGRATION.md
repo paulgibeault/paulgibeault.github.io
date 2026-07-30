@@ -514,12 +514,19 @@ loop.running();          // is it currently scheduled?
 loop.dispose();          // detach lifecycle listeners when done for good
 ```
 
-> **Available, not yet exercised.** No catalog game runs on `Arcade.loop`
-> yet — the existing games' private particle/tween rAF loops are what block
-> adoption, and untangling those is one work package with the tween/fx lift
-> tracked in [#39](https://github.com/paulgibeault/paulgibeault.github.io/issues/39).
-> New games should start on it; it is exactly the suspend/delta bookkeeping
-> §6a asks for.
+`kick()` is the whole dirty-flag story: a renderer that is normally parked
+calls it to draw one frame after state changes, and `start()`/`stop()` switch
+it to continuous only while something is actually animating. There is no
+separate idle mode to reach for.
+
+> **This is the fleet standard, not an option.** Every catalog game with a
+> frame loop runs on `Arcade.loop`. Two things it buys that a hand-rolled loop
+> repeatedly failed to: `start()` is idempotent, so a wake-up path cannot stack
+> a second concurrent loop and orphan the first (that bug shipped, and doubled
+> one game's frame rate permanently after any restart); and one place owns the
+> suspend/resume legs, which is where the divergence lived — the fleet had a
+> game cancelling on `visibilitychange`, a game relying only on `onSuspend`,
+> and a game that never cancelled at all.
 
 For timers, `Arcade.session.setTimeout(fn, ms)` / `Arcade.session.setInterval(fn, ms)`
 freeze while suspended (remaining time is preserved and re-armed on resume)
@@ -579,7 +586,7 @@ launch is a **fresh page load**, identical to opening the standalone URL.
 Even before eviction, while a game sits hidden in the pool it should hold as
 little as possible:
 
-- [ ] Pause `requestAnimationFrame` loops in `onSuspend` (don't just skip rendering — cancel the rAF and re-request it in `onResume`).
+- [ ] Use `Arcade.loop` (§6a) rather than pausing a hand-rolled `requestAnimationFrame` loop in `onSuspend`. If you do hand-roll one, cancelling the rAF is the requirement — skipping the render inside a still-scheduled frame keeps holding an animation slot.
 - [ ] `audio.suspend()` your `AudioContext`. A suspended context still exists but stops the audio thread.
 - [ ] Release WebGL contexts you don't need. Browsers cap the number of live WebGL contexts per page; the launcher's pool can have several at once. If your game has multiple canvases, share one context, or call `loseContext()` on transient ones.
 - [ ] Clear `setInterval` / `setTimeout` chains on suspend; restart on resume. Forgotten intervals are the #1 source of battery drain in hidden iframes.
