@@ -1023,15 +1023,50 @@ cleanup, and the wait-then-be-told-to-activate contract).
   not `APP_VERSION === package.json version`, which false-fails on any PR left
   open across a deploy.
 
-- [ ] **Bundled app? The precache list can't be hand-maintained.** A build
-  whose module graph deploys under content-hashed names has nothing stable to
-  list. The pattern: keep `sw.js` at the **repo root** (CI's version rewrite
-  only touches `./sw.js`), ship it into the artifact root from your build
-  config, precache only the shell and unhashed public assets, and let the
-  fetch handler's runtime fill cache each hashed asset on first use — after
-  one online visit the build is fully cached, and a new deploy's new hashes
-  miss the old cache by construction. Build-time precache injection is the
-  eventual fleet-wide replacement ([#39](https://github.com/paulgibeault/paulgibeault.github.io/issues/39)).
+- [ ] **Don't hand-maintain the precache list — generate it.** Give `sw.js` a
+  generated region and let `tools/stage.mjs` fill it from the artifact it just
+  staged:
+
+  ```js
+  // arcade:precache-begin
+  const ASSETS = [
+    './',
+    './index.html',
+  ];
+  // arcade:precache-end
+  ```
+
+  `tools/inject-precache.mjs` (identical fleet-wide) rewrites what is between
+  the markers; call it as the last step of `stage()`. What is checked in is a
+  placeholder — service workers are off on loopback, so a dev checkout never
+  reads it.
+
+  This is what makes a **bundled** app ordinary. A module graph deployed under
+  content-hashed names has nothing stable to hand-list, and the old workaround
+  — precache the shell, let runtime fill catch the rest — meant a player's
+  first visit had to be online. The generator already knows the hashed names,
+  because it reads the finished artifact. Keep `sw.js` at the **repo root**
+  (CI's version rewrite only touches `./sw.js`) and ship it into the artifact
+  root from your build config; nothing else differs.
+
+  To publish a file without caching it, export `PRECACHE_EXCLUDE` from
+  `tools/stage.mjs` — exact paths, `dir/` prefixes, or `*.ext` suffixes.
+  Diagnostics, provenance archives and licence text are the usual entries.
+  `verify-artifact.mjs` fails the build on any published file that is neither
+  precached nor named there, so an omission is a decision you write down rather
+  than one nobody notices.
+
+- [ ] **Precache with per-asset `add()`, not `addAll()`.** `addAll()` rejects
+  the entire install if any single entry 404s, so one missing file costs every
+  returning player their whole offline shell — silently. Catch per asset and
+  log; a gap should cost one file.
+
+- [ ] **Match the cache with `ignoreSearch`.** The generated list holds
+  filenames, which carry no query string. If your markup asks for a file with a
+  cache-busting `?v=` suffix, a strict match misses every time and falls
+  through to the network — an app that looks fully precached and is entirely
+  offline-broken. (Those suffixes are also redundant once CI owns
+  `APP_VERSION`: it keys the whole cache per deploy.)
 
 - [ ] **Don't `skipWaiting()` on install.** Let the new worker wait, and handle
   the `arcade:sw.skipWaiting` message instead:
@@ -1220,11 +1255,15 @@ Requirements every app meets (the pipeline detects them; the repo provides them)
 - **Every app proves its deploy artifact, using the same two files:**
   - `tools/verify-artifact.mjs` — **byte-identical in every repo, no
     exceptions.** Stages into a temp dir and asserts what came out: every
-    literal `index.html` reference, every `sw.js` precache entry and every
-    `manifest.json` icon is published; dev files are not. It is a plain
-    script rather than a test-framework file because the fleet runs three
-    different runners and all of them can call a script. Never edit one
-    copy — change the canonical file and re-copy it.
+    literal `index.html` reference and every `manifest.json` icon is
+    published, every published file is precached unless the app names it in
+    `PRECACHE_EXCLUDE`, and dev files are not published. It is a plain script
+    rather than a test-framework file because the fleet runs three different
+    runners and all of them can call a script. Never edit one copy — change
+    the canonical file and re-copy it.
+  - `tools/inject-precache.mjs` — **byte-identical in every repo**, called at
+    the end of `stage()`. Writes the worker's precache list from the staged
+    artifact, so the list cannot drift from what deploys.
   - `tools/stage.mjs` — **the only per-app part**, and the reason one
     verifier fits every repo. It exports `stage(outDir)` and `ROOT`, and
     the deploy job runs exactly this module; nothing re-implements staging
@@ -1257,9 +1296,10 @@ Requirements every app meets (the pipeline detects them; the repo provides them)
   `scratch/`, `tools/`, `scripts/`, `node_modules/`, package files,
   `.gitignore`, `go.sh`/`ago`, root `test_*` files, and any `.md`/`.py`/
   `.pid` — so dev files never ship to the public site.
-- **The artifact is verified before deploy**: every `sw.js` precache entry
-  and every local `src`/`href` in `index.html` must exist in `dist/`, or
-  the deploy fails instead of shipping a broken install.
+- **The artifact is verified before deploy**: every local `src`/`href` in
+  `index.html` must exist in `dist/`, and every file `dist/` publishes must be
+  precached or explicitly excluded — or the deploy fails instead of shipping a
+  broken install, or one that works online and breaks offline.
 - **GitHub Pages source must be "GitHub Actions"** (Settings → Pages), not
   "deploy from branch" — otherwise GitHub's default Jekyll build races this one.
 
