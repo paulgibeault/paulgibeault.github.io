@@ -49,17 +49,31 @@ const APP_VERSION = '0.0.0';
 
 const CACHE_NAME = `${GAME_ID}-v${APP_VERSION}`;
 
-// Everything your game needs to boot offline. All paths must be inside SCOPE.
+// Everything your game needs to boot offline — GENERATED, not maintained.
+// tools/stage.mjs rewrites the region between the markers below from the files
+// the deploy actually publishes, so this list cannot drift from the artifact
+// and a content-hashed bundle name needs no hand edit. Leave a file out by
+// naming it in PRECACHE_EXCLUDE in tools/stage.mjs, never by editing here.
+//
+// What is checked in is only a placeholder: service workers are off on
+// loopback, so a dev checkout never reads it.
+// arcade:precache-begin
 const ASSETS = [
-  SCOPE,
-  `${SCOPE}index.html`,
-  // `${SCOPE}main.js`,
-  // `${SCOPE}style.css`,
-  // `${SCOPE}images/...`,
+  './',
+  './index.html',
 ];
+// arcade:precache-end
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS)));
+  // Per-asset add(), not addAll(). addAll() rejects the WHOLE install if any
+  // single entry 404s, so one missing file costs every returning player their
+  // entire offline shell — silently, and for as long as nobody notices. That
+  // has happened in this fleet; a gap should cost one file and a console line.
+  event.waitUntil(caches.open(CACHE_NAME).then((cache) => Promise.all(
+    ASSETS.map((asset) => cache.add(asset).catch((e) => {
+      console.warn('[sw] precache skipped', asset, e && e.message);
+    }))
+  )));
   // No skipWaiting() — see rule 3 above.
 });
 
@@ -89,7 +103,15 @@ self.addEventListener('fetch', (event) => {
 
   // Cache-first for our own assets; network fallback keeps un-listed files
   // working online.
+  //
+  // ignoreSearch because the precache is generated from filenames on disk,
+  // which carry no query string, while markup may request the same file with
+  // a cache-busting `?v=` suffix. Matched strictly, every one of those would
+  // miss the cache and silently fall through to the network — an app that
+  // looks fully precached and is entirely offline-broken. (Those suffixes are
+  // also now redundant: CI's APP_VERSION keys the whole cache per deploy.)
   event.respondWith(
-    caches.match(event.request).then((hit) => hit || fetch(event.request))
+    caches.match(event.request, { ignoreSearch: true })
+      .then((hit) => hit || fetch(event.request))
   );
 });

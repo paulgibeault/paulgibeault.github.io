@@ -5,10 +5,8 @@
  * catalog is only exercised by a live render test). These gates turn that
  * silent drift into a loud unit-tier failure, without a build step:
  *
- *   Gate A — service-worker precache completeness: every same-origin JS
- *            module statically reachable from index.html / profile.html
- *            (static imports, re-exports, and dynamic import('./…') literals,
- *            followed transitively) must appear in sw.js ASSETS_TO_CACHE.
+ *   Gate A — RETIRED; the precache list is generated from the artifact now.
+ *            See the note where it used to live.
  *   Gate B — catalog.json schema: required fields, unique ids, root-relative
  *            urls, icons that exist on disk — checked without a browser, so
  *            a malformed entry fails CI before the render-test tier.
@@ -33,88 +31,24 @@ function ok(cond, label) {
     else { fail++; console.log('  ✗ ' + label); }
 }
 
-// ---- Gate A: SW precache completeness ----
-
-// Repo-relative ('./x.js' style, no leading './') specifiers found in a
-// source string: static imports/re-exports plus dynamic import('…') literals.
-function importSpecifiers(source) {
-    const out = new Set();
-    const patterns = [
-        /(?:^|[^\w.])import\s+[^'"]*?from\s*['"](\.\.?\/[^'"]+)['"]/g,
-        /(?:^|[^\w.])import\s*['"](\.\.?\/[^'"]+)['"]/g,
-        /(?:^|[^\w.])export\s+[^'"]*?from\s*['"](\.\.?\/[^'"]+)['"]/g,
-        /(?:^|[^\w.$])import\(\s*['"](\.\.?\/[^'"]+)['"]/g
-    ];
-    for (const re of patterns) {
-        let m;
-        while ((m = re.exec(source)) !== null) out.add(m[1]);
-    }
-    return out;
-}
-
-// BFS over the static module graph starting from the specifiers embedded in
-// an HTML file, tracking each module's repo-relative path.
-function reachableModules(htmlFiles) {
-    const queue = [];
-    const seen = new Set();
-    for (const html of htmlFiles) {
-        const src = readFileSync(join(ROOT, html), 'utf8');
-        for (const spec of importSpecifiers(src)) {
-            const rel = spec.replace(/^\.\//, '');
-            if (!seen.has(rel)) { seen.add(rel); queue.push(rel); }
-        }
-        // <script src="…"> same-origin references count too.
-        let m;
-        const tagRe = /<script[^>]*\bsrc=["'](?!https?:)([^"']+\.js)["']/g;
-        while ((m = tagRe.exec(src)) !== null) {
-            const rel = m[1].replace(/^\.?\//, '');
-            if (!seen.has(rel)) { seen.add(rel); queue.push(rel); }
-        }
-    }
-    while (queue.length) {
-        const rel = queue.shift();
-        const abs = join(ROOT, rel);
-        if (!existsSync(abs)) continue; // missing files reported separately
-        const dir = dirname(rel);
-        for (const spec of importSpecifiers(readFileSync(abs, 'utf8'))) {
-            // Resolve './x' / '../x' against the importing module's directory.
-            const next = join(dir === '.' ? '' : dir, spec).replace(/\\/g, '/').replace(/^\.\//, '');
-            if (!seen.has(next)) { seen.add(next); queue.push(next); }
-        }
-    }
-    return seen;
-}
-
-function precacheList() {
-    const sw = readFileSync(join(ROOT, 'sw.js'), 'utf8');
-    const m = /const ASSETS_TO_CACHE = \[([\s\S]*?)\];/.exec(sw);
-    if (!m) return null;
-    const entries = new Set();
-    let e;
-    const entryRe = /['"]\.\/([^'"]+)['"]/g;
-    while ((e = entryRe.exec(m[1])) !== null) entries.add(e[1]);
-    return entries;
-}
-
-function gateA() {
-    console.log('\nGate A — sw.js precache covers every reachable launcher module');
-    const precache = precacheList();
-    ok(!!precache && precache.size > 0, 'sw.js ASSETS_TO_CACHE parsed');
-    if (!precache) return;
-    const reachable = reachableModules(['index.html', 'profile.html']);
-    ok(reachable.size > 0, `module graph walked (${reachable.size} reachable files)`);
-    for (const rel of [...reachable].sort()) {
-        ok(existsSync(join(ROOT, rel)), `referenced module exists on disk: ${rel}`);
-        ok(precache.has(rel), `precached: ${rel}`);
-    }
-    // The SDK is loaded by game pages rather than imported by the launcher,
-    // so the graph walk can't see it — pin it explicitly.
-    ok(precache.has('arcade-sdk.js'), 'precached: arcade-sdk.js (game-loaded, pinned explicitly)');
-    for (const rel of [...precache].sort()) {
-        if (!/\.(js|css|json|html|png)$/.test(rel)) continue;
-        ok(existsSync(join(ROOT, rel)), `precache entry exists on disk: ${rel}`);
-    }
-}
+// ---- Gate A: RETIRED ----
+//
+// Gate A walked index.html's module graph and asserted every reachable module
+// appeared in sw.js's precache array. It existed because that array was
+// hand-maintained and had shipped stale twice.
+//
+// The array is generated now, at stage time, from the artifact that actually
+// deploys (tools/inject-precache.mjs), so the checked-in list is a placeholder
+// and there is nothing left here for a static gate to read. What replaced it
+// is stronger in both directions: verify-artifact.mjs asserts that every file
+// the deploy publishes is either precached or named in PRECACHE_EXCLUDE, which
+// covers images, fonts, JSON and content-hashed bundles — none of which a
+// JS-import walk could ever see — and it asks the artifact rather than the
+// checkout, so it also catches a file that staging drops.
+//
+// Gate A could only ever have caught a missing *statically imported module*.
+// That is now a subset of a check that cannot be forgotten, because the list
+// is not written by hand at all.
 
 // ---- Gate B: catalog.json schema (catalogVersion 1) ----
 
@@ -327,8 +261,7 @@ function gateE() {
         '(without it the bump commits and then fails to push, after tests pass)');
 }
 
-console.log('Repo drift gates — precache completeness + catalog schema + SW shape (no browser)');
-gateA();
+console.log('Repo drift gates — catalog schema + SW shape (no browser)');
 gateB();
 gateC();
 gateD();
