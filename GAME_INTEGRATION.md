@@ -970,7 +970,7 @@ A game is considered integrated when all of the following pass:
 - [ ] Launcher Save → exported JSON contains the game's keys; Launcher Load of that file restores them and the game reflects the restored state (after `onStateReplaced` or page reload).
 - [ ] Changing the launcher's font scale visibly resizes text in the game without a reload.
 - [ ] Switching to launcher view and back fires `onSuspend` then `onResume`; the game pauses while hidden and resumes cleanly.
-- [ ] Setting *Keep in Memory* to `1` in the launcher menu, launching another game, then re-launching this game does a fresh load and restores user-visible progress (high score, current level, etc.) from `arcade.v1.<gameId>.*` localStorage.
+- [ ] Setting *Open Games* to `1` in the launcher menu, launching another game, then re-launching this game does a fresh load and restores user-visible progress (high score, current level, etc.) from `arcade.v1.<gameId>.*` localStorage.
 - [ ] Any off-device / imported / shared string the game renders (peer names & messages, imported pack/level names, score entries) is escaped via `Arcade.html.escape` / `textContent` — a value like `"><img src=x onerror=alert(1)>` renders inertly.
 - [ ] If the game uses `Arcade.store` / `Arcade.files`, a Launcher Save → Load round-trip restores that data too (it rides the schema-v2 bundle).
 - [ ] Standalone URL (`https://paulgibeault.github.io/<gameId>/`) still works exactly as before.

@@ -116,30 +116,24 @@ body::after {
     padding: 0 24px;
 }
 
-/* ---- APP MENU (bottom-right floating menu) ---- */
+/* ---- APP MENU (top-right floating menu) ---- */
 /* In-game, the floating launcher button is replaced by the topbar hamburger;
-   the panel itself is repositioned to drop down from under the topbar so it
-   overlays the game iframe (which sits at z-index 3000). */
+   the panel is re-anchored flush under the topbar so it overlays the game
+   iframe (which sits at z-index 3000). */
 body.app-in-game .launcher-menu__toggle { display: none; }
 body.app-in-game .launcher-menu {
-    bottom: auto;
     right: 16px;
     top: 40px;
     z-index: 3002;
 }
 body.app-in-game .launcher-menu__panel {
-    bottom: auto;
     top: 0;
-    transform: translateY(-8px);
-}
-body.app-in-game .launcher-menu[data-open="true"] .launcher-menu__panel {
-    transform: translateY(0);
 }
 
 .launcher-menu {
     position: fixed;
-    bottom: 24px;
-    right: 24px;
+    top: 12px;
+    right: 16px;
     z-index: 1000;
 }
 
@@ -172,7 +166,7 @@ body.app-in-game .launcher-menu[data-open="true"] .launcher-menu__panel {
 
 .launcher-menu__panel {
     position: absolute;
-    bottom: calc(100% + 10px);
+    top: calc(100% + 10px);
     right: 0;
     min-width: 240px;
     background: rgba(20, 20, 40, 0.92);
@@ -184,7 +178,7 @@ body.app-in-game .launcher-menu[data-open="true"] .launcher-menu__panel {
     display: flex;
     flex-direction: column;
     opacity: 0;
-    transform: translateY(8px);
+    transform: translateY(-8px);
     pointer-events: none;
     transition: opacity 0.18s ease, transform 0.18s ease;
 }

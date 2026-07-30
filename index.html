@@ -119,6 +119,7 @@
             aspect-ratio: 16 / 10;
             border-bottom: 1px solid var(--card-border);
             flex-shrink: 0;
+            position: relative; /* anchors the live badge */
         }
 
         .launcher-btn__image {
@@ -164,6 +165,47 @@
             to { opacity: 1; transform: translateY(0); }
         }
 
+        /* ---- LIVE TILES ----
+           A tile whose game is warm in the iframe pool ("Open games")
+           glows and carries a pulsing LIVE badge — relaunch is instant. */
+        .launcher-btn--live {
+            border-color: var(--field-gold);
+            box-shadow: 0 0 0 1px var(--field-gold-dim), 0 0 22px var(--field-gold-dim);
+        }
+        .launcher-btn__live-badge {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            padding: 3px 8px;
+            border-radius: 999px;
+            background: rgba(10, 10, 20, 0.78);
+            border: 1px solid var(--field-gold);
+            color: var(--field-gold);
+            font-family: var(--font-mono);
+            font-size: 0.6rem;
+            letter-spacing: 1px;
+            pointer-events: none;
+        }
+        .launcher-btn__live-badge::before {
+            content: '';
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #7fe97f;
+            box-shadow: 0 0 6px #7fe97f;
+            animation: live-pulse 2s ease-in-out infinite;
+        }
+        @keyframes live-pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.35; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .launcher-btn__live-badge::before { animation: none; }
+        }
+
         @media (max-width: 768px) {
             .launcher-header { padding: 40px 16px 16px; }
             .launcher-grid {
@@ -178,7 +220,9 @@
         }
 
         @media (max-width: 480px) {
-            .launcher-header { padding: 28px 16px 12px; }
+            /* Clear the fixed top-right menu button (12px top + 44px circle)
+               so the centered title never runs underneath it. */
+            .launcher-header { padding: 64px 16px 12px; }
             .launcher-header__title { letter-spacing: 2px; }
             .launcher-grid {
                 grid-template-columns: 1fr;
@@ -254,9 +298,43 @@
             font-family: var(--font-display); color: var(--field-gold);
             font-size: 1rem; letter-spacing: 2px; text-transform: uppercase; opacity: 0.8;
             margin: 0; padding: 0;
+            /* Tabs share the row now — a long app-set title must truncate,
+               not push them off-screen. */
+            min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         }
         .game-topbar__actions {
-            display: flex; align-items: center; gap: 8px;
+            display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+        }
+        /* Warm-pool tabs: every in-memory app (the current one highlighted,
+           the rest one click away). Right-aligned via margin-left:auto; the
+           margin-right keeps them a comfortable distance from the hamburger. */
+        .game-topbar__tabs {
+            display: flex; align-items: center; gap: 6px;
+            margin-left: auto; margin-right: 24px;
+            min-width: 0; overflow: hidden;
+        }
+        .game-topbar__tabs:empty { display: none; }
+        .game-tab {
+            background: rgba(0, 0, 0, 0.5); border: 1px solid var(--field-gold-dim);
+            color: var(--snow-white); opacity: 0.75;
+            padding: 3px 10px; border-radius: 4px;
+            font-family: var(--font-display); font-size: 0.72rem; letter-spacing: 1px;
+            cursor: pointer; transition: all 0.2s ease;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            max-width: 9rem; min-width: 2.5rem; flex-shrink: 1;
+        }
+        .game-tab:hover {
+            border-color: var(--field-gold); opacity: 1;
+        }
+        /* Icon-only tab: the game's catalog icon replaces the text label
+           (name stays in title/aria-label). */
+        .game-tab--icon { padding: 2px; min-width: 0; line-height: 0; }
+        .game-tab--current {
+            border-color: var(--field-gold); opacity: 1; cursor: default;
+        }
+        .game-tab__icon {
+            display: block; width: 24px; height: 24px;
+            object-fit: contain; border-radius: 3px;
         }
         .topbar-btn {
             background: rgba(0, 0, 0, 0.5); border: 1px solid var(--field-gold);
@@ -310,7 +388,7 @@
         </div>
         <div class="launcher-menu__section">
             <label class="launcher-menu__inline" for="menu-pool-cap-input" title="How many recently-played games stay loaded in memory. Lower saves battery; higher gives instant relaunch.">
-                <span>Keep in memory:</span>
+                <span>Open games:</span>
                 <input type="number" id="menu-pool-cap-input" class="launcher-menu__input" inputmode="numeric" min="1" step="1" />
             </label>
         </div>
@@ -594,6 +672,10 @@
     <div id="view-game" class="hidden">
         <div class="game-topbar">
             <h2 class="game-topbar__title" id="game-topbar-title">Paul's Arcade</h2>
+            <!-- Warm-pool tabs (rendered by the POOL module's live-surfaces
+                 wiring): one per in-memory app — the current one highlighted,
+                 clicking any other = instant switch. -->
+            <div class="game-topbar__tabs" id="game-topbar-tabs" aria-label="Open games"></div>
             <div class="game-topbar__actions">
                 <button type="button" class="topbar-btn" id="topbar-menu-toggle" data-launcher-menu-toggle aria-haspopup="true" aria-expanded="false" aria-controls="launcher-menu-panel" aria-label="Open menu" title="Menu">
                     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
@@ -1855,6 +1937,78 @@
     window.__arcade.router = router;
     window.__arcade.requestQuit = router.requestQuit;
 
+    // ---- LIVE SURFACES — the warm pool made visible ----
+    // Two chrome surfaces render off the pool's shape: the topbar tabs (game
+    // mode — every OTHER warm frame is one click away) and the launcher
+    // grid's live badges (launcher mode — a glowing tile means "in memory,
+    // relaunch is instant"). Both are pure re-renders from the pool API on
+    // its change notification, so they can never disagree with the pool.
+    const topbarTabs = document.getElementById('game-topbar-tabs');
+    function renderTopbarTabs() {
+        // Browser-style: EVERY warm game is a tab — "Open games: N" means N
+        // tabs. The active game's tab is highlighted and its click is a no-op.
+        const active = pool.getActiveGameId();
+        const tabs = [];
+        for (const gid of pool.mountedGameIds()) {
+            const info = pool.getGameInfo(gid);
+            if (!info) continue;
+            const label = info.label || info.name || gid;
+            const isActive = gid === active;
+            const tab = document.createElement('button');
+            tab.type = 'button';
+            tab.className = 'game-tab';
+            tab.dataset.gameId = gid;
+            // Icon-only tab when the catalog knows the game's icon; the name
+            // stays in title/aria-label. Text label is the fallback (catalog
+            // not yet loaded, or a game without an icon).
+            const entry = (window.__arcade.catalog || []).find(g => g.id === gid);
+            if (entry && entry.icon) {
+                const img = document.createElement('img');
+                img.className = 'game-tab__icon';
+                img.src = entry.icon;
+                img.alt = '';
+                img.draggable = false;
+                tab.classList.add('game-tab--icon');
+                tab.appendChild(img);
+            } else {
+                tab.textContent = label;
+            }
+            if (isActive) {
+                tab.classList.add('game-tab--current');
+                tab.setAttribute('aria-current', 'true');
+                tab.title = label;
+                tab.setAttribute('aria-label', label + ' (current game)');
+            } else {
+                tab.title = 'Switch to ' + label;
+                tab.setAttribute('aria-label', 'Switch to ' + label);
+                tab.addEventListener('click', () => pool.showGame(gid, info.src, info.name));
+            }
+            tabs.push(tab);
+        }
+        topbarTabs.replaceChildren(...tabs);
+    }
+    function refreshLiveTiles() {
+        const grid = document.getElementById('launcher-grid-container');
+        if (!grid) return;
+        for (const tile of grid.querySelectorAll('.launcher-btn[data-game-id]')) {
+            const live = pool.has(tile.dataset.gameId);
+            tile.classList.toggle('launcher-btn--live', live);
+            const badge = tile.querySelector('.launcher-btn__live-badge');
+            if (live && !badge) {
+                const b = document.createElement('span');
+                b.className = 'launcher-btn__live-badge';
+                b.textContent = 'LIVE';
+                (tile.querySelector('.launcher-btn__image-wrap') || tile).appendChild(b);
+            } else if (!live && badge) {
+                badge.remove();
+            }
+        }
+    }
+    pool.onPoolChanged(() => { renderTopbarTabs(); refreshLiveTiles(); });
+    // The grid renders async from catalog.json — the CATALOG block calls this
+    // after render so a deep-linked boot's badge isn't lost to timing.
+    window.__arcade.refreshLiveTiles = refreshLiveTiles;
+
     // Launcher-owned glue handed to the extracted storage modules. They
     // receive exactly these capabilities — nothing reaches into the pool or
     // the p2p bridge directly. stateSnapshotFor lives on the router (the
@@ -1944,6 +2098,9 @@
             if (window.__arcade.setGameCount) window.__arcade.setGameCount(games.length);
             window.__arcade.catalog = games;
             openDeepLink(games);
+            // Grid nodes are fresh — repaint live badges for any game the
+            // pool already mounted (deep-link boot, catalog retry).
+            if (window.__arcade.refreshLiveTiles) window.__arcade.refreshLiveTiles();
         } catch (e) {
             console.error('[arcade] catalog load failed', e);
             renderCatalogError(gridContainer, bootCatalog);
