@@ -9,16 +9,16 @@ addressed to other maintainers).
 | Issue | Theme | Severity |
 | ----- | ----- | -------- |
 | [#108 — WP3: spec-cue scheduler retirement path (cache turnover, SDK v4)](https://github.com/paulgibeault/paulgibeault.github.io/issues/108) | SDK lifecycle | MED |
-| [#113 — Five acceptance suites have never run in CI](https://github.com/paulgibeault/paulgibeault.github.io/issues/113) | CI coverage | HIGH |
 | [#114 — Nothing in CI asserts a game actually renders — a blank game ships green](https://github.com/paulgibeault/paulgibeault.github.io/issues/114) | CI coverage | MED |
-| [#120 — Docs finalization: GAME_INTEGRATION.md audit](https://github.com/paulgibeault/paulgibeault.github.io/issues/120) | Documentation | MED |
 | [#39 — SDK pattern-lift batch (tween/fx, canvas.autosize, SW template, guide, fmt, undo, …)](https://github.com/paulgibeault/paulgibeault.github.io/issues/39) | SDK ergonomics | LOW |
 
-(Closed since the last revision of this table: #17, #106, #107 — the security
-batch, the t=0 root-cause + fleet re-audition, and the WP2 graph packs all
-landed; the t=0 cause was Chromium's DynamicsCompressorNode warm-up, the
-renderer's 0.25 s section lead-in is the complete offline fix, documented on
-`createBus` in `arcade-audio.js`.)
+(Closed since the last revision of this table: #17, #106, #107, #113, #120 —
+the security batch, the t=0 root-cause + fleet re-audition, the WP2 graph
+packs, the acceptance-tier coverage gap, and the docs finalization all landed.
+The t=0 cause was Chromium's DynamicsCompressorNode warm-up, the renderer's
+0.25 s section lead-in is the complete offline fix, documented on `createBus`
+in `arcade-audio.js`. #113 closed by deriving retry policy from the harness
+import rather than a hand-kept list, which switched all five suites on.)
 
 Historical context for all of the above: the eight-part platform review of
 2026-07-06, indexed in [plans/README.md](plans/README.md).

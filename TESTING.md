@@ -37,14 +37,15 @@ node tools/run-ci.mjs p2p sync        # only stages whose name contains a substr
 SKIP_BROWSER=1 node tools/run-ci.mjs  # syntax + artifact + units only (no Playwright needed)
 ```
 
-Two curated lists inside `run-ci.mjs` shape the acceptance tier — check the
-source for the current membership:
+Nothing inside `run-ci.mjs` enumerates the acceptance tier. Every
+`tools/*-acceptance.mjs` runs, and the one behavior that varies is derived from
+the suite itself: a suite that imports `lib/p2p-test-harness.mjs` negotiates
+real WebRTC, so it retries up to 3 attempts (timing-sensitive under headless
+CI; a genuine regression fails all attempts). Anything else gets one attempt.
 
-- `FLAKY` — real-WebRTC suites retried up to 3 attempts (timing-sensitive
-  under headless CI; a genuine regression fails all attempts)
-- `NOT_YET_IN_CI` — suites that exist but are visibly skipped pending triage
-  (reported as `skipped:` in the summary, so they're excluded loudly, not
-  invisibly absent)
+Retries are therefore a property of what a suite *does*, not of a list someone
+remembered to update — the previous hand-kept list had drifted to five names
+while nine suites were on the harness.
 
 ## Configuration B — units only: `npm run test:units`
 

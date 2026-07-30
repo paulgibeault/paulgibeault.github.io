@@ -19,22 +19,19 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const node = process.execPath;
 
-// Real-WebRTC negotiation is timing-sensitive under headless CI; these retry
-// so a transient hiccup doesn't fail the run. A genuine regression fails all
-// attempts.
-const FLAKY = new Set([
-  "p2p-acceptance.mjs", "p2p-multiseat-acceptance.mjs",
-  "p2p-reconnect-acceptance.mjs", "sync-acceptance.mjs", "backup-acceptance.mjs",
-]);
-
-// Acceptance suites that exist but have never run in CI. Listed explicitly so
-// they are visibly excluded rather than invisibly absent — they predate this
-// runner and need triage before being switched on (issue: fleet CI).
-const NOT_YET_IN_CI = new Set([
-  "configs-acceptance.mjs", "configs-p2p-acceptance.mjs",
-  "leaderboard-acceptance.mjs", "records-acceptance.mjs",
-  "p2p-multiparty-acceptance.mjs",
-]);
+// Real-WebRTC negotiation is timing-sensitive under headless CI; a suite that
+// negotiates retries so a transient hiccup doesn't fail the run. A genuine
+// regression fails all attempts.
+//
+// DETECTED, not enumerated — the same rule the artifact verifier follows. The
+// property that earns a retry is "drives peer connections through the shared
+// P2P harness", and the import is that property, so it is the test. A
+// hand-kept list drifts silently in the direction that hurts: it was five
+// names while NINE suites sat on the harness, so the four unlisted ones ran
+// with zero retries purely because nobody remembered to add them.
+const HARNESS = "lib/p2p-test-harness.mjs";
+const negotiates = (file) =>
+  fs.readFileSync(path.join(ROOT, "tools", file), "utf8").includes(HARNESS);
 
 // Suites that need arguments rather than a bare invocation.
 const WITH_ARGS = {
@@ -106,8 +103,7 @@ if (!process.env.SKIP_BROWSER) {
     .filter((f) => f.endsWith("-acceptance.mjs"))
     .sort();
   for (const f of suites) {
-    if (NOT_YET_IN_CI.has(f)) { results.push([f, "skipped"]); continue; }
-    run(f, [`tools/${f}`], { retries: FLAKY.has(f) ? 2 : 0 });
+    run(f, [`tools/${f}`], { retries: negotiates(f) ? 2 : 0 });
   }
 } else {
   console.log("\nSKIP_BROWSER set — acceptance tier skipped");
@@ -115,10 +111,7 @@ if (!process.env.SKIP_BROWSER) {
 
 // ---- report ---------------------------------------------------------------
 const failed = results.filter(([, s]) => s === "FAIL");
-const skipped = results.filter(([, s]) => s === "skipped");
 console.log("\n" + "=".repeat(72));
-console.log(`${results.length - failed.length - skipped.length} passed, ${failed.length} failed` +
-  (skipped.length ? `, ${skipped.length} skipped (not yet in CI)` : ""));
-for (const [n] of skipped) console.log(`  skipped: ${n}`);
+console.log(`${results.length - failed.length} passed, ${failed.length} failed`);
 for (const [n] of failed) console.log(`  FAILED:  ${n}`);
 process.exit(failed.length ? 1 : 0);
