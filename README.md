@@ -79,6 +79,12 @@ opaque-frame storage bridge, and launcher-aware settings/lifecycle hints.
     AEAD-sealed with per-pair ratcheting keys, topics are unlinkable daily
     HMACs, and the relay can only delay or drop, never impersonate.
 
+- **[TESTING.md](TESTING.md)** — the CLI testing guide: the one-command CI
+  gate (`npm test`) and its tiers, running single unit/acceptance suites,
+  the hermetic `--serve` modes, interactive testing against staged games
+  (dev.sh), the launcher-only preview, and the local port map. Read this
+  before testing platform changes locally.
+
 - **[SELF_HOSTING.md](SELF_HOSTING.md)** — running your own multiplayer
   infrastructure: a mosquitto-over-WSS rendezvous broker (so auto-reconnect
   never depends on the free public brokers) and a coturn TURN server (the
@@ -101,27 +107,34 @@ opaque-frame storage bridge, and launcher-aware settings/lifecycle hints.
 ./dev.sh stop                           # kill the dev server
 ```
 
-Serves everything on `127.0.0.1:4791` (override with `ARCADE_PORT`) so the
-postMessage handshake, shared `localStorage`, and iframe `allow-same-origin`
-all work exactly as they do in production. See GAME_INTEGRATION.md §12 for
-dev-mode postMessage tracing (`?dev=1`).
+Serves everything on `127.0.0.1:4791` (override with `ARCADE_PORT`) via
+`tools/dev-server.py` (no-store + CORS headers) so the postMessage handshake,
+shared `localStorage`, and iframe `allow-same-origin` all work exactly as
+they do in production. See GAME_INTEGRATION.md §12 for dev-mode postMessage
+tracing (`?dev=1`). Launcher-only work needs no staging:
+`python3 tools/dev-server.py 4791 .`
 
 ## Automated checks
 
 ```sh
-npm install && npx playwright install chromium
-npm run acceptance -- http://127.0.0.1:4791/<gameId>/   # per-game integration checklist
-npm run p2p-acceptance                                   # two headless launchers, real WebRTC
+npm install && npx playwright install chromium           # one-time setup
+npm test                                                 # the full CI gate, exactly as CI runs it
+npm run test:units                                       # fast tier only — no browser
+npm run acceptance -- http://127.0.0.1:4791/<gameId>/    # per-game integration checklist (vs dev.sh)
 ```
+
+Every acceptance suite is also runnable standalone and hermetically — see
+**[TESTING.md](TESTING.md)** for all configurations (stage filters,
+`SKIP_BROWSER=1`, single suites, fixture-driven `--serve` modes, ports).
 
 ## Repo layout
 
 | Path | What |
 | --- | --- |
-| `index.html` | The launcher: iframe pool, settings, save/load, Multiplayer panel |
+| `index.html` | The launcher: iframe pool, settings, Game Data dialog, Multiplayer panel |
 | `arcade-sdk.js` | `window.Arcade` — the SDK every game loads |
 | `arcade-p2p.js` | Launcher-side bridge to the vendored P2P transport |
 | `p2p/` | The P2P transport + its protocol spec (maintained here; formerly vendored from the archived QRCodeP2P repo) |
 | `profile.html` | Portfolio page — mirrors the game list shown in the launcher |
 | `dev.sh` | Local same-origin dev harness for launcher + games |
-| `tools/` | Playwright-based acceptance runners for games and P2P |
+| `tools/` | CI runner, unit + acceptance suites, dev server, staging (see [TESTING.md](TESTING.md)) |

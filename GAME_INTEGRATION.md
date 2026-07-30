@@ -1086,6 +1086,11 @@ Output is one line per check (✓/✗) with a brief detail when something
 fails. Exit code is non-zero if any check fails — wire it into a per-game
 pre-deploy script if you want regression coverage.
 
+This checklist covers *your game's* integration. Testing the *platform
+itself* (launcher, save/backup/sync engines, P2P) is a separate, larger
+surface — see [TESTING.md](TESTING.md) in the launcher repo for the full CI
+gate and every local configuration.
+
 ---
 
 ## 13a. CI/CD — the fleet standard
