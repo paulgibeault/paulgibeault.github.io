@@ -698,6 +698,33 @@ export function initBackupEngine(host) {
         return list.slice().reverse().map((g) => ({ ...g }));
     }
 
+    // Senders with stored generations on THIS device, newest-first — reads
+    // the backup IDB + known-peers localStorage only, never the P2P bridge
+    // (the Game Data dialog lists restore options without connecting).
+    // Guard: a device where no peer ever engaged the backup feature must not
+    // create the 'arcade-backup' DB just by opening the dialog (ensureDb()
+    // would) — the engine is lazy by design.
+    async function listStoredSenders() {
+        const peers = readKnownPeers();
+        const everEngaged = Object.values(peers).some((p) => p && p.backupTarget !== undefined);
+        if (!everEngaged) return [];
+        await ensureDb();
+        const out = [];
+        for (const [deviceId, list] of genIndex) {
+            if (!list.length) continue;
+            const newest = list[list.length - 1];
+            out.push({
+                deviceId,
+                name: peerName(deviceId),
+                count: list.length,
+                receivedAt: newest.receivedAt,
+                chars: newest.chars
+            });
+        }
+        out.sort((a, b) => b.receivedAt - a.receivedAt);
+        return out;
+    }
+
     async function restoreLatest(deviceId) {
         await ensureDb();
         const list = genIndex.get(deviceId) || [];
@@ -739,6 +766,7 @@ export function initBackupEngine(host) {
         attachP2P,
         kick,
         listGenerations,
+        listStoredSenders,
         restoreLatest,
         // Test hook: the per-peer acked checksum — read-only, acceptance
         // suites poll it (generation meta is public via listGenerations).

@@ -585,37 +585,33 @@ export function initSaveLoad(host) {
         else showToast('Save failed: browser blocked the download.', { error: true });
     }
 
-    // ---- save (export) — per-app / encrypted (#29) ----
-    // A deliberately separate flow from exportSave(): the plain "Export to
-    // File" button stays a single click with zero prompts. This one asks up
-    // to two optional questions (scope, then passphrase) before downloading.
-    async function exportSaveAdvanced() {
+    // Apps that would appear in a per-app export scope: everything
+    // gatherGameIds finds (localStorage keys, store/files DBs, OPFS dirs) —
+    // deliberately NOT the catalog, so non-catalog apps with data show up
+    // and data-less catalog games don't.
+    async function listExportableAppIds() {
         const data = collectArcadeKeys();
         const dbNames = await listArcadeDbNames();
-        const gameIds = [...(await gatherGameIds(data, dbNames))].sort();
-        let appId;
-        if (gameIds.length > 0) {
-            const choice = await host.dialog({
-                message: 'Export everything, or just one app?\n\nApps with data: ' + gameIds.join(', ')
-                    + '\n\nType an app name to export only that app, or leave blank for everything.',
-                input: true, inputValue: '', okLabel: 'Continue', cancelLabel: 'Cancel'
-            });
-            if (choice === null) return; // cancelled
-            const trimmed = choice.trim();
-            if (trimmed) {
-                if (gameIds.indexOf(trimmed) === -1) {
-                    showToast('Unknown app "' + trimmed + '" — export cancelled.', { error: true });
-                    return;
-                }
-                appId = trimmed;
+        return [...(await gatherGameIds(data, dbNames))].sort();
+    }
+
+    // ---- save (export) — per-app / encrypted (#29) ----
+    // Parameter-driven core of the advanced export: scope + passphrase come
+    // from the caller (the Game Data dialog's export form). No appId and no
+    // passphrase means the plain whole-arcade export.
+    async function performExport(opts) {
+        const appId = (opts && opts.appId) || undefined;
+        const passphrase = (opts && typeof opts.passphrase === 'string') ? opts.passphrase : '';
+        if (!appId && !passphrase) return exportSave();
+        if (appId) {
+            // Belt-and-braces: the UI is a <select>, but validate anyway.
+            const gameIds = await listExportableAppIds();
+            if (gameIds.indexOf(appId) === -1) {
+                showToast('Unknown app "' + appId + '" — export cancelled.', { error: true });
+                return;
             }
         }
-        const passphrase = await host.dialog({
-            message: 'Optional: enter a passphrase to encrypt this export. Leave blank for a plain-text file.',
-            input: true, inputType: 'password', inputValue: '', okLabel: 'Export', cancelLabel: 'Cancel'
-        });
-        if (passphrase === null) return; // cancelled
-
+        const data = collectArcadeKeys();
         let bundle;
         try { bundle = await buildBundle(data, { appId }); }
         catch (err) { showToast('Save failed: could not serialize data.', { error: true }); return; }
@@ -640,6 +636,100 @@ export function initSaveLoad(host) {
         } else {
             showToast('Save failed: browser blocked the download.', { error: true });
         }
+    }
+
+    // Thin prompt wrapper over performExport() for the legacy
+    // "Export App / Encrypted…" menu item (removed with the Game Data
+    // dialog — delete this once the dialog's export form lands).
+    async function exportSaveAdvanced() {
+        const gameIds = await listExportableAppIds();
+        let appId;
+        if (gameIds.length > 0) {
+            const choice = await host.dialog({
+                message: 'Export everything, or just one app?\n\nApps with data: ' + gameIds.join(', ')
+                    + '\n\nType an app name to export only that app, or leave blank for everything.',
+                input: true, inputValue: '', okLabel: 'Continue', cancelLabel: 'Cancel'
+            });
+            if (choice === null) return; // cancelled
+            const trimmed = choice.trim();
+            if (trimmed) {
+                if (gameIds.indexOf(trimmed) === -1) {
+                    showToast('Unknown app "' + trimmed + '" — export cancelled.', { error: true });
+                    return;
+                }
+                appId = trimmed;
+            }
+        }
+        const passphrase = await host.dialog({
+            message: 'Optional: enter a passphrase to encrypt this export. Leave blank for a plain-text file.',
+            input: true, inputType: 'password', inputValue: '', okLabel: 'Export', cancelLabel: 'Cancel'
+        });
+        if (passphrase === null) return; // cancelled
+        return performExport({ appId, passphrase });
+    }
+
+    // ---- data view (read-only) ----
+    // Metadata-shaped snapshot for the Game Data dialog's viewer: per-app
+    // localStorage keys with values, store record counts, and file sizes —
+    // no base64 payloads (unlike collectFiles), so it stays cheap.
+    async function buildDataView() {
+        const data = collectArcadeKeys();
+        const dbNames = await listArcadeDbNames();
+        const gameIds = [...(await gatherGameIds(data, dbNames))].sort();
+        const byApp = new Map();
+        const appOf = (gid) => {
+            if (!byApp.has(gid)) byApp.set(gid, { appId: gid, keys: [], stores: [], files: [] });
+            return byApp.get(gid);
+        };
+        const launcher = { keys: [] };
+        for (const k of Object.keys(data).sort()) {
+            const v = data[k];
+            const entry = { key: k, value: v, bytes: v.length };
+            const m = /^arcade\.v1\.([a-z0-9_-]+)\./i.exec(k);
+            if (m && m[1] !== '_meta' && m[1] !== 'global') appOf(m[1]).keys.push(entry);
+            else launcher.keys.push(entry);
+        }
+        for (const name of (dbNames || [])) {
+            const m = /^arcade\.v1\.([a-z0-9_-]+)\.store\.(.+)$/i.exec(name);
+            if (!m) continue;
+            let count = 0;
+            try {
+                const db = await idbOpen(name);
+                count = (await idbAll(db)).length;
+                db.close();
+            } catch (e) {}
+            appOf(m[1]).stores.push({ name: m[2], count });
+        }
+        // Files: OPFS dirs + IDB fallback, sizes only.
+        const root = await opfsRoot();
+        const dbSet = new Set(dbNames || []);
+        for (const gid of gameIds) {
+            const dir = 'arcade.v1.' + gid;
+            const files = [];
+            if (root) {
+                try {
+                    const d = await root.getDirectoryHandle(dir, { create: false });
+                    for await (const h of d.values()) {
+                        if (h.kind !== 'file') continue;
+                        const f = await h.getFile();
+                        files.push({ name: h.name, bytes: f.size });
+                    }
+                } catch (e) {}
+            }
+            if (dbSet.has(dir + '.files')) {
+                try {
+                    const db = await idbOpen(dir + '.files');
+                    const rows = await idbAll(db);
+                    db.close();
+                    for (const r of rows) {
+                        const rec = r.value || {};
+                        files.push({ name: String(r.key), bytes: rec.size || (rec.blob && rec.blob.size) || 0 });
+                    }
+                } catch (e) {}
+            }
+            if (files.length) appOf(gid).files = files;
+        }
+        return { apps: [...byApp.values()].sort((a, b) => a.appId < b.appId ? -1 : 1), launcher };
     }
 
     // ---- load (import) ----
@@ -848,9 +938,15 @@ export function initSaveLoad(host) {
         if (f) importSaveFile(f);
     });
 
-    // Bundle API for the backup engine (arcade-backup.js): the exact export
-    // and import machinery the Save/Load buttons use, minus the file layer.
+    // Bundle API for the backup engine (arcade-backup.js) and the Game Data
+    // dialog (arcade-backup-ui.js): the exact export and import machinery
+    // the Save/Load buttons use, minus the file layer.
     return {
+        exportSave,
+        performExport,
+        listExportableAppIds,
+        buildDataView,
+
         /**
          * Serialize the current device state as a save-bundle string, or null
          * when there is nothing to back up. "Nothing" means no key an import
