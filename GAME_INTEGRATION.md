@@ -68,6 +68,34 @@ out — but that is the exception, not the standard. Within a major,
 launcher↔SDK feature compatibility is negotiated at runtime by
 `welcome.caps`, never by version numbers.
 
+**Cutting a new major, when one is ever needed.** Evergreen has a consequence
+worth writing down before it bites: because every app follows the alias, a
+breaking cut reaches the whole fleet the moment it deploys. There is no
+staggered rollout to hide behind and no per-app canary. What makes that safe is
+not a waiting period on the SDK — it is that the SDK is never the only thing
+that changed.
+
+Sequence it expand → migrate → contract:
+
+1. **Expand.** Ship the new behavior in the current major, alongside the old
+   one. Nothing breaks; both paths work.
+2. **Migrate.** Move every app onto the new path and deploy them. Each app is
+   compatible with the old and the new SDK at this point, so the order does not
+   matter and a straggler is not a broken game.
+3. **Wait for cache turnover.** A returning player runs the app shell their
+   service worker cached, which can lag the deploy by however long it takes
+   them to open the game again. Give it a couple of weeks past the last app
+   deploy — the point is not a magic number, it is that the shells in the wild
+   have all seen step 2 before the SDK stops serving step 1. There is no
+   backend to measure this from; GitHub Pages serves static files and the fleet
+   collects nothing, so the criterion is time, deliberately.
+4. **Contract.** Cut the major, delete the old path, deploy. Every app follows
+   the alias on its next load and every shell already speaks the new path.
+
+An app that genuinely cannot make step 2 in time is what the major-pinned
+escape hatch is for. Using it should be a decision someone writes down, not a
+default.
+
 Use a **root-relative** URL, not the absolute
 `https://paulgibeault.github.io/...` form. Both work in production, but
 root-relative also resolves correctly when a local-dev harness stages the
