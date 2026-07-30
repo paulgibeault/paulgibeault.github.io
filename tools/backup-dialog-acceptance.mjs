@@ -63,8 +63,14 @@ try {
         check('#menu-backup opens the Game Data dialog', dialogVisible);
 
         // Status line settles async after open.
+        // 30s CEILINGS, not expectations (locally these transitions land in
+        // well under a second). The original 5s waits were the tightest in the
+        // acceptance tier and the first thing to die on a contended CI runner
+        // — crashing the process, since these waits are unwrapped. A ceiling
+        // only bites on a genuine no-show; if one fires at 30s, debug the
+        // dialog, don't raise the number.
         await page.waitForFunction(() =>
-            !document.getElementById('backup-dialog-status').textContent.startsWith('Checking'), null, { timeout: 5000 });
+            !document.getElementById('backup-dialog-status').textContent.startsWith('Checking'), null, { timeout: 30000 });
         const emptyStatus = await page.$eval('#backup-dialog-status', (el) => el.textContent);
         check('fresh profile shows the "no automatic backup yet" status', /no automatic backup yet/i.test(emptyStatus), emptyStatus);
 
@@ -111,7 +117,7 @@ try {
         await page.evaluate(() => window.__arcade.localBackup.maybeSnapshot(true));
         await page.evaluate(() => window.__arcade.backupDialog.open());
         await page.waitForFunction(() =>
-            /Last automatic backup:/.test(document.getElementById('backup-dialog-status').textContent), null, { timeout: 5000 });
+            /Last automatic backup:/.test(document.getElementById('backup-dialog-status').textContent), null, { timeout: 30000 });
         const status = await page.$eval('#backup-dialog-status', (el) => el.textContent);
         check('status line shows the automatic-backup timestamp and count', /Last automatic backup: .+ · 1 kept/.test(status), status);
         const localWhen = await page.$eval('#backup-local-when', (el) => el.textContent);
@@ -121,7 +127,7 @@ try {
         await page.waitForFunction(({ gidA, gidB }) => {
             const opts = [...document.getElementById('backup-export-scope').options].map((o) => o.value);
             return opts.includes(gidA) && opts.includes(gidB);
-        }, { gidA: GID_A, gidB: GID_B }, { timeout: 5000 });
+        }, { gidA: GID_A, gidB: GID_B }, { timeout: 30000 });
         const firstOpt = await page.$eval('#backup-export-scope', (el) => ({ v: el.options[0].value, t: el.options[0].textContent }));
         check('scope select lists "Everything" first', firstOpt.v === '' && /everything/i.test(firstOpt.t), JSON.stringify(firstOpt));
 
@@ -130,7 +136,7 @@ try {
         await page.evaluate(() => { document.getElementById('backup-view-data').open = true; });
         await page.waitForFunction((gidA) =>
             [...document.querySelectorAll('#backup-view-data-body .backup-dialog__app > summary')]
-                .some((s) => s.textContent.includes(gidA)), GID_A, { timeout: 5000 });
+                .some((s) => s.textContent.includes(gidA)), GID_A, { timeout: 30000 });
         const viewer = await page.evaluate(({ gidA, gidB }) => {
             const apps = [...document.querySelectorAll('#backup-view-data-body .backup-dialog__app')];
             const findApp = (gid) => apps.find((a) => a.querySelector('summary').textContent.includes(gid));
@@ -158,7 +164,7 @@ try {
             page.click('#backup-export-run')
         ]);
         check('export produced a download', !!dl);
-        await page.waitForFunction(() => !document.getElementById('backup-export-run').disabled, null, { timeout: 5000 });
+        await page.waitForFunction(() => !document.getElementById('backup-export-run').disabled, null, { timeout: 30000 });
         const passAfter = await page.$eval('#backup-export-passphrase', (el) => el.value);
         check('passphrase field cleared after export', passAfter === '');
 
@@ -183,7 +189,7 @@ try {
 
         await page.evaluate(() => { window.__arcade.backupDialog.close(); window.__arcade.backupDialog.open(); });
         await page.waitForFunction(() =>
-            document.getElementById('backup-restore-peers').children.length > 0, null, { timeout: 5000 });
+            document.getElementById('backup-restore-peers').children.length > 0, null, { timeout: 30000 });
         const rowText = await page.$eval('#backup-restore-peers', (el) => el.textContent);
         check('peer restore row renders with name and received date', rowText.includes('Kitchen Tablet') && /received/.test(rowText), rowText);
         const p2pLoaded = await page.evaluate(() => window.__arcade.p2p != null);
@@ -193,7 +199,7 @@ try {
         // key must come back (merge import of the seeded generation).
         await page.click('#backup-restore-peers .backup-dialog__row');
         await page.waitForFunction((gidA) =>
-            localStorage.getItem('arcade.v1.' + gidA + '.state.progress') !== null, GID_A, { timeout: 8000 });
+            localStorage.getItem('arcade.v1.' + gidA + '.state.progress') !== null, GID_A, { timeout: 30000 });
         const restored = await page.evaluate((gidA) => localStorage.getItem('arcade.v1.' + gidA + '.state.progress'), GID_A);
         check('clicking the peer row restores the wiped key', restored === JSON.stringify({ level: 5, name: 'aria' }), String(restored));
 
