@@ -54,6 +54,7 @@ const ASSETS_TO_CACHE = [
   './arcade-backup.js',
   './arcade-local-backup-core.js',
   './arcade-local-backup.js',
+  './arcade-backup-ui.js',
   './arcade-ui-bridge.js',
   './arcade-user-identity.js',
   './arcade-catalog.js',

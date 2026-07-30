@@ -638,36 +638,6 @@ export function initSaveLoad(host) {
         }
     }
 
-    // Thin prompt wrapper over performExport() for the legacy
-    // "Export App / Encrypted…" menu item (removed with the Game Data
-    // dialog — delete this once the dialog's export form lands).
-    async function exportSaveAdvanced() {
-        const gameIds = await listExportableAppIds();
-        let appId;
-        if (gameIds.length > 0) {
-            const choice = await host.dialog({
-                message: 'Export everything, or just one app?\n\nApps with data: ' + gameIds.join(', ')
-                    + '\n\nType an app name to export only that app, or leave blank for everything.',
-                input: true, inputValue: '', okLabel: 'Continue', cancelLabel: 'Cancel'
-            });
-            if (choice === null) return; // cancelled
-            const trimmed = choice.trim();
-            if (trimmed) {
-                if (gameIds.indexOf(trimmed) === -1) {
-                    showToast('Unknown app "' + trimmed + '" — export cancelled.', { error: true });
-                    return;
-                }
-                appId = trimmed;
-            }
-        }
-        const passphrase = await host.dialog({
-            message: 'Optional: enter a passphrase to encrypt this export. Leave blank for a plain-text file.',
-            input: true, inputType: 'password', inputValue: '', okLabel: 'Export', cancelLabel: 'Cancel'
-        });
-        if (passphrase === null) return; // cancelled
-        return performExport({ appId, passphrase });
-    }
-
     // ---- data view (read-only) ----
     // Metadata-shaped snapshot for the Game Data dialog's viewer: per-app
     // localStorage keys with values, store record counts, and file sizes —
@@ -924,12 +894,11 @@ export function initSaveLoad(host) {
         return true;
     }
 
-    const btnSave = document.getElementById('btn-save');
-    const btnSaveAdvanced = document.getElementById('btn-save-advanced');
+    // #btn-load / #file-load live inside the Game Data dialog
+    // (arcade-backup-ui.js owns the dialog chrome; this module owns the
+    // import flow those elements trigger, same as when they were menu items).
     const btnLoad = document.getElementById('btn-load');
     const fileLoad = document.getElementById('file-load');
-    btnSave.addEventListener('click', () => { exportSave(); });
-    btnSaveAdvanced.addEventListener('click', () => { exportSaveAdvanced(); });
     btnLoad.addEventListener('click', () => { fileLoad.click(); });
     fileLoad.addEventListener('change', () => {
         const f = fileLoad.files && fileLoad.files[0];

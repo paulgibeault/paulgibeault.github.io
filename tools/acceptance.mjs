@@ -241,12 +241,18 @@ async function runPerGame() {
             stragglers.length ? `stragglers: ${stragglers.join(', ')}` : '');
 
         // 5 — launcher save → exported JSON contains game keys.
-        // #btn-save lives inside a collapsed menu; click via evaluate so we
-        // don't depend on Playwright's actionability checks for a button that
-        // becomes visible only after the user opens the menu.
+        // The export form lives inside the Game Data dialog; open it and
+        // submit with the defaults (Everything, no passphrase) via evaluate
+        // so we don't depend on Playwright's actionability checks.
         const dlPromise = page.waitForEvent('download', { timeout: 5_000 }).catch(() => null);
-        await page.evaluate(() => document.getElementById('btn-save')?.click());
+        await page.evaluate(() => {
+            window.__arcade.backupDialog?.open();
+            document.getElementById('backup-export-run')?.click();
+        });
         const dl = await dlPromise;
+        // Close the dialog again — later checks click page elements for real,
+        // and an open overlay would intercept them.
+        await page.evaluate(() => window.__arcade.backupDialog?.close());
         if (!dl) {
             record(5, 'launcher save → exported JSON contains game keys', false,
                 'save did not produce a download');
