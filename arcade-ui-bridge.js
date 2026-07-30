@@ -18,7 +18,7 @@
  *     with the app's catalog name) and can never request the password-masked
  *     input the launcher's own passphrase prompts use — validateUiOp has no
  *     inputType field by construction.
- *   - Only the ACTIVE frame may pop dialogs (confirm/prompt/openFile/share).
+ *   - Only the ACTIVE frame may pop dialogs (confirm/openFile/share).
  *     A background pooled frame gets the cancel answer (value:null) instead
  *     — same shape as the user dismissing, so games need no special path.
  *
@@ -64,15 +64,6 @@ export function initUiBridge(host) {
             okLabel: op.okLabel, cancelLabel: op.cancelLabel
         });
         bridgeReply(gameId, op.id, r === null ? null : true);
-    }
-
-    async function opPrompt(gameId, op) {
-        if (!isActive(gameId)) return bridgeReply(gameId, op.id, null);
-        const r = await host.dialog({
-            message: attributed(gameId, op.message),
-            input: true, inputValue: op.value
-        });
-        bridgeReply(gameId, op.id, typeof r === 'string' ? r : null);
     }
 
     async function opOpenFile(gameId, op) {
@@ -146,7 +137,6 @@ export function initUiBridge(host) {
         if (!op) return;
         switch (op.op) {
             case 'confirm': opConfirm(gameId, op); break;
-            case 'prompt': opPrompt(gameId, op); break;
             case 'openFile': opOpenFile(gameId, op); break;
             case 'share': opShare(gameId, op); break;
             case 'setTitle': host.setGameTitle(gameId, op.title); break;

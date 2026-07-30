@@ -56,13 +56,13 @@ export const SAVE_SCHEMA = 2;
 export const MAX_IMPORT_BYTES = 64 * 1024 * 1024;
 export const PROBE_KEY = KEY_PREFIX + '_meta.probe';
 
-// ---- ls-proxy key namespace ----
-// LEGACY (scheduled for removal, see ISSUES.md). Some pre-SDK games install a
-// postMessage-backed shim that overrides window.localStorage; their keys live
-// under
-// arcade.v1.<gameId>.ls.<key> so they ride along with save/load bundling.
-export function lsPrefix(gameId) { return KEY_PREFIX + gameId + '.ls.'; }
-// A legacy ls-proxy key stores its sub-key verbatim, so it can contain
+// ---- legacy '.ls.' key namespace (data-at-rest only) ----
+// The live ls-proxy protocol is GONE (retired when its last consumer's
+// migration shipped — see ISSUES.md history), but keys it wrote —
+// arcade.v1.<gameId>.ls.<key> — persist in players' storage and in every
+// backup exported while the shim existed, so import/restore must keep
+// accepting the namespace forever.
+// A legacy '.ls.' key stores its sub-key verbatim, so it can contain
 // characters (spaces, ':', '/') that the stricter isSafeArcadeKey regex
 // rejects — which would silently drop it from every save/restore. Export
 // and import treat the whole '.ls.' subtree as backup-eligible as long
@@ -111,7 +111,7 @@ export function syncEligibleKey(k) {
     const seg = k.slice(KEY_PREFIX.length).split('.');
     if (seg[0] === '_meta' || seg[0] === 'global') return false; // device-local / launcher-owned
     if (!seg[1] || seg[1].charAt(0) === '_') return false;       // SDK sidecars (_sync/_noExport/_migrated)
-    if (seg[1] === 'ls') return false;                           // ls-proxy subtree: not synced in v1
+    if (seg[1] === 'ls') return false;                           // legacy '.ls.' subtree: not synced in v1
     return true;
 }
 

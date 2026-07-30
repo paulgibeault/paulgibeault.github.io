@@ -81,7 +81,7 @@
  *
  *   // Multiplayer (no-ops standalone)
  *   Arcade.peer.status / onStatus / send / onMessage
- *   Arcade.peer.self() / remote()                 stable device identities
+ *   Arcade.peer.self()                            stable device identity
  *   Arcade.peer.onReady(fn)                       remote same-game listening
  *   Arcade.peer.sendBlob(blob, { onProgress }) / onBlob(fn)
  *   Arcade.peer.onBlobError(fn)   failed incoming transfer: { id, name,
@@ -96,7 +96,6 @@
  *   // and degrade to the cancel answer without it)
  *   Arcade.ui.toast(message, { kind, duration })
  *   Arcade.ui.confirm(message, { okLabel, cancelLabel }) → Promise<boolean>
- *   Arcade.ui.prompt(message, defaultValue)       → Promise<string|null>
  *   Arcade.ui.setTitle(title)                     app-set topbar title ('' resets)
  *   Arcade.ui.onBeforeQuit(fn)                    veto/flush on quit: return
  *                                                 false (or a Promise of it)
@@ -117,6 +116,8 @@
  *   // Storage durability
  *   Arcade.state.set(key, value)                  → true | false (quota)
  *   Arcade.onStorageError(fn)                      fired when a write is dropped
+ *                                 (default: the SDK toasts; registering any
+ *                                 listener replaces the default)
  *   Arcade.storage.estimate() / persisted() / persist()
  *
  *   // Async per-app storage (large data — IndexedDB / OPFS; all Promises)
@@ -179,7 +180,7 @@
     // tools/sdk-version-unit.mjs enforces all three. Launcher↔SDK compat is
     // still negotiated by welcome.caps, never by this number; it exists for
     // humans (bug reports, CHANGELOG) and for the pinned-URL publish scheme.
-    var SDK_SEMVER = '3.11.0';
+    var SDK_SEMVER = '3.12.0';
     var HANDSHAKE_TIMEOUT_MS = 300;
     // Opaque-origin (sandboxed, no allow-same-origin) frames have no storage
     // to fall back to, so waiting longer for the launcher costs nothing and
@@ -284,7 +285,7 @@
         for (var i = 0; i < arr.length; i++) {
             var p = arr[i];
             if (!p || typeof p !== 'object') continue;
-            var rec = noteRemotePeer(p.deviceId, p.name); // validates deviceId, keeps remote() coherent
+            var rec = noteRemotePeer(p.deviceId, p.name); // validates deviceId, keeps peer-name memory coherent
             if (!rec) continue;
             next.push({
                 deviceId: rec.deviceId,
@@ -443,7 +444,21 @@
     // so an app can warn the user instead of losing data silently. Declared
     // before writeJSON because writeJSON references it.
     var storageErrorListeners = [];
+    var storageErrorToastAt = 0;
     function fireStorageError(key, err) {
+        if (storageErrorListeners.length === 0) {
+            // Default handler: no game registered a listener, so surface the
+            // drop instead of losing data silently (before this default, a
+            // quota failure was invisible in every fleet game). Registering
+            // ANY onStorageError listener replaces it. Throttled — a save
+            // loop hitting quota must not toast-spam.
+            var now = Date.now();
+            if (now - storageErrorToastAt > 10000) {
+                storageErrorToastAt = now;
+                try { uiApi.toast('Save failed — device storage is full', { kind: 'error', duration: 4000 }); } catch (e) {}
+            }
+            return;
+        }
         for (var i = 0; i < storageErrorListeners.length; i++) {
             // A listener throwing must not mask the underlying write failure.
             try { storageErrorListeners[i]({ key: key, error: err }); } catch (e) {}
@@ -542,6 +557,13 @@
     // Deterministic seeded PRNG (mulberry32) for lockstep/turn-based games —
     // both devices seed from the same value (e.g. a shared game code) and deal
     // the same deck without a desync from Math.random.
+    //
+    // The rng/daily/share block below also ships as the importable companion
+    // /arcade-rng.js (games vendor a byte-identical copy so their node --test
+    // suites can run the real algorithm without window.Arcade). This inline
+    // copy exists because the SDK is a classic script and cannot import ESM;
+    // tools/sdk-helpers-acceptance.mjs pins the two to identical streams and
+    // codecs — change BOTH or that gate fails.
     function hashStringToU32(str) {
         var h = 2166136261 >>> 0;
         for (var i = 0; i < str.length; i++) {
@@ -1966,18 +1988,6 @@
                 return { deviceId: id, name: name || 'My device' };
             } catch (e) { return null; }
         },
-        // Most recently seen remote device ({ deviceId, name }) or null.
-        // DEPRECATED single-peer convenience — prefer peers() (full roster,
-        // multi-seat aware). Kept for older single-peer games; retired once the
-        // legacy arcade:peer.identity wire message is dropped (all launchers now
-        // send the peer.roster cap, which peers() reads).
-        remote: function () {
-            var best = null;
-            for (var k in remotePeers) {
-                if (!best || remotePeers[k].at > best.at) best = remotePeers[k];
-            }
-            return best ? { deviceId: best.deviceId, name: best.name } : null;
-        },
         // Full peer roster: [{ deviceId, name, status, direct }], [] when no
         // session or on a launcher without the 'peer.roster' cap (an old
         // launcher's welcome seed would otherwise linger stale forever —
@@ -2237,19 +2247,6 @@
                     op: 'confirm', message: msg,
                     okLabel: opts.okLabel, cancelLabel: opts.cancelLabel
                 }, null).then(function (v) { return v === true; });
-            });
-        },
-        // → Promise<string|null> (null = cancelled).
-        prompt: function (message, defaultValue) {
-            var msg = String(message == null ? '' : message);
-            var dflt = defaultValue == null ? '' : String(defaultValue);
-            return readyPromise.then(function () {
-                if (!framed) {
-                    try { return window.prompt(msg, dflt); } catch (e) { return null; }
-                }
-                if (uiBridgeMissing()) return null;
-                return uiRpc({ op: 'prompt', message: msg, value: dflt }, null)
-                    .then(function (v) { return typeof v === 'string' ? v : null; });
             });
         },
         // App-set topbar title; '' (or nothing) resets to the catalog name.

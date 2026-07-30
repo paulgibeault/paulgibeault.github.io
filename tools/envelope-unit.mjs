@@ -178,12 +178,14 @@ function uiOpTests() {
     ok(validateUiOp({ op: 'confirm', id: 'r1', message: 'm', okLabel: 7 }).okLabel === 'OK',
         'non-string okLabel → default');
 
-    const p1 = validateUiOp({ op: 'prompt', id: 'r2', message: 'Name?', value: 'bob' });
-    ok(p1 && p1.value === 'bob', 'prompt carries default value');
-    ok(validateUiOp({ op: 'prompt', id: 'r2', message: 'Name?' }).value === '', 'prompt value defaults empty');
-    // The security property is structural: the normalized shape has no
-    // inputType at all, so a game can never reach the password-masked input.
-    ok(!('inputType' in validateUiOp({ op: 'prompt', id: 'r2', message: 'm', inputType: 'password' })),
+    // 'prompt' was removed from the UI RPC surface (zero consumers, #120
+    // adopt-or-cut) — and the password-masked-input spoof surface went with
+    // it. The shape gate must drop the op entirely.
+    ok(validateUiOp({ op: 'prompt', id: 'r2', message: 'Name?', value: 'bob' }) === null,
+        'prompt op is dropped (removed surface)');
+    // The dialog-spoof guard is structural on every surviving RPC op: the
+    // normalized shape carries no inputType at all.
+    ok(!('inputType' in validateUiOp({ op: 'confirm', id: 'r2', message: 'm', inputType: 'password' })),
         'inputType is never passed through (dialog-spoof guard)');
 
     ok(validateUiOp({ op: 'openFile', id: 'r3' }).accept === '', 'openFile accept defaults empty');

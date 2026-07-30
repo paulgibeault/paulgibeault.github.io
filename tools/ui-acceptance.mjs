@@ -98,30 +98,23 @@ try {
     const c2 = await pollFrame(frame, () => window.uiResults.c2 === false ? 'no' : null);
     check('confirm cancel resolves false', c2 === 'no');
 
-    // ── 3. prompt: default value, typed reply, cancel → null ──
-    await frame.evaluate(() => { Arcade.ui.prompt('Save as?', 'untitled').then(v => { window.uiResults.p1 = v; }); });
-    await page.waitForSelector(DIALOG_OPEN, { timeout: 5000 });
-    const promptState = await page.evaluate(() => ({
-        value: document.getElementById('arcade-dialog-input').value,
-        type: document.getElementById('arcade-dialog-input').type,
-        hidden: document.getElementById('arcade-dialog-input').classList.contains('hidden'),
+    // ── 3. prompt was removed (zero consumers, #120 adopt-or-cut) — the
+    // surface must be ABSENT, both SDK-side and at the bridge's shape gate,
+    // so no game silently grows a dependency on a path nothing services ──
+    const promptType = await frame.evaluate(() => typeof Arcade.ui.prompt);
+    check('Arcade.ui.prompt is removed from the SDK', promptType === 'undefined', promptType);
+    const promptIgnored = await frame.evaluate(() => new Promise((resolve) => {
+        // A hand-rolled prompt op must be dropped by the launcher: no dialog
+        // opens and no arcade:bridge.result ever answers it.
+        let answered = false;
+        window.addEventListener('message', (e) => {
+            if (e.data && e.data.type === 'arcade:bridge.result' && e.data.id === 'probe-prompt') answered = true;
+        });
+        parent.postMessage({ type: 'arcade:ui.op', op: 'prompt', id: 'probe-prompt', message: 'Name?' }, '*');
+        setTimeout(() => resolve(!answered), 800);
     }));
-    check('prompt shows the input with the default value',
-        promptState.hidden === false && promptState.value === 'untitled', JSON.stringify(promptState));
-    check('prompt input is never password-masked', promptState.type === 'text', promptState.type);
-    await page.fill('#arcade-dialog-input', 'my-save');
-    await page.click('#arcade-dialog-ok');
-    const p1 = await pollFrame(frame, () => window.uiResults.p1);
-    check('prompt OK resolves the typed value', p1 === 'my-save', JSON.stringify(p1));
-
-    await frame.evaluate(() => {
-        window.uiResults.p2 = 'unset';
-        Arcade.ui.prompt('Rename?').then(v => { window.uiResults.p2 = v; });
-    });
-    await page.waitForSelector(DIALOG_OPEN, { timeout: 5000 });
-    await page.click('#arcade-dialog-cancel');
-    const p2 = await pollFrame(frame, () => window.uiResults.p2 === null ? 'null' : null);
-    check('prompt cancel resolves null', p2 === 'null');
+    const noDialog = await page.evaluate((sel) => !document.querySelector(sel), DIALOG_OPEN);
+    check('a raw prompt op is dropped by the bridge (no reply, no dialog)', promptIgnored === true && noDialog);
 
     // ── 4. setTitle: topbar follows, empty resets, survives a switch ──
     await frame.evaluate(() => Arcade.ui.setTitle('Journal — draft 3'));

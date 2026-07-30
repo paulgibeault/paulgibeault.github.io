@@ -273,8 +273,6 @@ focus-trap modal, prefixed with the app's catalog name.
 
 Twenty-five message types total (see GAME_INTEGRATION.md §14 for the full summary table). The launcher routes peer messages by `gameId` so multiple games could in principle multiplex one connection, though the current design assumes one foreground game at a time. Between launchers, presence frames (`{arcade:1, kind:'presence'|'presence-ack', gameId}`) announce that a game is mounted and listening; the receiving launcher surfaces them to the matching game as `arcade:peer.ready`.
 
-**Legacy compatibility shim (scheduled for removal).** Some games predating the SDK shipped their own postMessage-backed `localStorage` override, which blocks their module init until it gets a reply. The launcher answers that `'ls-proxy-request'`/`'ls-proxy-response'` protocol (namespaced into `arcade.v1.<gameId>.ls.<key>`) purely so such a game does not hang forever. It is launcher-side legacy support, not part of the `arcade:` protocol; new games use `Arcade.state.*`. Retirement is tracked in ISSUES.md and gated on the last consumer migrating — at which point the handler is deleted outright, not deprecated.
-
 ---
 
 ## Multiplayer transport — serverless P2P backbone (IMPLEMENTED)

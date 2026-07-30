@@ -127,6 +127,39 @@ try {
     check('share.decode(tampered) never throws', r.tamperNoThrow && r.tamperNullOrValid);
     check('share.decode strips prototype-polluting keys', r.noPollution && r.protoKeyStripped);
 
+    // ── /arcade-rng.js companion parity ──
+    // The importable companion and the SDK's inline copy must produce
+    // identical streams and codecs: games' node --test suites run the
+    // companion while the browser runs the SDK, and a fork between them would
+    // silently change a game's seed streams between test and runtime.
+    {
+        const c = await import(new URL('../arcade-rng.js', import.meta.url));
+        const nseq = (rng, n) => Array.from({ length: n }, () => rng());
+        const p = await page.evaluate(() => {
+            const seq = (rng, n) => Array.from({ length: n }, () => rng());
+            return {
+                numeric: seq(Arcade.rng(1234), 10),
+                string: seq(Arcade.rng('room-42'), 10),
+                hashes: [Arcade.rng.hash(''), Arcade.rng.hash('a'), Arcade.rng.hash('arcade-rng')],
+                daily: seq(Arcade.daily.seed('parity'), 5),
+                code: Arcade.share.encode({ msg: 'parity ✓', n: [1, 2, 3] }, { v: 3 })
+            };
+        });
+        check('companion makeRng matches Arcade.rng for a numeric seed',
+            JSON.stringify(nseq(c.makeRng(1234), 10)) === JSON.stringify(p.numeric));
+        check('companion makeRng matches Arcade.rng for a string seed',
+            JSON.stringify(nseq(c.makeRng('room-42'), 10)) === JSON.stringify(p.string));
+        check('companion hashU32 matches Arcade.rng.hash vectors',
+            JSON.stringify([c.hashU32(''), c.hashU32('a'), c.hashU32('arcade-rng')]) === JSON.stringify(p.hashes));
+        check('companion dailySeed matches Arcade.daily.seed for the fixture gameId',
+            JSON.stringify(nseq(c.dailySeed('store-test', 'parity'), 5)) === JSON.stringify(p.daily));
+        check('companion shareEncode emits the identical code',
+            c.shareEncode({ msg: 'parity ✓', n: [1, 2, 3] }, { v: 3 }) === p.code);
+        const cdec = c.shareDecode(p.code);
+        check('companion shareDecode round-trips the SDK-encoded code',
+            !!cdec && cdec.v === 3 && JSON.stringify(cdec.data) === JSON.stringify({ msg: 'parity ✓', n: [1, 2, 3] }));
+    }
+
     // ── Arcade.records — personal-bests API (#9) ──
     const rec = await page.evaluate(() => {
         const out = {};

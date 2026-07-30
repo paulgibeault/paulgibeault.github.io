@@ -53,8 +53,8 @@ export const ARCADE_PEER_CAPS = Object.freeze(
 export function initMessageRouter(host) {
     const pool = host.pool;
 
-    // The storage bridge (opaque-frame custodian: ls-proxy, state.write,
-    // store.op, files.op, storage.op) lives in arcade-storage-bridge.js;
+    // The storage bridge (opaque-frame custodian: state.write, store.op,
+    // files.op, storage.op) lives in arcade-storage-bridge.js;
     // the router below delegates authenticated messages to it via
     // host.getStorage(). stateSnapshotFor stays with the router because the
     // arcade:hello → arcade:welcome path needs it synchronously.
@@ -85,16 +85,15 @@ export function initMessageRouter(host) {
     // Storage-bridge delegation. The router owns the trust boundary and
     // hands each already-authenticated storage message to the bridge module
     // (host.getStorage(), wired by the storage module block). A message that
-    // arrives before the module loads is queued and replayed on init —
-    // dropping one would hang a game whose ls-proxy shim blocks boot on the
-    // 'dump' reply. In practice no game auto-mounts at parse time, so the
-    // queue is defence-in-depth, not a hot path.
+    // arrives before the module loads is queued and replayed on init, so a
+    // storage op can never be silently dropped in the parse-time window. In
+    // practice no game auto-mounts at parse time, so the queue is
+    // defence-in-depth, not a hot path.
     const pendingStorageMsgs = [];
     function dispatchStorageMessage(gameId, data, source, origin) {
         const S = host.getStorage();
         if (!S) { pendingStorageMsgs.push([gameId, data, source, origin]); return; }
         switch (data.type) {
-            case 'ls-proxy-request': S.lsProxy(gameId, data, source, origin); break;
             case 'arcade:state.write': S.stateWrite(gameId, data); break;
             case 'arcade:store.op': S.storeOp(gameId, data); break;
             case 'arcade:files.op': S.filesOp(gameId, data); break;
@@ -169,11 +168,6 @@ export function initMessageRouter(host) {
         const t = data.type;
         if (typeof t !== 'string') return;
         if (host.devModeOn()) console.debug('[Arcade launcher ← ' + gameId + ']', data);
-
-        if (t === 'ls-proxy-request') {
-            dispatchStorageMessage(gameId, data, e.source, e.origin);
-            return;
-        }
 
         if (t.indexOf('arcade:') !== 0) return;
         switch (t) {

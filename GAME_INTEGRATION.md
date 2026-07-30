@@ -1,10 +1,9 @@
 # Paul's Arcade — Game Integration Template
 
 The minimal contract every game must satisfy to slot cleanly into the launcher.
-The SDK is a single file served from the launcher origin — pin the current
-major at `/sdk/v3/arcade-sdk.js` (`/arcade-sdk.js` is the evergreen alias);
-the rest is convention. SDK major: **v3** (semver + release log in
-[`sdk/CHANGELOG.md`](sdk/CHANGELOG.md)).
+The SDK is a single file served from the launcher origin — load the evergreen
+alias `/arcade-sdk.js` (§2); the rest is convention. SDK major: **v3**
+(semver + release log in [`sdk/CHANGELOG.md`](sdk/CHANGELOG.md)).
 
 For background see [ARCADE_PLATFORM.md](ARCADE_PLATFORM.md). This file is the
 implementer's checklist.
@@ -47,18 +46,27 @@ fragments (invite/reply links) take precedence over `#app=`.
 
 ## 2. Load the SDK
 
+Starting a fresh app? [`tools/templates/starter-app/`](tools/templates/starter-app/)
+is a working skeleton (index.html with the two lines below, manifest, reference
+service worker, icon) — copy it and rename.
+
 Drop two lines into `<head>` of `index.html`, before any game script that touches storage:
 
 ```html
-<script src="/sdk/v3/arcade-sdk.js"></script>
+<script src="/arcade-sdk.js"></script>
 <script>Arcade.init({ gameId: '<your-game-id>' });</script>
 ```
 
-Use the **major-pinned** path (`/sdk/v3/...`): it keeps serving SDK v3 even
-after a breaking v4 ships, so a launcher deploy can never brick a game still
-on v3. `/arcade-sdk.js` is the evergreen alias (always the newest major) —
-integrations should pin. Within a major, launcher↔SDK feature compatibility
-is negotiated at runtime by `welcome.caps`, never by version numbers.
+Use the **evergreen** alias (`/arcade-sdk.js`, always the newest major) —
+this is the deliberate fleet posture (decided in #120/#108, recorded in
+ISSUES.md): the closed fleet moves together at each major cut rather than
+pinning per app, so a breaking major ships as one coordinated change that
+migrates every app the moment it deploys. The major-pinned form
+(`/sdk/v<major>/arcade-sdk.js`) keeps serving its major line even after a
+breaking cut and exists as the escape hatch for an app that must sit a major
+out — but that is the exception, not the standard. Within a major,
+launcher↔SDK feature compatibility is negotiated at runtime by
+`welcome.caps`, never by version numbers.
 
 Use a **root-relative** URL, not the absolute
 `https://paulgibeault.github.io/...` form. Both work in production, but
@@ -76,8 +84,12 @@ same-origin `localStorage` directly.
 === 'bridged'`): the launcher sandboxes game iframes without
 `allow-same-origin`, so the frame cannot touch origin storage at all — the SDK
 proxies every storage API over postMessage to the launcher instead, and sync
-`Arcade.state` reads serve from a cache seeded by the launcher's welcome. The
-API surface is IDENTICAL in both modes; the one behavioral contract:
+`Arcade.state` reads serve from a cache seeded by the launcher's welcome.
+(`Arcade.context.storage` has a third value, `'memory'`: an opaque-origin
+frame that no launcher answered — some non-launcher embed. State then lives
+in memory only and is gone on unload; the API keeps working, nothing
+persists. You don't design for this mode, but don't crash in it either.)
+The API surface is IDENTICAL in all modes; the one behavioral contract:
 
 **Await `Arcade.ready` before reading state.** Pre-ready reads in a frame
 return empty (the snapshot hasn't arrived) and log a
@@ -141,19 +153,40 @@ touch `localStorage` directly.
   (framed mode) the write is proxied to the launcher, so `set()` returns `true`
   = *accepted, pending* — a later launcher-side quota failure arrives
   asynchronously. **`Arcade.onStorageError` is therefore the only reliable
-  "dropped" signal**; subscribe once for anything the user would hate to lose:
+  "dropped" signal.** Since SDK 3.12.0 you get a default for free: with no
+  listener registered, the SDK itself toasts "Save failed — device storage is
+  full" (throttled to one per 10 s), so a quota failure is never silent.
+  Register your own listener only to customize the reaction — doing so
+  replaces the default:
 
   ```js
-  Arcade.onStorageError(() => Arcade.ui.toast('Storage full — some data was not saved', { kind: 'error' }));
+  Arcade.onStorageError(({ key, error }) => promptPlayerToFreeSpace(key));
   ```
 
-  `Arcade.storage.estimate()` returns `{ usage, quota }` if you need to show it.
-  (The launcher already calls `navigator.storage.persist()` on boot to keep the
-  origin's data from being evicted under pressure.)
+  `Arcade.storage.estimate()` returns `{ usage, quota }` if you need to show
+  it; `Arcade.storage.persisted()` / `Arcade.storage.persist()` read/request
+  the origin's eviction protection (the launcher already calls `persist()` on
+  boot, so games rarely need to).
+
+Beyond `get`/`set`/`remove`: `Arcade.state.has(key)` distinguishes "absent"
+from a stored `null` (which `get` can't); `Arcade.state.keys()` lists the
+game's stored keys (unprefixed); `Arcade.state.onChange(key, fn)` fires on
+any change to that key — launcher-side writes, another frame, an inbound
+sync, a save import. `Arcade.global.onChange(key, fn)` is the same for
+shared `global.*` keys, and `Arcade.player.onChange(fn)` for the display
+name.
 
 ---
 
 ## 3a. Async storage — for data that outgrows localStorage
+
+> **Available, not yet exercised.** No catalog app currently uses
+> `Arcade.store` or `Arcade.files` (every shipped save fits `Arcade.state`).
+> The surfaces are tested by the launcher's store/bridge acceptance suites,
+> but no real game has proven the contract end-to-end the way a shipped
+> consumer does — budget a little extra verification time if you're the
+> first. (Kept deliberately: #120's adopt-or-annotate pass chose to keep
+> them over cutting.)
 
 `Arcade.state` is synchronous, string-only, and shares the origin's ~5 MB
 localStorage budget with every other app. When you need more room or binary
@@ -232,12 +265,59 @@ Ground rules:
 
 ---
 
+## 3c. Migrating existing saves — `migrate` and `adopt`
+
+A game onboarding into the fleet (or reshaping its save data) uses two
+primitives. Five of the seven catalog apps run them today — this is the
+load-bearing path for keeping players' pre-existing saves.
+
+```js
+// Run fn exactly ONCE per (gameId, version) — a persisted sentinel skips it
+// on every later load. Use for one-shot data reshapes.
+Arcade.state.migrate('v2', () => {
+  const legacy = Arcade.state.get('oldShape');
+  if (legacy) Arcade.state.set('newShape', convert(legacy));
+  Arcade.state.remove('oldShape');
+});
+
+// Move a PRE-NAMESPACE key (raw localStorage, from before the game joined
+// the fleet) into the game's namespace: read → namespaced write → delete
+// original. Returns true when a legacy value was found and handled.
+Arcade.state.migrate('v1', () => {
+  Arcade.state.adopt('myGameSave');                    // same key name, namespaced
+  Arcade.state.adopt('hi-scores', 'scores');           // rename while adopting
+  Arcade.state.adopt('rawBlob', 'blob', { json: false }); // keep as string, skip JSON.parse
+});
+```
+
+Semantics worth trusting:
+
+- `adopt` is **error-safe**: the original is deleted only after a successful
+  namespaced write, and an existing namespaced value is never clobbered (the
+  legacy key is just cleaned up). By default the raw string is `JSON.parse`d
+  (kept as-is if that fails); `{ json: false }` stores it as a string.
+- In a **bridged frame the migration may run before the welcome snapshot** —
+  the SDK defers it to post-`ready` automatically, and FIFO ordering still
+  runs it before your own `ready.then(boot)` code. Call `migrate()` at
+  script top level, before boot.
+- **The bridged-frame caveat — read this if you use `adopt`:** pre-namespace
+  keys live in the REAL origin's localStorage, which an opaque-origin
+  launcher frame cannot read. When `adopt` hits that wall it flags the
+  enclosing `migrate()`, which **withholds its run-once sentinel** instead of
+  burning it — so the migration re-runs and completes on a later
+  **standalone visit** to the game's own URL (console warnings say exactly
+  this). Burning the sentinel in the frame would orphan the legacy save
+  permanently; that near-miss is why the machinery works this way. Write the
+  migration idempotently (adopt already is) and it needs no special handling.
+
+---
+
 ## 4. Player profile, scores, and stats
 
 - [ ] Use `Arcade.player.name()` / `Arcade.player.setName(s)` for the sticky display name. It lives at `arcade.v1.global.playerName` so every game shares it.
 - [ ] If your game has a leaderboard, use `Arcade.scores.add(category, { score, name?, key?, meta? }, opts?)` and `Arcade.scores.list(category, { limit })`. The SDK keeps the top 100 sorted and stamps `name` (from `Arcade.player.name()`) and `ts` automatically. Higher-is-better is the default; time/move-count games pass `{ order: 'asc' }` on every add so lower scores rank first.
   - **Leaderboards are shared across a player's linked devices.** When two devices are paired and have per-peer sync turned on (Multiplayer → 🔄), the launcher union-merges each device's board into the other's — so `Arcade.scores.list` transparently returns everyone's entries, deduped and re-sorted, capped at 100. Your game does nothing extra: keep calling `add`/`list` as normal. (The SDK stamps a hidden `dev`/`eid` on each entry so merges never drop or double-count a play; don't rely on those fields.)
-- [ ] For a **single personal best per category** (best time for a mode, fewest moves, high percentage) — one value, not a ranked list — use `Arcade.records` rather than bending `scores`. `Arcade.records.best(category, { value, direction, format?, label? })` writes only when the value improves; `direction` is `'higher'` (scores) or `'lower'` (times, move counts), so the record is self-describing and the launcher's **Records** sheet can render it with no per-game code. This is the first-class replacement for the `scores.add(cat, { score: -timeMs })`-then-re-negate trick. `format` is `'duration-ms' | 'integer' | 'percentage'`. Read back with `Arcade.records.get(category)` / `Arcade.records.list()`.
+- [ ] For a **single personal best per category** (best time for a mode, fewest moves, high percentage) — one value, not a ranked list — use `Arcade.records` rather than bending `scores`. `Arcade.records.best(category, { value, direction, format?, label? })` writes only when the value improves; `direction` is `'higher'` (scores) or `'lower'` (times, move counts), so the record is self-describing and the launcher's **Records** sheet can render it with no per-game code. This is the first-class replacement for the `scores.add(cat, { score: -timeMs })`-then-re-negate trick. `format` is `'duration-ms' | 'integer' | 'percentage'`. Read back with `Arcade.records.get(category)` / `Arcade.records.list()`. `Arcade.records.set(category, {...})` writes unconditionally (use it when the game, not the record, decides what counts — e.g. a migration); `Arcade.scores.clear(category)` / `Arcade.records.clear(category)` exist for reset-progress flows.
   - **Which of the three?** `scores` = a sorted leaderboard with many entrants (top-N, names). `records` = one best-ever value per category, self-describing. `stats` = mutable counters/blobs (games played, streaks) that you own the formatting of.
 - [ ] For best-per-thing records (best time per board code, best score per level), stamp each entry with `key` and read back with `Arcade.scores.best(category, key)`. If you need a full keyed map rather than a ranked list, `Arcade.stats` is the blessed home — `Arcade.stats.update(category, prev => ({ ...prev, [boardCode]: bestMs }))`.
 - [ ] If your game tracks counters (games played / won / streak / best time), use `Arcade.stats.update(category, prev => next)` for atomic-style updates and `Arcade.stats.get(category)` to read. When adding a new field to an existing stats category, use `Arcade.stats.getOrInit(category, DEFAULTS)` instead of `get` — it deep-merges defaults under the stored value so existing saves pick up newly-added fields automatically.
@@ -274,8 +354,8 @@ every change. The SDK applies the visual ones to the game's `<html>` for free:
   cues as node graphs:
 
   ```html
-  <script src="/sdk/v3/arcade-sdk.js"></script>
-  <script src="/sdk/v3/arcade-audio.js"></script>   <!-- optional; skip it and you pay nothing -->
+  <script src="/arcade-sdk.js"></script>
+  <script src="/arcade-audio.js"></script>   <!-- optional; skip it and you pay nothing -->
   ```
   ```js
   Arcade.audio.room({ decay: 0.62 });               // the shared acoustic space
@@ -291,7 +371,12 @@ every change. The SDK applies the visual ones to the game's `<html>` for free:
   Elements are physical gestures rather than waveforms — `strike`, `rustle`,
   `pluck` (Karplus–Strong), `creak` (stick-slip), `droplet`, `body` (inharmonic
   partials with independent decay), `thump`, `flare` (combustion), `blast`
-  (explosion), `chirp` (insect stridulation), `stream`. If your game needs a
+  (explosion), `chirp` (insect stridulation), `stream`, plus the later
+  additions the fleet drove in: `shatter` (granular breakage), `ratchet`
+  (decelerating detents), `drone` (sustained tone bed) — 3.8.0; `squelch`
+  (wet contact), `breath`, `grunt` (animal air and voice) — 3.9.0; and `flex`
+  (a thin springy sheet bent and released: paper, cardstock, a flag) —
+  3.10.0. If your game needs a
   gesture that isn't there, add it to the library rather than hand-rolling it in
   the pack: a game's pack is its *design* — which gestures, how loud, how far
   away — and the synthesis belongs where every pack can reach it. Every cue
@@ -300,6 +385,13 @@ every change. The SDK applies the visual ones to the game's `<html>` for free:
   instead of stacking into a pile, and each cue's `send` is really a statement
   about how far away it is. `rnd` is a seeded stream — vary pitch and balance per
   play, because byte-identical repetition is itself a chiptune tell.
+
+  **Ship the pack as a well-known handle (3.11.0+):** keep the room, sends
+  and cue functions in one `js/soundpack.js` and register it via
+  `ArcadeAudioElements.registerPack({ name, ROOM, SENDS, CUES })`, which
+  publishes it at `window.ArcadeSoundPack`. That one handle is what lets the
+  launcher's offline audition renderer (`tools/soundpack/`) load the exact
+  file the game ships — the audition and the game play the same code.
 
   Sustained beds use `const h = Arcade.audio.start('ambient')` / `h.stop(1.5)`;
   register those with `{ sustained: true }` and have the cue return a teardown
@@ -318,9 +410,14 @@ every change. The SDK applies the visual ones to the game's `<html>` for free:
   bed.retune({ heat: 1 }, 3.0);
   ```
 
-  A graph cue **takes precedence over a spec cue of the same name**, so you can
-  upgrade one sound at a time, and keep spec cues registered as a fallback for
-  players on a stale cached SDK.
+  A graph cue **takes precedence over a spec cue of the same name**, so you
+  can upgrade one sound at a time. Don't keep spec cues registered as a
+  "fallback" for a pack-based game, though — the fleet retired that pattern:
+  when the element library is unavailable (a stale cached page, a standalone
+  embed), a pack-based game gates and plays **silence by design**, because
+  the pack *is* the sound and an approximation of it is worse than nothing.
+  Spec cues are for games whose chiptune palette is the deliberate aesthetic,
+  not a degradation tier.
 
 - [ ] **Building a custom node graph? Connect to `Arcade.audio.bus()`, not
   `ctx.destination`.** `Arcade.audio.context()` hands you the managed
@@ -413,7 +510,16 @@ const loop = Arcade.loop((deltaMs) => { update(deltaMs); draw(); });
 loop.start();            // begin
 loop.stop();             // in-game pause menu
 loop.kick();             // one frame on demand (dirty-flag renderers)
+loop.running();          // is it currently scheduled?
+loop.dispose();          // detach lifecycle listeners when done for good
 ```
+
+> **Available, not yet exercised.** No catalog game runs on `Arcade.loop`
+> yet — the existing games' private particle/tween rAF loops are what block
+> adoption, and untangling those is one work package with the tween/fx lift
+> tracked in [#39](https://github.com/paulgibeault/paulgibeault.github.io/issues/39).
+> New games should start on it; it is exactly the suspend/delta bookkeeping
+> §6a asks for.
 
 For timers, `Arcade.session.setTimeout(fn, ms)` / `Arcade.session.setInterval(fn, ms)`
 freeze while suspended (remaining time is preserved and re-armed on resume)
@@ -505,15 +611,15 @@ The sandbox **no-ops `window.confirm`/`prompt`** inside game frames, so the
 SDK provides real modals rendered by the launcher (#35). All of these need
 the launcher's `ui.bridge` capability (`Arcade.peer.caps()`); when the cap
 is absent they resolve as if cancelled instead of hanging. Standalone,
-each falls back to the native equivalent.
+each falls back to the native equivalent. (There is deliberately no
+`Arcade.ui.prompt` — it was removed in 3.12.0 with zero consumers, and its
+absence is also what makes it structurally impossible for a game to imitate
+the launcher's own passphrase input dialogs.)
 
 ```js
 // Modals — launcher-rendered, serialized, focus-trapped. Every dialog is
-// attributed with your app's catalog name (“My App” asks: …), and prompt
-// input is always plain text — apps can never imitate the launcher's own
-// passphrase dialogs.
+// attributed with your app's catalog name (“My App” asks: …).
 const sure = await Arcade.ui.confirm('Erase the journal?', { okLabel: 'Erase', cancelLabel: 'Keep' });
-const name = await Arcade.ui.prompt('Save as?', 'untitled');   // string | null (cancel)
 
 // Topbar title — '' resets to your catalog name. Kept while your frame
 // stays pooled; standalone it drives document.title.
@@ -530,6 +636,7 @@ Arcade.ui.onBeforeQuit(async () => {
 
 // Open a file from the device — sandboxed frames have no picker of their
 // own; the launcher shows a consent dialog, then brokers the File across.
+// (Available, not yet exercised by any catalog game — same caveat as §3a.)
 const file = await Arcade.ui.openFile({ accept: '.txt,text/*' });   // File | null
 
 // Share — Web Share behind a launcher consent dialog; where Web Share is
@@ -541,38 +648,13 @@ const how = await Arcade.ui.share({ text: 'come play', url: 'https://…' });  /
 const ok = await Arcade.ui.copy(shareCode);   // boolean
 ```
 
-Dialog-popping calls (`confirm`/`prompt`/`openFile`/`share`) only work while
+Dialog-popping calls (`confirm`/`openFile`/`share`) only work while
 your app is the **active** one — a backgrounded frame gets the cancel answer
 (`false`/`null`) instead of interrupting whatever the user switched to.
 
----
-
-## 7b. Safe rendering — escape untrusted text
-
-All apps share the launcher's origin, so a script injected into one app can
-read/write **every** app's storage. Any string you didn't author yourself —
-a peer's name or message (`Arcade.peer.onMessage`), a pack/level name from an
-imported or shared file, an entry from `Arcade.scores` — is **untrusted** and
-must be escaped before it touches `innerHTML` or an HTML attribute.
-
-- [ ] Prefer `textContent` / `setAttribute` (they never parse HTML), or use the
-  SDK helpers when you must build markup strings:
-
-  ```js
-  // escape one value
-  el.innerHTML = '<span class="name">' + Arcade.html.escape(peer.name) + '</span>';
-
-  // or a whole fragment — the tagged template escapes every ${…} interpolation
-  el.innerHTML = Arcade.html`<li data-id="${msg.id}">${msg.text}</li>`;
-  ```
-
-- [ ] Validate ids/codes you use in selectors or attributes against a charset
-  (`/^[\w-]+$/`) so a hostile value can't break out of the attribute or the
-  `querySelector` string.
-
-This is a real, shipped-then-fixed bug class in this fleet — twice: once via a
-peer-supplied display name rendered into the DOM, once via a shared config pack.
-Treat every off-device string as hostile.
+One non-UI helper worth knowing here: `Arcade.audio.enabled()` returns
+whether sound can be heard at all (WebAudio exists and `audioVolume` > 0) —
+useful for skipping expensive sound prep when the player has muted.
 
 ---
 
@@ -602,9 +684,13 @@ Arcade.peer.onReady(({ deviceId }) => ...);  // remote has THIS game mounted & l
 Arcade.peer.sendBlob(file, { onProgress });  // chunked large payloads; Promise (broadcast only)
 Arcade.peer.onBlob((blob, { name, size, fromPeer }) => ...);
 Arcade.peer.onBlobError(({ id, name, reason, received, total }) => ...);
-// reason: 'timeout' (stalled 60s — e.g. chunks lost to queue overflow),
-//         'aborted' (sender gave up mid-transfer),
-//         'integrity' (bytes didn't match the sender's SHA-256).
+// reason: 'timeout'   (stalled 60s — e.g. chunks lost to queue overflow),
+//         'aborted'   (sender gave up mid-transfer),
+//         'integrity' (bytes didn't match the sender's SHA-256),
+//         'malformed' (a chunk carried undecodable bytes),
+//         'oversize'  (a chunk or the transfer exceeded its byte caps),
+//         'too-many'  (too many concurrent inbound transfers; capacity frees
+//                      as transfers complete — retry, sendBlob mints a fresh id).
 // A failed transfer is dropped whole — never a silently-wrong blob. Ask the
 // sender to resend. Transfers are hash-verified end-to-end automatically.
 
@@ -710,11 +796,66 @@ the host + two joiners version (targeted sends, roster, meta).
 
 ---
 
+## 7b. Safe rendering — escape untrusted text
+
+All apps share the launcher's origin, so a script injected into one app can
+read/write **every** app's storage. Any string you didn't author yourself —
+a peer's name or message (`Arcade.peer.onMessage`), a pack/level name from an
+imported or shared file, an entry from `Arcade.scores` — is **untrusted** and
+must be escaped before it touches `innerHTML` or an HTML attribute.
+
+- [ ] Prefer `textContent` / `setAttribute` (they never parse HTML), or use the
+  SDK helpers when you must build markup strings:
+
+  ```js
+  // escape one value
+  el.innerHTML = '<span class="name">' + Arcade.html.escape(peer.name) + '</span>';
+
+  // or a whole fragment — the tagged template escapes every ${…} interpolation
+  el.innerHTML = Arcade.html`<li data-id="${msg.id}">${msg.text}</li>`;
+  ```
+
+- [ ] Validate ids/codes you use in selectors or attributes against a charset
+  (`/^[\w-]+$/`) so a hostile value can't break out of the attribute or the
+  `querySelector` string.
+
+This is a real, shipped-then-fixed bug class in this fleet — twice: once via a
+peer-supplied display name rendered into the DOM, once via a shared config pack.
+Treat every off-device string as hostile.
+
+---
+
 ## 7c. Determinism & sharing helpers
 
-Three games hand-rolled the same mulberry32 PRNG, two disagreed on when a
+Four games hand-rolled the same mulberry32 PRNG, two disagreed on when a
 "daily" puzzle rolls over, and every shareable-code format was reinvented.
-The SDK now owns all three primitives — use them instead of copies:
+The platform owns all three primitives now — in two forms, because the
+consumers live in two worlds:
+
+**The importable companion — `/arcade-rng.js` — is the primary form.** Game
+LOGIC (board generation, shuffles, daily derivation) also runs under
+`node --test`, where `window.Arcade` does not exist — which is exactly why
+the fleet's games never adopted the `Arcade.*` form below. The companion is
+a plain ES module with no dependency on the SDK or the DOM. **Vendor a
+byte-identical copy next to your modules** (e.g. `js/arcade-rng.js`) and
+import it relatively — the only specifier that resolves in both the browser
+and node. Same canonical-file rule as `verify-artifact.mjs` (§13a): never
+edit the copy; change the launcher-root canonical and re-copy. Pin the
+algorithm in your tests with known-answer vectors (`makeRng(42)` →
+`0.6011037519201636, 0.44829055899754167, 0.8524657934904099`) so an
+accidental local edit fails fast instead of silently forking your seeds.
+
+```js
+import { makeRng, hashU32, dailyDateStr, dailySeed,
+         shareEncode, shareDecode } from './arcade-rng.js';
+
+const rng = makeRng(seed);          // same generator as Arcade.rng below
+const daily = dailySeed('<gameId>', 'bonus');  // gameId is explicit here
+```
+
+**The `Arcade.*` form** carries the identical implementations on the SDK
+singleton (`tools/sdk-helpers-acceptance.mjs` pins the two to identical
+streams and codecs) — fine for browser-only code that never runs under node:
 
 ```js
 // Seeded PRNG (mulberry32) whose whole state is one u32 — persistable mid-game.
@@ -820,7 +961,10 @@ framed.
 
 ## 10. PWA / service worker hygiene
 
-Several games already ship a `manifest.json` and `sw.js`. Because every game
+**The fleet posture: a manifest implies a worker.** A `manifest.json` claims
+installability, and an installed app that dies without network is a broken
+promise — so any app that ships a manifest also ships a service worker (six
+of the seven catalog apps do; the seventh ships neither). Because every game
 and the launcher live on the same origin, sloppy scopes will collide.
 
 > **Framed reality check:** a game's SW only ever controls **standalone**
@@ -879,6 +1023,16 @@ cleanup, and the wait-then-be-told-to-activate contract).
   not `APP_VERSION === package.json version`, which false-fails on any PR left
   open across a deploy.
 
+- [ ] **Bundled app? The precache list can't be hand-maintained.** A build
+  whose module graph deploys under content-hashed names has nothing stable to
+  list. The pattern: keep `sw.js` at the **repo root** (CI's version rewrite
+  only touches `./sw.js`), ship it into the artifact root from your build
+  config, precache only the shell and unhashed public assets, and let the
+  fetch handler's runtime fill cache each hashed asset on first use — after
+  one online visit the build is fully cached, and a new deploy's new hashes
+  miss the old cache by construction. Build-time precache injection is the
+  eventual fleet-wide replacement ([#39](https://github.com/paulgibeault/paulgibeault.github.io/issues/39)).
+
 - [ ] **Don't `skipWaiting()` on install.** Let the new worker wait, and handle
   the `arcade:sw.skipWaiting` message instead:
 
@@ -902,14 +1056,18 @@ cleanup, and the wait-then-be-told-to-activate contract).
 
 ---
 
-## 11. Launcher card assets
+## 11. Launcher presence — catalog entry + card art
 
-The launcher has both a portfolio card and a launcher button for every game;
-both pull from `paulgibeault.github.io/images/<gameId>.png`.
+Everything the launcher and portfolio page show for your game renders from
+your `catalog.json` entry (§1) — there are no launcher-side HTML edits and
+no per-game files in the launcher repo. The checklist is short:
 
-- [ ] Provide a square cover image, ≥ 512×512, saved as `images/<gameId>.png` in the launcher repo (PR against `paulgibeault/paulgibeault.github.io`).
-- [ ] Update both the `#games` portfolio section in [profile.html](profile.html) and the `#view-launcher` grid in [index.html](index.html) — a comment above `#view-launcher` in `index.html` ("Game list is mirrored in profile.html...") marks the duplicate.
-- [ ] Provide a one-line subtitle (≤ 20 chars) for the launcher button (e.g. "Hex Puzzle", "Memorization").
+- [ ] Card art is **your repo's** `/<gameId>/icon.png` — square, ≥ 512×512,
+  present in the published output (§1's registration steps).
+- [ ] The catalog `subtitle` reads well on a small tile (aim ≤ 20 chars,
+  e.g. "Hex Puzzle", "Memorization").
+- [ ] Optional `profile` block if the game should appear on the portfolio
+  page; entries without one render on the launcher only.
 
 ---
 
@@ -1028,7 +1186,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write # version_bump pushes the bump commit back to main
   pages: write
   id-token: write
 
@@ -1040,6 +1198,11 @@ concurrency:
 jobs:
   fleet:
     uses: paulgibeault/paulgibeault.github.io/.github/workflows/fleet-ci.yml@main
+    with:
+      # The fleet norm for any app with a service worker: CI owns the cache
+      # version (§10). Drop this (and relax contents: to read) only for an
+      # app with no sw.js.
+      version_bump: true
 ```
 
 This repo calls the same pipeline, with `uses: ./.github/workflows/fleet-ci.yml`
@@ -1163,7 +1326,7 @@ parent → child:  arcade:config             { t, v, d }               // a conf
 child  → parent: arcade:config.ack         { t, ok }                 // your handler accepted it (cancels a toast)
 
 — ui chrome bridge (§7; the SDK speaks this for you) —
-child  → parent: arcade:ui.op              { op: 'confirm'|'prompt'|'openFile'|'share', id, ... }
+child  → parent: arcade:ui.op              { op: 'confirm'|'openFile'|'share', id, ... }
                                            // RPC ops; answered via arcade:bridge.result
                                            // (value: true/string/File/'shared'/'copied', null = cancel)
 child  → parent: arcade:ui.op              { op: 'setTitle', title } | { op: 'quitHook', enabled }
