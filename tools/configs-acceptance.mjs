@@ -56,16 +56,21 @@ async function freshPage(label) {
 try {
     // ── accept path ──
     {
+        // Dialog waits are 20s, not the 10s this suite started with: each
+        // path boots a whole fresh launcher first, and on a loaded 2-core CI
+        // runner that alone ate the old budget (failed 2x at exactly this
+        // wait). The suite asserts attribution/delivery semantics, not boot
+        // latency, so headroom costs nothing on the happy path.
         const { ctx, page } = await freshPage('accept');
         await page.goto(`${BASE}/#app=config-test&cfg=${CODE}`, { waitUntil: 'load' });
-        await page.waitForSelector('#arcade-dialog:not(.hidden)', { timeout: 10000 });
+        await page.waitForSelector('#arcade-dialog:not(.hidden)', { timeout: 20000 });
         const promptText = await page.evaluate(() => document.getElementById('arcade-dialog-msg').textContent);
         check('receive prompt appears and names the game', /Config Test/.test(promptText), promptText);
         await page.click('#arcade-dialog-ok'); // "Load"
         const frame = await frameFor(page);
         check('game frame mounted from the link', !!frame);
         const received = frame
-            ? await frame.waitForFunction(() => window.__configReceived, null, { timeout: 8000 })
+            ? await frame.waitForFunction(() => window.__configReceived, null, { timeout: 20000 })
                 .then((h) => h.jsonValue()).catch(() => null)
             : null;
         check('game handler received the config post-welcome',
@@ -78,7 +83,7 @@ try {
     {
         const { ctx, page } = await freshPage('decline');
         await page.goto(`${BASE}/#app=config-test&cfg=${CODE}`, { waitUntil: 'load' });
-        await page.waitForSelector('#arcade-dialog:not(.hidden)', { timeout: 10000 });
+        await page.waitForSelector('#arcade-dialog:not(.hidden)', { timeout: 20000 });
         await page.click('#arcade-dialog-cancel'); // "Ignore"
         const frame = await frameFor(page);
         check('game still opens after declining the config', !!frame);
