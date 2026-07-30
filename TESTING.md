@@ -47,6 +47,12 @@ Retries are therefore a property of what a suite *does*, not of a list someone
 remembered to update — the previous hand-kept list had drifted to five names
 while nine suites were on the harness.
 
+In CI (and only in CI), every other browser suite gets a single retry as well:
+shared runners vary enough between runs that a launcher boot which fits a wait
+budget at one moment misses double that budget minutes later. A genuine
+regression still fails every attempt. Locally there are no retries at all —
+flakiness at the desk should be loud enough to get studied, not absorbed.
+
 The one exception is `MANUAL_ONLY`: suites that pass locally but cannot run on
 CI hardware, skipped **only when `CI` is set** and always with the evidence
 written beside the entry (currently just `p2p-multiparty` — its relayed-gossip

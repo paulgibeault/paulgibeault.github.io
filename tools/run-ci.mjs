@@ -117,7 +117,15 @@ if (!process.env.SKIP_BROWSER) {
     .sort();
   for (const f of suites) {
     if (process.env.CI && MANUAL_ONLY.has(f)) { results.push([f, "skipped"]); continue; }
-    run(f, [`tools/${f}`], { retries: negotiates(f) ? 2 : 0 });
+    // Every suite here boots real launcher contexts in a real browser, and on
+    // shared CI runners the wall-clock for that varies wildly between runs —
+    // one evening the same branch saw a suite pass at a 10s wait, then miss a
+    // doubled 20s wait half an hour later, while a long-stable suite flapped
+    // beside it. One CI retry absorbs a degraded-runner episode; a genuine
+    // regression still fails both attempts. Locally there are no retries on
+    // purpose: at the desk, flakiness should be loud enough to get studied.
+    const retries = negotiates(f) ? 2 : (process.env.CI ? 1 : 0);
+    run(f, [`tools/${f}`], { retries });
   }
 } else {
   console.log("\nSKIP_BROWSER set — acceptance tier skipped");
