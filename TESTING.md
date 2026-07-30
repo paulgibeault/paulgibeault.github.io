@@ -47,6 +47,12 @@ Retries are therefore a property of what a suite *does*, not of a list someone
 remembered to update — the previous hand-kept list had drifted to five names
 while nine suites were on the harness.
 
+The one exception is `MANUAL_ONLY`: suites that pass locally but cannot run on
+CI hardware, skipped **only when `CI` is set** and always with the evidence
+written beside the entry (currently just `p2p-multiparty` — its relayed-gossip
+check starves on a 2-core runner). Locally, `npm test` still runs them; the CI
+summary prints each one with its reason, so the exclusion stays loud.
+
 ## Configuration B — units only: `npm run test:units`
 
 No browser, no ports, seconds not minutes. Discovers and runs every
