@@ -20,7 +20,6 @@
 import {
     KEY_PREFIX,
     isSafeArcadeKey,
-    lsPrefix,
     BRIDGE_VALUE_MAX,
     BRIDGE_STORE_VALUE_MAX,
     BRIDGE_FILE_MAX,
@@ -39,60 +38,6 @@ import {
 
 export function initStorageBridge(host) {
     const postToIframe = host.postToIframe;
-
-    // localStorage proxy (LEGACY — scheduled for removal, see ISSUES.md).
-    // Some pre-SDK games install a postMessage-backed shim that overrides
-    // window.localStorage in any iframe and block module init on a 'dump'
-    // reply; without this handler such a game hangs forever after rendering
-    // its static HUD. New games use Arcade.state and never reach this path.
-    function handleLsProxyRequest(gameId, data, source, origin) {
-        const requestId = data.requestId;
-        const reply = { type: 'ls-proxy-response', requestId, ok: false };
-        try {
-            const prefix = lsPrefix(gameId);
-            switch (data.op) {
-                case 'dump': {
-                    const dump = {};
-                    for (let i = 0; i < localStorage.length; i++) {
-                        const k = localStorage.key(i);
-                        if (k && k.indexOf(prefix) === 0) {
-                            dump[k.slice(prefix.length)] = localStorage.getItem(k);
-                        }
-                    }
-                    reply.ok = true;
-                    reply.data = dump;
-                    break;
-                }
-                case 'setItem':
-                    if (typeof data.key === 'string') {
-                        const lsVal = String(data.value);
-                        if (lsVal.length > BRIDGE_VALUE_MAX) break; // parity with state.write cap
-                        localStorage.setItem(prefix + data.key, lsVal);
-                        reply.ok = true;
-                    }
-                    break;
-                case 'removeItem':
-                    if (typeof data.key === 'string') {
-                        localStorage.removeItem(prefix + data.key);
-                        reply.ok = true;
-                    }
-                    break;
-                case 'clear': {
-                    // Scoped clear — only touches this game's namespace.
-                    const toRemove = [];
-                    for (let i = 0; i < localStorage.length; i++) {
-                        const k = localStorage.key(i);
-                        if (k && k.indexOf(prefix) === 0) toRemove.push(k);
-                    }
-                    for (const k of toRemove) localStorage.removeItem(k);
-                    reply.ok = true;
-                    break;
-                }
-            }
-        } catch (err) { /* leave ok:false */ }
-        // '*': an opaque-origin requester can't be named as targetOrigin.
-        try { source.postMessage(reply, '*'); } catch (err) {}
-    }
 
     function handleBridgedStateWrite(gameId, data) {
         const key = data.key;
@@ -290,7 +235,6 @@ export function initStorageBridge(host) {
     }
 
     return {
-        lsProxy: handleLsProxyRequest,
         stateWrite: handleBridgedStateWrite,
         storeOp: handleStoreOp,
         filesOp: handleFilesOp,

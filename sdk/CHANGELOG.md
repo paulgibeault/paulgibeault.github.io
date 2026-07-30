@@ -30,6 +30,33 @@ semver is for humans and URLs, never checked on the wire.
 
 ---
 
+## 3.12.0
+
+Fleet-alignment release ([#120](https://github.com/paulgibeault/paulgibeault.github.io/issues/120)
+buckets 2–3 decisions).
+
+- **New importable companion `/arcade-rng.js`** — the rng/daily/share block as
+  a plain ES module (`makeRng`, `hashU32`, `dailyDateStr`, `dailySeed`,
+  `shareEncode`, `shareDecode`), so game logic can run the real algorithm
+  under `node --test`, where `window.Arcade` does not exist. Games vendor a
+  byte-identical copy (a relative import is the only specifier that resolves
+  in both the browser and node); `tools/sdk-helpers-acceptance.mjs` pins the
+  companion and the SDK's inline copy to identical streams and codecs.
+- **`Arcade.onStorageError` gains a default handler**: with no listener
+  registered, a dropped write now toasts ("Save failed — device storage is
+  full", throttled to one per 10 s). Registering any listener replaces the
+  default. Before this, a quota failure was silent in every fleet game.
+- **Removed `Arcade.peer.remote()`** (deprecated single-peer convenience —
+  `peers()` roster is the API) and **`Arcade.ui.prompt`** (plus its bridge op
+  and envelope shape). Both had zero consumers across the seven catalog apps;
+  under the closed-fleet no-unconsumed-paths policy these removals ship in a
+  minor because no shipped page's observable behavior changes — noted here
+  explicitly since classic semver would call an API removal a major.
+- Launcher-side (not SDK surface, recorded for the same release): the legacy
+  `ls-proxy-request` protocol handler is deleted — its last consumer's
+  `.ls.*` migration shipped. The `.ls.` key namespace remains accepted by
+  backup import/restore forever (data at rest).
+
 ## 3.11.0
 
 Companion element library (`arcade-audio.js`) gains **`registerPack(pack)`** —

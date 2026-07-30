@@ -127,8 +127,8 @@ export function validateToast(data) {
 /**
  * Normalizes a game's arcade:ui.op request (launcher postMessage router →
  * arcade-ui-bridge.js). Two families:
- *   RPC ops (need a reply, so `id` is required): confirm, prompt, openFile,
- *     share — the bridge answers with arcade:bridge.result {id, ok, value}.
+ *   RPC ops (need a reply, so `id` is required): confirm, openFile, share —
+ *     the bridge answers with arcade:bridge.result {id, ok, value}.
  *   Fire-and-forget ops (no id): setTitle, quitHook.
  * Every free-text field is length-capped by TRUNCATION, not rejection — a
  * game that overflows a label still gets its dialog, just clipped. The one
@@ -160,7 +160,7 @@ export function validateConfigsOp(data) {
     return null;
 }
 
-const UI_RPC_OPS = { confirm: 1, prompt: 1, openFile: 1, share: 1 };
+const UI_RPC_OPS = { confirm: 1, openFile: 1, share: 1 };
 const UI_FF_OPS = { setTitle: 1, quitHook: 1 };
 const clip = (v, max) => (typeof v === 'string' ? v.slice(0, max) : null);
 export function validateUiOp(data) {
@@ -181,11 +181,6 @@ export function validateUiOp(data) {
                 okLabel: clip(data.okLabel, 24) || 'OK',
                 cancelLabel: clip(data.cancelLabel, 24) || 'Cancel'
             };
-        }
-        case 'prompt': {
-            const message = clip(data.message, 500);
-            if (!message) return null;
-            return { op, id: data.id, message, value: clip(data.value, 500) || '' };
         }
         case 'openFile':
             // accept mirrors <input accept>: extensions and MIME patterns.

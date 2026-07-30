@@ -34,6 +34,7 @@ const ASSETS_TO_CACHE = [
   './sdk/v3/arcade-sdk.js',
   './arcade-audio.js',
   './sdk/v3/arcade-audio.js',
+  './arcade-rng.js',
   './arcade-p2p.js',
   './arcade-pool.js',
   './arcade-router.js',
