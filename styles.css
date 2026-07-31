@@ -1012,16 +1012,21 @@ body.app-in-game .launcher-menu__panel {
 }
 
 /* ---- "In Development" overlay banner ----
-   Apply .in-dev-wrap to a relatively-clipped image container
-   (e.g. .launcher-btn__image-wrap, .project-card__image-wrap)
-   and drop <div class="in-dev-banner">In Development</div> inside it. */
+   Driven by "inDevelopment": true on a catalog.json entry —
+   arcade-catalog.js adds .in-dev-wrap to the card's image container
+   (.launcher-btn__image-wrap / .project-card__image-wrap) and drops
+   <div class="in-dev-banner">In Development</div> inside it. */
 .in-dev-wrap { position: relative; }
 
+/* The band must overhang BOTH edges before it is rotated — a 100%-wide band
+   pulled left by 25% leaves its far end inside the card, and the wrap's
+   overflow clip then eats the first word. 150% at -25% straddles the card
+   symmetrically, so the ribbon reads whole at any card aspect. */
 .in-dev-banner {
     position: absolute;
     top: 16%;
     left: -25%;
-    width: 100%;
+    width: 150%;
     transform: rotate(-22deg);
     background: linear-gradient(180deg, rgba(200, 50, 50, 0.95), rgba(140, 25, 25, 0.95));
     color: #fff;

@@ -115,6 +115,23 @@
         "tags": ["WebRTC", "P2P", "Arcade SDK"],
         "codeUrl": "https://github.com/paulgibeault/p2p-chat"
       }
+    },
+    {
+      "id": "shuiguo",
+      "name": "shuǐguǒ",
+      "subtitle": "Fruit drop",
+      "icon": "/shuiguo/icon.png",
+      "url": "/shuiguo/",
+      "inDevelopment": true,
+      "profile": {
+        "subtitle": "Cozy Fruit-Drop Physics",
+        "alt": "shuǐguǒ — a smiling watermelon with cherry and orange friends on warm paper",
+        "descLead": "Drop fruit. Match pairs. Grow the watermelon.",
+        "descBody": "Slide to aim and drop fruit into the stall — two of a kind squish together into the next fruit up the chain, from cherry all the way to watermelon. Physics does the rest: fruit rolls, settles, and squeezes into gaps, and one careless drop can bury the pair you were saving. Cross the line for three seconds and the stall is full.",
+        "kicker": "水果 (shuǐguǒ) means fruit.",
+        "tags": ["HTML5 Canvas", "JS", "ES Modules", "PWA", "Physics"],
+        "codeUrl": "https://github.com/paulgibeault/shuiguo"
+      }
     }
   ]
 }

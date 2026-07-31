@@ -36,6 +36,12 @@ render from it.
 Nothing to bump: fleet CI stamps `sw.js`'s `APP_VERSION` on every launcher
 deploy, so installed launchers pick up the new catalog automatically.
 
+**Shipping before it's finished.** Set `"inDevelopment": true` on the entry and
+both surfaces stamp a diagonal *In Development* ribbon across the card image —
+the game is listed and playable, but nobody mistakes a work in progress for a
+finished one. It is the honest way to put an app in front of players early.
+Drop the flag when the game is done; that is the only edit the promotion takes.
+
 **Deep links.** `https://paulgibeault.github.io/#app=<gameId>` boots the
 launcher straight into that game — ids resolve only through `catalog.json`
 (a fragment can never name a URL). The launcher keeps the fragment updated as
