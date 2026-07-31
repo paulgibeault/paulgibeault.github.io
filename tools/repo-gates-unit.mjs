@@ -96,6 +96,7 @@ function gateB() {
             }
         }
         if (g.spotlight !== undefined) ok(typeof g.spotlight === 'boolean', `spotlight is boolean: ${label}`);
+        if (g.inDevelopment !== undefined) ok(typeof g.inDevelopment === 'boolean', `inDevelopment is boolean: ${label}`);
         if (g.profile !== undefined) {
             const p = g.profile;
             ok(p && typeof p === 'object' && !Array.isArray(p), `profile is an object: ${label}`);

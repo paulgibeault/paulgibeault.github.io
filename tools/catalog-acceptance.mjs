@@ -51,6 +51,8 @@ try {
             spotlightFirst: btns.length > 0 && btns[0].classList.contains('spotlight-card'),
             spotlightCount: btns.filter(b => b.classList.contains('spotlight-card')).length,
             delays: btns.map(b => b.style.animationDelay),
+            inDevIds: btns.filter(b => b.querySelector('.launcher-btn__image-wrap.in-dev-wrap .in-dev-banner'))
+                .map(b => b.dataset.gameId),
             poolMax: (document.getElementById('menu-pool-cap-input') || {}).max
         };
     });
@@ -65,6 +67,9 @@ try {
         grid.spotlightFirst === !!expectedGames[0].spotlight
         && grid.spotlightCount === expectedGames.filter(g => g.spotlight).length,
         `first=${grid.spotlightFirst} count=${grid.spotlightCount}`);
+    check('launcher: in-development banner on the flagged entries only',
+        JSON.stringify(grid.inDevIds) === JSON.stringify(expectedGames.filter(g => g.inDevelopment).map(g => g.id)),
+        grid.inDevIds.join(',') || '(none)');
     // Note: the CSSOM normalizes '0.0s' to '0s' on read-back.
     check('launcher: entrance stagger preserved (inline animation-delay)',
         parseFloat(grid.delays[0]) === 0 && (N < 2 || parseFloat(grid.delays[1]) === 0.1), grid.delays.slice(0, 2).join(','));
@@ -134,6 +139,8 @@ try {
                 ids: rendered.map(c => c.id),
                 spotlightFirst: rendered.length > 0 && rendered[0].classList.contains('spotlight-card'),
                 hasBody: rendered.every(c => !!c.querySelector('.project-card__body')),
+                inDevIds: rendered.filter(c => c.querySelector('.project-card__image-wrap.in-dev-wrap .in-dev-banner'))
+                    .map(c => c.id),
                 hasPlay: rendered.every(c => !!c.querySelector('.btn--play')),
                 hardcoded: ['card-qrcodep2p', 'card-zibaldone', 'card-usai'].map(id => !!document.getElementById(id))
             };
@@ -141,6 +148,9 @@ try {
         check(`profile: renders the ${profileGames.length} catalog games with profile blocks`,
             JSON.stringify(cards.ids) === JSON.stringify(profileGames.map(g => 'card-' + g.id)), cards.ids.join(','));
         check('profile: spotlight preserved on the first card', cards.spotlightFirst === !!profileGames[0].spotlight);
+        check('profile: in-development banner on the flagged cards only',
+            JSON.stringify(cards.inDevIds) === JSON.stringify(profileGames.filter(g => g.inDevelopment).map(g => 'card-' + g.id)),
+            cards.inDevIds.join(',') || '(none)');
         check('profile: every card has a __body wrapper (zoom modal clones it)', cards.hasBody);
         check('profile: every card has a Play action', cards.hasPlay);
         check('profile: hardcoded non-arcade project cards intact', cards.hardcoded.every(Boolean), cards.hardcoded.join(','));

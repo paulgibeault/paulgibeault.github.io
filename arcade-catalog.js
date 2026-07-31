@@ -50,6 +50,18 @@ function el(tag, className, text) {
 }
 
 /**
+ * Diagonal "In Development" ribbon over a game's card image, for entries
+ * flagged `inDevelopment` in the catalog. The banner is absolutely positioned
+ * against its wrap, so the wrap opts into containment via .in-dev-wrap
+ * (see the styles.css block of the same name). Both surfaces call this — a
+ * game is in development on the launcher and the portfolio or neither.
+ */
+function markInDevelopment(wrap) {
+    wrap.classList.add('in-dev-wrap');
+    wrap.appendChild(el('div', 'in-dev-banner', 'In Development'));
+}
+
+/**
  * Launcher grid (index.html #launcher-grid-container). Reproduces the exact
  * markup the static grid used: the CSS entrance stagger rides the inline
  * animation-delay, and the click wiring / pool code read data-game-id,
@@ -66,6 +78,7 @@ export function renderLauncherGrid(container, games) {
         img.src = g.icon || 'images/icon-192.png';
         img.alt = g.name;
         wrap.appendChild(img);
+        if (g.inDevelopment) markInDevelopment(wrap);
         const body = el('div', 'launcher-btn__body');
         body.appendChild(el('h3', 'launcher-btn__name', g.name));
         body.appendChild(el('p', 'launcher-btn__subtitle', g.subtitle || ''));
@@ -110,6 +123,7 @@ export function renderProfileCards(grid, games) {
         img.alt = p.alt || (p.name || g.name);
         img.loading = 'lazy';
         wrap.appendChild(img);
+        if (g.inDevelopment) markInDevelopment(wrap);
         card.appendChild(wrap);
 
         const body = el('div', 'project-card__body');
