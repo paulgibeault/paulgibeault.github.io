@@ -136,6 +136,21 @@ function gateB() {
 const TOMBSTONES = [];       // ids removed from the catalog within the last release
 const ALLOW = new Set([
     'catalog.json',          // the sanctioned registry itself
+    // This file, because explaining the next three entries means writing the
+    // word the gate matches on — the exception mechanism has to be able to
+    // name what it is excepting.
+    'tools/repo-gates-unit.mjs',
+    // "cardstock" the catalog id collides with "cardstock" the English word
+    // for stiff paper stock, which both of these already used in prose before
+    // the game existed: GAME_INTEGRATION.md's material list for the `flex`
+    // element ("paper, cardstock, a flag") and arcade-audio.js's damping-curve
+    // comment ("near 1 is cardstock — defined, brighter"). Neither names the
+    // game or depends on it; the gate can't tell a dictionary word from a
+    // game id, so this is the honest exception the gate's own docstring asks
+    // for, not a softening of the check.
+    'GAME_INTEGRATION.md',
+    'arcade-audio.js',
+    'sdk/v3/arcade-audio.js',
 ]);
 // Prefixes exempt because they are DATED RECORD, not living surface. History
 // says what happened, and what happened involved named apps; rewriting it to
