@@ -132,6 +132,22 @@
         "tags": ["HTML5 Canvas", "JS", "ES Modules", "PWA", "Physics"],
         "codeUrl": "https://github.com/paulgibeault/shuiguo"
       }
+    },
+    {
+      "id": "cardstock",
+      "name": "Cardstock",
+      "subtitle": "Card games",
+      "icon": "/cardstock/icon.png",
+      "url": "/cardstock/",
+      "profile": {
+        "subtitle": "One Engine, Many Card Games",
+        "alt": "Cardstock — a green felt card table with a fanned fox, owl, and bear seated around it, each holding cards from a different pack",
+        "descLead": "Five games. One table. Deal yourself in.",
+        "descBody": "Crazy Eights and Wildfire for shedding your hand, Hearts for trick-taking, Milestones for a ten-contract rummy race, and Stockpile for racing your stock pile down — all built on one engine so a discard pile, a trick, and a meld all feel like the same table. Drag any card where it belongs (a bad drop snaps back), play against a rotating cast of named bots with real personalities, and track your record against each of them, hand after hand.",
+        "kicker": "One engine, many card games — each one a pack.",
+        "tags": ["JS", "ES Modules", "PWA", "Arcade SDK", "Drag & Drop"],
+        "codeUrl": "https://github.com/paulgibeault/cardstock"
+      }
     }
   ]
 }
