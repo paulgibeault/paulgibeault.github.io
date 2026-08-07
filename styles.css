@@ -1670,6 +1670,11 @@ body.app-in-game .launcher-menu__panel {
     overflow-wrap: anywhere;
 }
 
+/* ---- POWER SAVER ---- */
+/* 150 stars × 2 infinite animations is the launcher's whole idle cost;
+   display:none stops the animations, not just the paint. */
+html[data-power-saver="true"] #starfield { display: none; }
+
 /* ---- REDUCED MOTION ---- */
 @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {

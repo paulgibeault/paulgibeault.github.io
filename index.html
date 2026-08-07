@@ -387,6 +387,12 @@
             </button>
         </div>
         <div class="launcher-menu__section">
+            <button type="button" class="launcher-menu__item" id="menu-power-saver" title="Trim battery use: attention pulses play once instead of looping, ambient effects pause, and only the active game stays loaded" aria-pressed="false">
+                <span class="launcher-menu__item-icon" aria-hidden="true" id="menu-power-saver-icon">🔋</span>
+                <span class="launcher-menu__item-label" id="menu-power-saver-label">Power Saver Off</span>
+            </button>
+        </div>
+        <div class="launcher-menu__section">
             <label class="launcher-menu__inline" for="menu-pool-cap-input" title="How many recently-played games stay loaded in memory. Lower saves battery; higher gives instant relaunch.">
                 <span>Open games:</span>
                 <input type="number" id="menu-pool-cap-input" class="launcher-menu__input" inputmode="numeric" min="1" step="1" />
@@ -926,6 +932,46 @@
         });
         render();
         window.__arcade.isMuted = () => currentVolume() <= 0;
+    })();
+
+    // ==========================================
+    // POWER SAVER — toggles the shared powerSaver setting. Games see it as
+    // data-power-saver + --arcade-pulse-count via the SDK; the launcher
+    // honours it itself (starfield off via styles.css, pool pinned to the
+    // active game in arcade-pool.js). Same global-settings + broadcast
+    // pattern as mute.
+    // ==========================================
+    (function powerSaverControl() {
+        const KEY = 'arcade.v1.global.powerSaver';
+        const btn = document.getElementById('menu-power-saver');
+        const icon = document.getElementById('menu-power-saver-icon');
+        const label = document.getElementById('menu-power-saver-label');
+        if (!btn) return;
+
+        function readEnabled() {
+            try { return JSON.parse(localStorage.getItem(KEY)) === true; }
+            catch (e) { return false; }
+        }
+        function render() {
+            const on = readEnabled();
+            document.documentElement.setAttribute('data-power-saver', on ? 'true' : 'false');
+            if (icon) icon.textContent = on ? '🪫' : '🔋';
+            if (label) label.textContent = on ? 'Power Saver On' : 'Power Saver Off';
+            btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+            btn.title = on
+                ? 'Power saver is on — tap to restore looping effects and the game pool'
+                : 'Trim battery use: attention pulses play once instead of looping, ambient effects pause, and only the active game stays loaded';
+        }
+
+        btn.addEventListener('click', () => {
+            localStorage.setItem(KEY, JSON.stringify(!readEnabled()));
+            render();
+            if (window.__arcade && window.__arcade.broadcastSettings) window.__arcade.broadcastSettings();
+            // Enabling shrinks the effective pool cap to 1 — evict now, not
+            // at the next launch.
+            if (window.__arcade && window.__arcade.applyPoolCap) window.__arcade.applyPoolCap();
+        });
+        render();
     })();
 
     // ==========================================
@@ -1587,13 +1633,15 @@
             const rm = readGlobal('reducedMotion', null);
             const av = readGlobal('audioVolume', null);
             const hd = readGlobal('handedness', null);
+            const ps = readGlobal('powerSaver', null);
             return {
                 fontScale: fs,
                 theme: (th === 'light' || th === 'dark') ? th : defaultTheme(),
                 reducedMotion: typeof rm === 'boolean' ? rm : defaultReducedMotion(),
                 audioVolume: (typeof av === 'number' && isFinite(av))
                     ? Math.max(0, Math.min(1, av)) : 1,
-                handedness: (hd === 'left' || hd === 'right') ? hd : 'right'
+                handedness: (hd === 'left' || hd === 'right') ? hd : 'right',
+                powerSaver: typeof ps === 'boolean' ? ps : false
             };
         }
         window.__arcade.broadcastSettings = function () {
