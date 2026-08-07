@@ -132,6 +132,23 @@
         "tags": ["HTML5 Canvas", "JS", "ES Modules", "PWA", "Physics"],
         "codeUrl": "https://github.com/paulgibeault/shuiguo"
       }
+    },
+    {
+      "id": "cardstock",
+      "name": "Cardstock",
+      "subtitle": "Card games",
+      "icon": "/cardstock/icon.png",
+      "url": "/cardstock/",
+      "inDevelopment": true,
+      "profile": {
+        "subtitle": "One Engine, Many Card Games",
+        "alt": "Cardstock — two playing cards on green felt, the top one showing a red heart",
+        "descLead": "Every card game is just a pack.",
+        "descBody": "A single rules engine plays shedding, trick-taking, contract-rummy and sequencing games from declarative card-packs — no per-game code. Five packs ship today, each a manifest, a deck and a table of rule tests. Card faces are drawn in SVG from the card's own definition, so a pack needs no art at all.",
+        "kicker": "Solo against bots today; a shared table next.",
+        "tags": ["JS", "ES Modules", "Node Test Runner", "PWA"],
+        "codeUrl": "https://github.com/paulgibeault/cardstock"
+      }
     }
   ]
 }
