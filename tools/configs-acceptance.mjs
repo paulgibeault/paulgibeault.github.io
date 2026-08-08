@@ -66,6 +66,11 @@ try {
         // fails at 60s, stop raising it: that is a genuine intermittent
         // no-show — a race in the deep-link path — and it needs a debugger,
         // not more headroom.
+        //
+        // It did fail at 60s, and there was: __arcade.configs wired up after
+        // openDeepLink read it. Found, fixed in index.html (pendingConfigLink),
+        // and pinned by the boot-order check at the bottom of this file. The
+        // ceiling stays a ceiling; the race no longer hides behind it.
         const { ctx, page } = await freshPage('accept');
         await page.goto(`${BASE}/#app=config-test&cfg=${CODE}`, { waitUntil: 'load' });
         await page.waitForSelector('#arcade-dialog:not(.hidden)', { timeout: 60000 });
@@ -105,6 +110,36 @@ try {
         await page.waitForTimeout(1500);
         const noPrompt = await page.evaluate(() => document.getElementById('arcade-dialog').classList.contains('hidden'));
         check('an undecodable config code shows no receive prompt', noPrompt);
+        await ctx.close();
+    }
+
+    // ── boot-order regression: the late-wired configs module ──
+    // window.__arcade.configs is wired in the LAST module script (it needs
+    // pool/dialog/catalog). openDeepLink runs from bootCatalog's await
+    // continuation, and module scripts are separate execution units with a
+    // microtask checkpoint between them — so when the catalog fetch resolved
+    // before that last script's imports did, the config was silently swallowed:
+    // game opens, no prompt, no error. That is the intermittent no-show this
+    // suite kept hitting on loaded CI runners and never locally.
+    //
+    // Delaying only the last script's own imports flips the race
+    // deterministically, on any machine, in about a second. Without the
+    // pendingConfigLink handoff in index.html this check fails 100% of the time.
+    {
+        const { ctx, page } = await freshPage('late-configs-module');
+        for (const mod of ['**/arcade-records.js', '**/arcade-configs.js']) {
+            await page.route(mod, async (route) => {
+                await new Promise((r) => setTimeout(r, 300));
+                route.continue();
+            });
+        }
+        await page.goto(`${BASE}/#app=config-test&cfg=${CODE}`, { waitUntil: 'load' });
+        let prompted = true;
+        try {
+            await page.waitForSelector('#arcade-dialog:not(.hidden)', { timeout: 20000 });
+        } catch (e) { prompted = false; }
+        check('a config link survives the configs module wiring up late', prompted,
+            prompted ? '' : 'no receive prompt — openDeepLink ran before __arcade.configs existed');
         await ctx.close();
     }
 } catch (e) {
