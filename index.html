@@ -2086,9 +2086,24 @@
         // Config link: prompt + deliver after the game opens (declining still
         // leaves the player in the game). The pool rewrites the hash to bare
         // #app=<id> on show, consuming the one-shot cfg.
-        if (parsed.cfg && window.__arcade.configs) {
-            window.__arcade.configs.ingestLink(parsed.app, parsed.cfg).catch(() => {});
-        }
+        //
+        // __arcade.configs is wired in the LAST module script (it needs
+        // pool/dialog/catalog), but this runs from bootCatalog's await
+        // continuation — and module scripts are separate execution units with a
+        // microtask checkpoint between them. When the catalog fetch resolves
+        // before that last script's own imports do, this used to run with
+        // configs still undefined and the `&& window.__arcade.configs` guard
+        // swallowed the share silently: game opens, no prompt, no error. Stash
+        // instead, and let the configs wiring drain it — boot order can no
+        // longer decide whether a config link works.
+        if (parsed.cfg) ingestConfigLink(parsed.app, parsed.cfg);
+    }
+
+    // Order-independent handoff for the one-shot deep-link config.
+    function ingestConfigLink(app, cfg) {
+        const configs = window.__arcade.configs;
+        if (configs) { configs.ingestLink(app, cfg).catch(() => {}); return; }
+        window.__arcade.pendingConfigLink = { app, cfg };
     }
 
     async function bootCatalog() {
@@ -3221,6 +3236,15 @@
     // Deliver a stashed config the moment its game checks in.
     if (window.__arcade.pool && window.__arcade.pool.onHelloed) {
         window.__arcade.pool.onHelloed((id) => window.__arcade.configs.onHelloed(id));
+    }
+    // A deep-link config that arrived before this script evaluated (see
+    // ingestConfigLink). Draining late is safe in both directions: if the frame
+    // has already helloed, enqueue() delivers on the spot; if it hasn't, the
+    // onHelloed seam above drains the stash when it does.
+    if (window.__arcade.pendingConfigLink) {
+        const { app, cfg } = window.__arcade.pendingConfigLink;
+        window.__arcade.pendingConfigLink = null;
+        window.__arcade.configs.ingestLink(app, cfg).catch(() => {});
     }
 </script>
 
