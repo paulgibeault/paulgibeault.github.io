@@ -30,6 +30,25 @@ semver is for humans and URLs, never checked on the wire.
 
 ---
 
+## 3.13.0
+
+Power saver — a user-facing battery lever, and a platform vocabulary for
+finite attention pulses (GAME_INTEGRATION §5, §6d).
+
+- **New setting `powerSaver`** (boolean, default `false`, stored at
+  `arcade.v1.global.powerSaver`): exposed as `Arcade.settings.powerSaver()`,
+  included in `snapshot()`/`onSettingsChange`, hydrated pre-paint, synced
+  across frames like every other setting. The SDK stamps
+  `data-power-saver="true|false"` on the game's `<html>`.
+- **New base-style token `--arcade-pulse-count`**: `3` normally, `1` under
+  power saver, `0` under reduced motion. Games declare
+  `animation-iteration-count: var(--arcade-pulse-count, 3)` on looping
+  emphasis effects so they pulse finitely and settle to static — the
+  visible-but-idle display pipeline can then reach 0 fps (§6d).
+- Launcher: a Power Saver toggle in the menu; the starfield parks and the
+  iframe pool pins to the active game while enabled (stored `poolCap` is
+  preserved).
+
 ## 3.12.0
 
 Fleet-alignment release ([#120](https://github.com/paulgibeault/paulgibeault.github.io/issues/120)

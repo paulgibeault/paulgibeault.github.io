@@ -266,6 +266,13 @@ body.app-in-game .launcher-menu__panel {
     border-color: var(--field-gold);
     color: var(--field-gold);
 }
+/* Power saver pins this to 1 and disables it. Without a visible disabled state
+   the field still reads as editable, which is the confusion the pinning was
+   meant to clear up. The label's title carries the stored value. */
+.launcher-menu__input:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
 
 .launcher-menu__item {
     display: flex;
@@ -996,6 +1003,11 @@ body.app-in-game .launcher-menu__panel {
 @media (prefers-reduced-motion: reduce) {
     .net-watermark.is-reconnecting .net-watermark__glyph { animation: none; }
 }
+/* Reconnecting can persist for minutes; the amber colour already carries the
+   state. See the POWER SAVER block below. */
+html[data-power-saver="true"] .net-watermark.is-reconnecting .net-watermark__glyph {
+    animation: none;
+}
 
 /* Visually hidden but exposed to assistive tech (live regions, skip targets). */
 .visually-hidden {
@@ -1669,6 +1681,16 @@ body.app-in-game .launcher-menu__panel {
     padding: 3px 12px 5px;
     overflow-wrap: anywhere;
 }
+
+/* ---- POWER SAVER ---- */
+/* The launcher holds itself to the same §6d bar it asks games to meet: nothing
+   loops forever on a visible, idle screen. Its three infinite animations are
+   the starfield (here), the LIVE badge (index.html, beside its own rule), and
+   the reconnect watermark (above). The transient game-spin loader is exempt —
+   it ends on its own.
+   150 stars × 2 infinite animations is the launcher's whole idle cost;
+   display:none stops the animations, not just the paint. */
+html[data-power-saver="true"] #starfield { display: none; }
 
 /* ---- REDUCED MOTION ---- */
 @media (prefers-reduced-motion: reduce) {

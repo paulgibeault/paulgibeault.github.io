@@ -370,6 +370,7 @@ every change. The SDK applies the visual ones to the game's `<html>` for free:
 | `reducedMotion`  | `Arcade.settings.reducedMotion()`   | `data-reduced-motion="true|false"` + `style="--motion-scale: 0"` (1 otherwise) |
 | `audioVolume`    | `Arcade.settings.audioVolume()`     | `style="--audio-volume: <0..1>"` (read in JS) — or just use `Arcade.audio` (below), which honours it for you |
 | `handedness`     | `Arcade.settings.handedness()`      | `data-handedness="left"` or `data-handedness="right"` |
+| `powerSaver` (SDK 3.13.0+) | `Arcade.settings.powerSaver()`      | `data-power-saver="true|false"` + `--arcade-pulse-count: 3` normally, `1` under power saver, `0` under reduced motion (what the game observes under reduced motion is `1`, not `0` — see the bullet below) |
 
 - [ ] **Sound effects → `Arcade.audio`.** Don't hand-roll an AudioContext — the SDK owns the foot-guns (lazy ctx, first-gesture unlock, master gain wired to `audioVolume`, suspend-on-hide/resume-on-return, and the exponentialRamp-from-zero crash). Register cues and play them:
   ```js
@@ -480,12 +481,34 @@ To benefit:
 - [ ] If your game has a dark/light theme already, key its CSS off `[data-theme="dark"]` / `[data-theme="light"]` rather than rolling your own toggle.
 - [ ] If your game has tween-heavy effects, multiply durations by `getComputedStyle(document.documentElement).getPropertyValue('--motion-scale')` (or skip animations when `Arcade.settings.reducedMotion()` is `true`).
 - [ ] If your game has handedness-sensitive UI (e.g. control palette position), key it off `[data-handedness="left"]`.
+- [ ] **Attention pulses → `--arcade-pulse-count` (SDK 3.13.0+).** Any looping emphasis effect (turn indicator, "ready" ring, hint shimmer) should declare `animation-iteration-count: var(--arcade-pulse-count, 3)` and end on a static resting treatment that still says the same thing (a colour, a border, a static glow). Never `infinite` — see §6d. The SDK owns the token ladder: `3` normally, `1` under power saver, `0` under reduced motion.
+
+  **Under reduced motion the count a game actually observes is `1`, not `0`.**
+  The token does go to `0`, but the kill-switch rule above sets
+  `animation-iteration-count: 1 !important` on `*`, and `!important` beats a
+  custom property. So a game without `data-arcade-keep-motion` gets one
+  iteration at `.001ms` — a single instantaneous frame. The rendered result is
+  what you want either way, but `animationstart` (and `animationend`) still
+  fire, so don't hang logic on the assumption that a `0` in the token means the
+  animation never ran. A game that has opted out with `data-arcade-keep-motion`
+  is outside the kill rule, so there the `0` lands literally: zero iterations,
+  no animation events at all.
+
+  The ladder is deliberately not gated on `data-arcade-keep-motion`, because the
+  token is opt-in per effect — a game consumes it by writing
+  `animation-iteration-count: var(--arcade-pulse-count, 3)` on that specific
+  effect. Unlike the blanket `*` kill switch, it needs no escape hatch: a game
+  that wants one particular effect to keep looping simply doesn't consume the
+  token there. The corollary is the case above — a keep-motion game that *does*
+  consume the token gets a literal `0` under reduced motion.
+- [ ] Gate optional ambient effects (particles, background loops, decorative video) off entirely when `Arcade.settings.powerSaver()` is `true` (SDK 3.13.0+), and re-check on `Arcade.onSettingsChange`. **Guard the read if your repo vendors its own copy of the SDK:** on anything older than 3.13.0 `Arcade.settings.powerSaver` is `undefined`, and calling it throws `TypeError: Arcade.settings.powerSaver is not a function` — inside an `onSettingsChange` handler that is a throw on every launcher settings write, not just at startup. Read it as `const saving = Arcade.settings.powerSaver ? Arcade.settings.powerSaver() : false;` and an older SDK degrades to "not saving". The CSS half needs no such guard: `var(--arcade-pulse-count, 3)` carries its own fallback, so an SDK that never defines the token just leaves the effect at 3 pulses.
 
 ### Canvas-rendered games
 
 - [ ] **Font scale**: multiply every `ctx.font` size by `Arcade.settings.fontScale()`. Re-render on `Arcade.onSettingsChange(...)`.
 - [ ] **Theme**: if you support both, branch palette/style choices on `Arcade.settings.theme()`. If your game has a single mandatory aesthetic (a fixed period palette, say), it's fine to opt out of theme — document this in the game's README.
 - [ ] **Reduced motion**: gate canvas tweens, particle systems, and shader animations on `Arcade.settings.reducedMotion()`.
+- [ ] **Power saver (SDK 3.13.0+)**: when `Arcade.settings.powerSaver()` is `true` — read it defensively as `Arcade.settings.powerSaver ? Arcade.settings.powerSaver() : false` if your repo vendors an SDK older than 3.13.0, where the method doesn't exist and the call throws — drop ambient/decorative rendering (idle particle systems, background shaders, frame-rate luxuries) and prefer dirty-flag redraws (`Arcade.loop(...).kick()`) over continuous frames. Gameplay-essential motion stays.
 - [ ] **Handedness**: if a game-controlled overlay (e.g. on-screen joystick, action palette) lives on the canvas, switch its anchor side based on `Arcade.settings.handedness()`.
 
 For most canvas games, a single subscription that flips a couple of cached
@@ -632,6 +655,39 @@ The launcher's LRU cap protects users from games that ignore this guidance, but
 a cooperative game keeps the user's whole arcade experience snappier — under
 the cap, your hidden iframe is competing with up to one other game for memory,
 audio, and GPU resources.
+
+### 6d. Let the screen rest — the visible-but-idle state
+
+Everything in 6a–6c is scoped to the *hidden* case. There is a third state the
+lifecycle stream cannot see: **visible but idle** — the user is looking at your
+game and nothing is happening. A turn-based game spends most of its life here,
+and it is where battery quietly goes: any running animation, however cheap,
+forces the compositor to keep producing frames, so the display pipeline never
+reaches 0 fps. An infinite CSS pulse is a rAF loop that never stops, expressed
+declaratively.
+
+The contract:
+
+- [ ] **No infinite animations.** Emphasis effects pulse finitely via
+  `animation-iteration-count: var(--arcade-pulse-count, 3)` (§5, SDK 3.13.0+) and settle to
+  a static resting treatment. Motion earns its cost at the moment state
+  changes; after that, a static indicator says the same thing for free.
+- [ ] **Animate only compositable properties** (`opacity`, `transform`) while
+  a pulse runs. Animating `box-shadow`, `text-shadow`, `filter`, or layout
+  properties repaints on the main thread every frame — put the effect on a
+  pseudo-element with a static shadow and fade its opacity instead.
+- [ ] **Continuous rendering must be state-gated.** A canvas loop runs only
+  while something is actually moving (`Arcade.loop` + `kick()` for dirty-flag
+  redraws); when the board is settled, no frames.
+- [ ] **Verify it:** with your game visible and waiting for input, a DevTools
+  Performance trace should show a flat main thread and the frame rate at 0
+  between state changes. If it doesn't, something above was missed.
+
+The `powerSaver` setting (§5, SDK 3.13.0+) is the user's explicit lever on top of this
+baseline: pulses drop from 3 to 1, ambient effects go out entirely, and the
+launcher pins its pool to the active game. A game that meets this section
+already needs no extra work for power saver beyond honouring the token and
+the ambient-effects gate.
 
 ---
 

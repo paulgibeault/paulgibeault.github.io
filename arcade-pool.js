@@ -57,6 +57,11 @@ export function initIframePool(host) {
     const POOL_CAP_DEFAULT = 2;
 
     function readPoolCap() {
+        // Power saver pins the pool to the active game only: a hidden-but-
+        // mounted sibling still holds memory and timers even when suspended.
+        // The user's stored poolCap is untouched — it comes back when power
+        // saver turns off.
+        if (host.readGlobal('powerSaver', false) === true) return 1;
         const n = Math.floor(Number(host.readGlobal('poolCap', POOL_CAP_DEFAULT)));
         return isFinite(n) && n >= 1 ? n : POOL_CAP_DEFAULT;
     }

@@ -180,7 +180,7 @@
     // tools/sdk-version-unit.mjs enforces all three. Launcher↔SDK compat is
     // still negotiated by welcome.caps, never by this number; it exists for
     // humans (bug reports, CHANGELOG) and for the pinned-URL publish scheme.
-    var SDK_SEMVER = '3.12.0';
+    var SDK_SEMVER = '3.13.0';
     var HANDSHAKE_TIMEOUT_MS = 300;
     // Opaque-origin (sandboxed, no allow-same-origin) frames have no storage
     // to fall back to, so waiting longer for the launcher costs nothing and
@@ -233,7 +233,8 @@
         theme: 'dark',
         reducedMotion: false,
         audioVolume: 1,
-        handedness: 'right'
+        handedness: 'right',
+        powerSaver: false
     };
 
     var listeners = {
@@ -823,7 +824,8 @@
             theme: settings.theme,
             reducedMotion: settings.reducedMotion,
             audioVolume: settings.audioVolume,
-            handedness: settings.handedness
+            handedness: settings.handedness,
+            powerSaver: settings.powerSaver
         };
     }
     function applySettings(incoming) {
@@ -851,6 +853,10 @@
                 && incoming.handedness !== settings.handedness) {
             settings.handedness = incoming.handedness; changed = true;
         }
+        if (typeof incoming.powerSaver === 'boolean'
+                && incoming.powerSaver !== settings.powerSaver) {
+            settings.powerSaver = incoming.powerSaver; changed = true;
+        }
         applySettingsToDOM();
         return changed;
     }
@@ -863,6 +869,7 @@
             d.setAttribute('data-theme', settings.theme);
             d.setAttribute('data-handedness', settings.handedness);
             d.setAttribute('data-reduced-motion', settings.reducedMotion ? 'true' : 'false');
+            d.setAttribute('data-power-saver', settings.powerSaver ? 'true' : 'false');
         } catch (e) {}
     }
     // Inject a default rem-scaling rule before any game CSS so games that don't
@@ -876,8 +883,42 @@
             var style = document.createElement('style');
             style.id = 'arcade-sdk-base-style';
             style.textContent =
+                // --arcade-pulse-count is the attention-pulse budget: games
+                // write `animation-iteration-count: var(--arcade-pulse-count, 3)`
+                // on looping emphasis effects (turn indicators, "ready" rings)
+                // so the pulse plays finitely and the display pipeline can
+                // reach 0 fps between state changes. The token: 3 normally,
+                // 1 under power saver, 0 under reduced motion.
+                //
+                // Three things about this that are easy to get wrong later:
+                //
+                // 1. What a game OBSERVES under reduced motion is 1, not 0 —
+                //    the kill switch below sets animation-iteration-count
+                //    1!important on *, and !important beats a custom property.
+                //    The pulse still ends up instantaneous (duration ~0), so
+                //    the outcome is right, but note that animationstart DOES
+                //    still fire. The token's literal 0 is only observable in a
+                //    game that opted out of the kill switch with
+                //    data-arcade-keep-motion.
+                // 2. The ladder rule is deliberately NOT gated on
+                //    data-arcade-keep-motion. That opt-out exists to escape a
+                //    blanket `*` selector a game never asked for; this token is
+                //    opt-in per effect — a game consumes it by writing it on
+                //    that one animation. A game that wants an effect to keep
+                //    looping just doesn't consume the token there.
+                // 3. Reduced motion beating power saver rests on SOURCE ORDER,
+                //    not specificity — the two selectors below are both (0,2,0).
+                //    Reordering them silently inverts the ladder.
+                //
+                // Inserted at head start so a game's own :root rule overrides
+                // the base value. The two attribute-qualified rules are (0,2,0)
+                // against a plain :root's (0,1,0), so they deliberately win: a
+                // game cannot quietly opt out of the user's battery lever. To
+                // override those a game needs :root:root{…} or !important.
                 ':root{font-size:calc(100% * var(--font-scale, 1));' +
-                '--motion-scale:1;--audio-volume:1;}\n' +
+                '--motion-scale:1;--audio-volume:1;--arcade-pulse-count:3;}\n' +
+                ':root[data-power-saver="true"]{--arcade-pulse-count:1;}\n' +
+                ':root[data-reduced-motion="true"]{--arcade-pulse-count:0;}\n' +
                 // Reduced-motion kill switch: when the launcher (or OS)
                 // requests reduced motion, CSS animations/transitions
                 // collapse to a single instant frame — no per-game calc()
@@ -925,6 +966,8 @@
         }
         var hd = readJSON(globalKeyName('handedness'));
         if (hd === 'left' || hd === 'right') settings.handedness = hd;
+        var ps = readJSON(globalKeyName('powerSaver'));
+        if (typeof ps === 'boolean') settings.powerSaver = ps;
         applySettingsToDOM();
     }
 
@@ -1599,7 +1642,7 @@
         try { window.addEventListener('storage', onStorage); } catch (e) {}
         // Keep the cached settings + DOM hooks in sync when global keys change
         // in another iframe (same-origin storage events fire automatically).
-        var SETTING_KEYS = ['fontScale', 'theme', 'reducedMotion', 'audioVolume', 'handedness'];
+        var SETTING_KEYS = ['fontScale', 'theme', 'reducedMotion', 'audioVolume', 'handedness', 'powerSaver'];
         SETTING_KEYS.forEach(function (k) {
             makeKeyChangeSubscriber(globalKeyName(k))(function (v) {
                 var patch = {}; patch[k] = v;
@@ -1916,6 +1959,7 @@
         reducedMotion: function () { return settings.reducedMotion; },
         audioVolume: function () { return settings.audioVolume; },
         handedness: function () { return settings.handedness; },
+        powerSaver: function () { return settings.powerSaver; },
         snapshot: snapshotSettings
     };
 

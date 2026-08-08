@@ -205,6 +205,13 @@
         @media (prefers-reduced-motion: reduce) {
             .launcher-btn__live-badge::before { animation: none; }
         }
+        /* §6d applies to the launcher too. Power saver pins the pool to the
+           active game, so quitting back here leaves exactly one tile carrying a
+           LIVE badge — a 2s loop running forever on a visible, idle screen. The
+           badge's colour says "live" on its own. */
+        html[data-power-saver="true"] .launcher-btn__live-badge::before {
+            animation: none;
+        }
 
         @media (max-width: 768px) {
             .launcher-header { padding: 40px 16px 16px; }
@@ -384,6 +391,12 @@
             <button type="button" class="launcher-menu__item" id="menu-mute" title="Mute or unmute all game sound" aria-pressed="false">
                 <span class="launcher-menu__item-icon" aria-hidden="true" id="menu-mute-icon">🔊</span>
                 <span class="launcher-menu__item-label" id="menu-mute-label">Sound On</span>
+            </button>
+        </div>
+        <div class="launcher-menu__section">
+            <button type="button" class="launcher-menu__item" id="menu-power-saver" title="Trim battery use: attention pulses play once instead of looping, ambient effects pause, and only the active game stays loaded" aria-pressed="false">
+                <span class="launcher-menu__item-icon" aria-hidden="true" id="menu-power-saver-icon">🔋</span>
+                <span class="launcher-menu__item-label" id="menu-power-saver-label">Power Saver Off</span>
             </button>
         </div>
         <div class="launcher-menu__section">
@@ -929,6 +942,48 @@
     })();
 
     // ==========================================
+    // POWER SAVER — toggles the shared powerSaver setting. Games see it as
+    // data-power-saver + --arcade-pulse-count via the SDK; the launcher
+    // honours it itself (starfield off via styles.css, pool pinned to the
+    // active game in arcade-pool.js). Same global-settings + broadcast
+    // pattern as mute.
+    // ==========================================
+    (function powerSaverControl() {
+        const KEY = 'arcade.v1.global.powerSaver';
+        const btn = document.getElementById('menu-power-saver');
+        const icon = document.getElementById('menu-power-saver-icon');
+        const label = document.getElementById('menu-power-saver-label');
+        if (!btn) return;
+
+        function readEnabled() {
+            try { return JSON.parse(localStorage.getItem(KEY)) === true; }
+            catch (e) { return false; }
+        }
+        function render() {
+            const on = readEnabled();
+            document.documentElement.setAttribute('data-power-saver', on ? 'true' : 'false');
+            if (icon) icon.textContent = on ? '🪫' : '🔋';
+            if (label) label.textContent = on ? 'Power Saver On' : 'Power Saver Off';
+            btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+            btn.title = on
+                ? 'Power saver is on — tap to restore looping effects and the game pool'
+                : 'Trim battery use: attention pulses play once instead of looping, ambient effects pause, and only the active game stays loaded';
+        }
+
+        btn.addEventListener('click', () => {
+            localStorage.setItem(KEY, JSON.stringify(!readEnabled()));
+            render();
+            if (window.__arcade && window.__arcade.broadcastSettings) window.__arcade.broadcastSettings();
+            // Enabling shrinks the effective pool cap to 1 — evict now, not
+            // at the next launch, and re-render the Open games input so it
+            // shows the override rather than a cap it is no longer honouring.
+            if (window.__arcade && window.__arcade.applyPoolCap) window.__arcade.applyPoolCap();
+            if (window.__arcade && window.__arcade.renderPoolCapControl) window.__arcade.renderPoolCapControl();
+        });
+        render();
+    })();
+
+    // ==========================================
     // POOL CAP CONTROL — How many recent games to keep mounted
     // ==========================================
     // The user types any positive integer; we clamp to [1, gameCount] where
@@ -970,7 +1025,24 @@
             }
         }
 
-        input.value = String(read());
+        // Power saver pins the effective cap to 1 (arcade-pool.js readPoolCap).
+        // Left alone, this input would keep displaying the stored cap and
+        // happily accept a new one while the pool sat at 1 — the control would
+        // read as broken. Show the override instead; the stored value is
+        // untouched underneath and returns when power saver goes off.
+        function powerSaverOn() {
+            try { return JSON.parse(localStorage.getItem('arcade.v1.global.powerSaver')) === true; }
+            catch (e) { return false; }
+        }
+        function render() {
+            const pinned = powerSaverOn();
+            input.disabled = pinned;
+            input.value = pinned ? '1' : String(read());
+            input.title = pinned ? `Pinned to 1 by Power Saver (yours: ${read()})` : `1–${gameCount}`;
+        }
+        window.__arcade.renderPoolCapControl = render;
+
+        render();
         // Persist on commit (blur / Enter), not on every keystroke — avoids
         // applying a transient typo like "1" while the user is typing "12".
         input.addEventListener('change', () => write(input.value));
@@ -981,8 +1053,7 @@
             if (!isFinite(n) || n < 1) return;
             gameCount = Math.floor(n);
             input.max = String(gameCount);
-            input.title = `1–${gameCount}`;
-            input.value = String(read());
+            render();
         };
     })();
 
@@ -1587,13 +1658,15 @@
             const rm = readGlobal('reducedMotion', null);
             const av = readGlobal('audioVolume', null);
             const hd = readGlobal('handedness', null);
+            const ps = readGlobal('powerSaver', null);
             return {
                 fontScale: fs,
                 theme: (th === 'light' || th === 'dark') ? th : defaultTheme(),
                 reducedMotion: typeof rm === 'boolean' ? rm : defaultReducedMotion(),
                 audioVolume: (typeof av === 'number' && isFinite(av))
                     ? Math.max(0, Math.min(1, av)) : 1,
-                handedness: (hd === 'left' || hd === 'right') ? hd : 'right'
+                handedness: (hd === 'left' || hd === 'right') ? hd : 'right',
+                powerSaver: typeof ps === 'boolean' ? ps : false
             };
         }
         window.__arcade.broadcastSettings = function () {
