@@ -887,9 +887,34 @@
                 // write `animation-iteration-count: var(--arcade-pulse-count, 3)`
                 // on looping emphasis effects (turn indicators, "ready" rings)
                 // so the pulse plays finitely and the display pipeline can
-                // reach 0 fps between state changes. The ladder: 3 normally,
-                // 1 under power saver, 0 under reduced motion. Inserted at
-                // head start, so a game's own :root rule can override.
+                // reach 0 fps between state changes. The token: 3 normally,
+                // 1 under power saver, 0 under reduced motion.
+                //
+                // Three things about this that are easy to get wrong later:
+                //
+                // 1. What a game OBSERVES under reduced motion is 1, not 0 —
+                //    the kill switch below sets animation-iteration-count
+                //    1!important on *, and !important beats a custom property.
+                //    The pulse still ends up instantaneous (duration ~0), so
+                //    the outcome is right, but note that animationstart DOES
+                //    still fire. The token's literal 0 is only observable in a
+                //    game that opted out of the kill switch with
+                //    data-arcade-keep-motion.
+                // 2. The ladder rule is deliberately NOT gated on
+                //    data-arcade-keep-motion. That opt-out exists to escape a
+                //    blanket `*` selector a game never asked for; this token is
+                //    opt-in per effect — a game consumes it by writing it on
+                //    that one animation. A game that wants an effect to keep
+                //    looping just doesn't consume the token there.
+                // 3. Reduced motion beating power saver rests on SOURCE ORDER,
+                //    not specificity — the two selectors below are both (0,2,0).
+                //    Reordering them silently inverts the ladder.
+                //
+                // Inserted at head start so a game's own :root rule overrides
+                // the base value. The two attribute-qualified rules are (0,2,0)
+                // against a plain :root's (0,1,0), so they deliberately win: a
+                // game cannot quietly opt out of the user's battery lever. To
+                // override those a game needs :root:root{…} or !important.
                 ':root{font-size:calc(100% * var(--font-scale, 1));' +
                 '--motion-scale:1;--audio-volume:1;--arcade-pulse-count:3;}\n' +
                 ':root[data-power-saver="true"]{--arcade-pulse-count:1;}\n' +

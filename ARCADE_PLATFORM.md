@@ -133,6 +133,7 @@ Arcade.settings.theme()               // 'light' | 'dark'
 Arcade.settings.reducedMotion()       // boolean
 Arcade.settings.audioVolume()         // 0..1
 Arcade.settings.handedness()          // 'left' | 'right'
+Arcade.settings.powerSaver()          // boolean — user asked to trim battery use
 Arcade.onSettingsChange(fn)           // fires when launcher updates a setting
 
 // AUDIO — SDK owns the AudioContext, gesture unlock, volume, suspend/resume
@@ -178,7 +179,7 @@ Arcade.ui.copy(text)                      // → Promise<boolean>; in-frame clip
 Arcade.context                        // { framed: boolean, version: number, sdkVersion: string, gameId }
 ```
 
-**Settings auto-apply:** on `Arcade.init()` the SDK injects a low-priority rule `:root { font-size: calc(100% * var(--font-scale, 1)); }` at the start of `<head>` and writes `--font-scale` onto `<html>` whenever the launcher pushes settings. Net effect: any rem/em-sized text in a game scales with the launcher's font setting **without code changes**. Games that explicitly set `:root { font-size: … }` themselves win the cascade and can opt back in via `var(--font-scale)` directly. Range: 0.5× – 3.0× (launcher clamp). The SDK also applies `data-theme`, `--motion-scale`, `--audio-volume`, and `data-handedness` — see GAME_INTEGRATION.md §5 for the full DOM-hook table. Of the five settings, only `fontScale` and the iframe-pool cap have a real launcher-menu control today; `theme`/`reducedMotion` mirror `prefers-color-scheme`/`prefers-reduced-motion`, and `audioVolume`/`handedness` currently ship fixed defaults — there is no in-launcher toggle for them yet.
+**Settings auto-apply:** on `Arcade.init()` the SDK injects a low-priority rule `:root { font-size: calc(100% * var(--font-scale, 1)); }` at the start of `<head>` and writes `--font-scale` onto `<html>` whenever the launcher pushes settings. Net effect: any rem/em-sized text in a game scales with the launcher's font setting **without code changes**. Games that explicitly set `:root { font-size: … }` themselves win the cascade and can opt back in via `var(--font-scale)` directly. Range: 0.5× – 3.0× (launcher clamp). The SDK also applies `data-theme`, `--motion-scale`, `--audio-volume`, `data-handedness`, `data-reduced-motion`, and `data-power-saver` — see GAME_INTEGRATION.md §5 for the full DOM-hook table. The injected base rule derives `--arcade-pulse-count` from the last two: 3 normally, 1 under power saver, 0 under reduced motion — though the SDK's reduced-motion kill switch separately forces `animation-iteration-count: 1 !important` on everything, so a game that has not set `data-arcade-keep-motion` on `<html>` actually resolves to one iteration at ~0s duration rather than none. Of the six settings, `fontScale`, `powerSaver`, and the iframe-pool cap have a real launcher-menu control today (`#menu-power-saver`, a Power Saver On/Off item in the launcher menu); `theme`/`reducedMotion` mirror `prefers-color-scheme`/`prefers-reduced-motion`, and `audioVolume`/`handedness` currently ship fixed defaults — there is no in-launcher toggle for them yet.
 
 **Standalone mode:** `framed=false`, `peer.status()` locked at `'unavailable'`. Storage just works because of same-origin localStorage.
 
@@ -206,7 +207,7 @@ child → parent:  { type: 'arcade:hello',   gameId }
 parent → child:  { type: 'arcade:welcome', peerStatus: 'idle',
                    caps: ['peer.sendTo', 'peer.roster', 'peer.meta', 'peer.party', 'storage.bridge', 'ui.bridge', 'configs.bridge'],  // capability flags (absent ⇒ [])
                    peers: [{ deviceId, name, status, direct }, ...],   // live remote devices (roster seed)
-                   settings: { fontScale, theme, reducedMotion, audioVolume, handedness },
+                   settings: { fontScale, theme, reducedMotion, audioVolume, handedness, powerSaver },
                    state: { '<fullKey>': '<raw string>', ... } }       // storage-bridge snapshot: the app's own
                                                                        // keys + global.* + _meta identity/dev
 ```
@@ -576,6 +577,7 @@ A bounded LRU map of recently-played games, all kept mounted, toggled via `hidde
 **Cap policy:**
 - Default cap is **2** — keeps back-and-forth between two games instant (the common case) without unbounded growth as the catalog expands.
 - User-tunable via the *Open Games* numeric input in the launcher menu. The user types any positive integer; the launcher clamps to `[1, gameCount]` where `gameCount` is the number of launcher buttons. A value at the cap (e.g. `5` when the catalog has 5 games) effectively disables eviction. Persisted at `arcade.v1.global.poolCap`.
+- **Power saver overrides the cap to 1.** While `arcade.v1.global.powerSaver` is true, `readPoolCap` in [arcade-pool.js](arcade-pool.js) returns 1 without reading the stored value: a hidden-but-mounted sibling still holds memory and timers even while suspended, so only the active game stays mounted. The user's stored `poolCap` is preserved, not overwritten — it is simply not consulted, and their number comes back the moment power saver is turned off. Turning power saver on evicts right away (the menu toggle calls `applyPoolCap`), the same as lowering the cap by hand.
 - The active game is **never** evicted, even at cap=1.
 - Lowering the cap trims excess entries immediately, not on the next launch.
 

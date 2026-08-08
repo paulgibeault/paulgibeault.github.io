@@ -996,6 +996,11 @@ body.app-in-game .launcher-menu__panel {
 @media (prefers-reduced-motion: reduce) {
     .net-watermark.is-reconnecting .net-watermark__glyph { animation: none; }
 }
+/* Reconnecting can persist for minutes; the amber colour already carries the
+   state. See the POWER SAVER block below. */
+html[data-power-saver="true"] .net-watermark.is-reconnecting .net-watermark__glyph {
+    animation: none;
+}
 
 /* Visually hidden but exposed to assistive tech (live regions, skip targets). */
 .visually-hidden {
@@ -1671,7 +1676,12 @@ body.app-in-game .launcher-menu__panel {
 }
 
 /* ---- POWER SAVER ---- */
-/* 150 stars × 2 infinite animations is the launcher's whole idle cost;
+/* The launcher holds itself to the same §6d bar it asks games to meet: nothing
+   loops forever on a visible, idle screen. Its three infinite animations are
+   the starfield (here), the LIVE badge (index.html, beside its own rule), and
+   the reconnect watermark (above). The transient game-spin loader is exempt —
+   it ends on its own.
+   150 stars × 2 infinite animations is the launcher's whole idle cost;
    display:none stops the animations, not just the paint. */
 html[data-power-saver="true"] #starfield { display: none; }
 

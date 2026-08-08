@@ -205,6 +205,13 @@
         @media (prefers-reduced-motion: reduce) {
             .launcher-btn__live-badge::before { animation: none; }
         }
+        /* §6d applies to the launcher too. Power saver pins the pool to the
+           active game, so quitting back here leaves exactly one tile carrying a
+           LIVE badge — a 2s loop running forever on a visible, idle screen. The
+           badge's colour says "live" on its own. */
+        html[data-power-saver="true"] .launcher-btn__live-badge::before {
+            animation: none;
+        }
 
         @media (max-width: 768px) {
             .launcher-header { padding: 40px 16px 16px; }
@@ -968,8 +975,10 @@
             render();
             if (window.__arcade && window.__arcade.broadcastSettings) window.__arcade.broadcastSettings();
             // Enabling shrinks the effective pool cap to 1 — evict now, not
-            // at the next launch.
+            // at the next launch, and re-render the Open games input so it
+            // shows the override rather than a cap it is no longer honouring.
             if (window.__arcade && window.__arcade.applyPoolCap) window.__arcade.applyPoolCap();
+            if (window.__arcade && window.__arcade.renderPoolCapControl) window.__arcade.renderPoolCapControl();
         });
         render();
     })();
@@ -1016,7 +1025,24 @@
             }
         }
 
-        input.value = String(read());
+        // Power saver pins the effective cap to 1 (arcade-pool.js readPoolCap).
+        // Left alone, this input would keep displaying the stored cap and
+        // happily accept a new one while the pool sat at 1 — the control would
+        // read as broken. Show the override instead; the stored value is
+        // untouched underneath and returns when power saver goes off.
+        function powerSaverOn() {
+            try { return JSON.parse(localStorage.getItem('arcade.v1.global.powerSaver')) === true; }
+            catch (e) { return false; }
+        }
+        function render() {
+            const pinned = powerSaverOn();
+            input.disabled = pinned;
+            input.value = pinned ? '1' : String(read());
+            input.title = pinned ? `Pinned to 1 by Power Saver (yours: ${read()})` : `1–${gameCount}`;
+        }
+        window.__arcade.renderPoolCapControl = render;
+
+        render();
         // Persist on commit (blur / Enter), not on every keystroke — avoids
         // applying a transient typo like "1" while the user is typing "12".
         input.addEventListener('change', () => write(input.value));
@@ -1027,8 +1053,7 @@
             if (!isFinite(n) || n < 1) return;
             gameCount = Math.floor(n);
             input.max = String(gameCount);
-            input.title = `1–${gameCount}`;
-            input.value = String(read());
+            render();
         };
     })();
 
