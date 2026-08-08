@@ -266,6 +266,13 @@ body.app-in-game .launcher-menu__panel {
     border-color: var(--field-gold);
     color: var(--field-gold);
 }
+/* Power saver pins this to 1 and disables it. Without a visible disabled state
+   the field still reads as editable, which is the confusion the pinning was
+   meant to clear up. The label's title carries the stored value. */
+.launcher-menu__input:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
 
 .launcher-menu__item {
     display: flex;
