@@ -12,6 +12,18 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # The fleet's canary. Everything this pipeline depends on floats:
+  # fleet-ci.yml@main, actions/checkout@v5, actions/deploy-pages@v4, the
+  # Playwright browsers, the runner image. That evergreen posture is
+  # deliberate, but with no schedule the first sign of an upstream break is
+  # whenever someone next pushes — mid-feature, and attributed to their change.
+  #
+  # This repo is the right canary for all ten callers: it exercises the
+  # contract gates, the browser tier, the smoke path and the deploy path in
+  # one run. `deploy` skips scheduled events (see fleet-ci.yml), so this
+  # checks the pipeline without republishing an unchanged site every week.
+  schedule:
+    - cron: "17 8 * * 1" # Mondays, 08:17 UTC
 
 permissions:
   contents: write # version_bump pushes the bump commit back to main
@@ -19,9 +31,14 @@ permissions:
   id-token: write
 
 # Per-ref, so a PR run never cancels main's deploy.
+#
+# Cancelling is for PRs ONLY. A main run that gets cancelled mid-deploy can
+# have already pushed the version bump without publishing it, leaving the
+# origin serving a version that no longer matches the repo — the exact drift
+# the bump exists to prevent. Pushes to main queue and drain instead.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   fleet:
