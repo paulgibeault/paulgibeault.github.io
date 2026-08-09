@@ -1,0 +1,6 @@
+/* Only the SECOND value is wrong. A whole-declaration comparison that happened
+   to accept the first would let this through; Gate B judges each value. */
+.tile {
+  animation-name: settle, glow;
+  animation-iteration-count: 1, 12;
+}

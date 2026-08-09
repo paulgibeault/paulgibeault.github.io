@@ -1,0 +1,5 @@
+/* The token with the wrong fallback. `, 0` means the effect never runs at all
+   on a standalone visit or a pre-3.13 SDK — silently, with no error anywhere. */
+.hint {
+  animation-iteration-count: var(--arcade-pulse-count, 0);
+}
