@@ -1384,6 +1384,20 @@ This repo calls the same pipeline, with `uses: ./.github/workflows/fleet-ci.yml`
 — a workflow in the same repository is referenced by relative path, not by
 `owner/repo@ref`. It is the identical pipeline either way.
 
+### What the test job runs, in order
+
+1. **The fleet contract gates** — launcher-owned `tools/contract-gates.mjs`,
+   checked out and run against your tracked files before anything is
+   installed. Unconditional: it is not an opt-in input, because a contract
+   that holds for the repos that remember to enable it is not a contract. It
+   is also the one part of your gate that does not live in your repo — see
+   §6d, "CI enforces the static half of this", for the three rules and how to
+   run it yourself.
+2. **Your own tests** — `npm test` if `package.json` declares a `test`
+   script, otherwise the floor gate: `node --check` on every tracked JS file.
+   Adding a real suite later needs no workflow change.
+3. **`npm run acceptance`** — only when the caller passes `launcher: true`.
+
 Requirements every app meets (the pipeline detects them; the repo provides them):
 
 - **Node 24** everywhere; `package.json` declares `"engines": { "node": ">=24" }`.

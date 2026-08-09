@@ -1,9 +1,10 @@
 # Testing the platform locally
 
 Every check CI runs is a plain CLI command you can run on a laptop — CI calls
-the same scripts (`fleet-ci.yml` runs `npm test`, nothing more). This doc maps
-the configurations, from "one command, everything" down to "one suite while
-iterating".
+the same scripts. For this repo that is `npm test` plus the fleet contract
+gates, which `fleet-ci.yml` runs against every caller including this one. This
+doc maps the configurations, from "one command, everything" down to "one suite
+while iterating".
 
 ## One-time setup
 
@@ -160,6 +161,31 @@ Game tiles 404 (nothing is staged) — expected; everything launcher-side
 Seed test data from the console with plain
 `localStorage.setItem('arcade.v1.<gameId>.…', …)` writes.
 
+## Configuration F — the fleet contract gates, on any repo
+
+[`tools/contract-gates.mjs`](tools/contract-gates.mjs) is the §5/§6d
+power-saver contract as three static gates (no browser, no network, zero
+dependencies). `fleet-ci.yml` runs it against **every** caller, so this is the
+one check a game repo cannot run from its own checkout — point it at the repo
+instead:
+
+```sh
+node tools/contract-gates.mjs .                  # this repo
+node tools/contract-gates.mjs ../some-game       # any fleet app's checkout
+node tools/contract-gates.mjs --self-test        # the fixture corpus
+```
+
+It reads the target's own `git ls-files`, so it wants a real checkout rather
+than a directory of files, and it exits `2` — not `0` — if that turns up
+nothing to scan, because "no files" is a broken invocation rather than a pass.
+
+Exit codes: `0` clean, `1` violations found, `2` the gate could not run.
+
+`npm test` covers all of this here via `tools/contract-gates-unit.mjs`, which
+runs the fixtures, this repo, and three throwaway git checkouts that drive the
+real CLI — the exit code is what the pipeline reads, so it is what the suite
+asserts on.
+
 ## Port map & collisions
 
 | Port | Owner |
@@ -170,7 +196,16 @@ Seed test data from the console with plain
 
 ## What CI adds that local runs don't
 
-Nothing, by design — `fleet-ci.yml`'s test job is `npm test` on the same
-scripts. The only deploy-time difference is that CI rewrites `sw.js`'s
-`APP_VERSION` on deploy (never hand-bump it; `repo-gates-unit.mjs` Gate D
-asserts the line keeps the shape CI's rewrite targets).
+Almost nothing, by design — but no longer literally nothing, so the two
+differences are worth knowing.
+
+**The fleet contract gates run as their own step**, before `npm test` and
+before any install. They are launcher-owned and run against *every*
+`fleet-ci.yml` caller, so for a game repo they are the one part of the gate
+that does not live in that repo. For this repo they are also covered by
+`npm test`, via `tools/contract-gates-unit.mjs` — so a laptop run does check
+them here. See Configuration F.
+
+**CI rewrites `sw.js`'s `APP_VERSION` on deploy** — never hand-bump it;
+`repo-gates-unit.mjs` Gate D asserts the line keeps the shape CI's rewrite
+targets.
