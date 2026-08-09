@@ -217,6 +217,51 @@ someone hunting in the wrong file.
 `tools/render-smoke-acceptance.mjs` runs in the acceptance tier and pins the
 checker itself against a planted blank, a gated fixture and the starter app.
 
+## Configuration H — the deploy path, without deploying
+
+Three more launcher-owned scripts run only in `fleet-ci.yml`'s `deploy` job.
+That job never runs on a pull request, so **no PR in the fleet can exercise
+them** — which is exactly why each is a plain CLI command with a unit suite,
+and why it is worth knowing how to run them by hand.
+
+```sh
+node tools/stage-dispatch.mjs dist            # pick the staging route and produce dist/
+node tools/stage-dispatch.mjs /tmp/x --optional   # smoke's mode: no route is not an error
+```
+
+`stage-dispatch.mjs` is the single implementation of "build or stage" that both
+the `deploy` job and the `smoke` job call, so what gets smoked and what gets
+published can never be staged two different ways. It runs `npm run build` when
+the repo declares one, otherwise `node tools/stage.mjs <out>`, and it fails on
+an empty artifact — a build that exits 0 having produced nothing is a green
+deploy of an empty site.
+
+```sh
+node tools/bump-version.mjs --no-commit       # rewrite the version, touch no git
+node tools/bump-version.mjs --no-push         # commit locally, do not push
+```
+
+`bump-version.mjs` moves `package.json`, the `manifest.json` `start_url`
+cache-buster, the `id="version-tracker"` badge in `index.html`, and the anchored
+`APP_VERSION` line in `sw.js`. Run it against a scratch clone of any app to see
+what a deploy would do to it. **`--no-commit` is the safe way to look**; without
+a flag it commits and pushes, because that is what CI needs.
+
+```sh
+node tools/verify-origin.mjs https://paulgibeault.github.io/ --artifact dist
+node tools/verify-origin.mjs https://paulgibeault.github.io/<app>/ --artifact dist --attempts 2
+```
+
+`verify-origin.mjs` is the post-deploy check: it reads the expected version out
+of the **staged artifact** — not from the bump step, so it stays meaningful for
+an app with `version_bump: false` — then asks the live origin whether it serves
+that. Pointing it at a stale local checkout is a good way to watch it fail
+correctly. Exit `0` matched, `1` did not; `--warn` downgrades to advisory,
+`--attempts` bounds the retry loop that covers CDN propagation.
+
+All three have `-unit.mjs` suites in the unit tier, so `npm run test:units`
+covers them with no browser and no network.
+
 ## Port map & collisions
 
 | Port | Owner |
@@ -239,12 +284,29 @@ that does not live in that repo. For this repo they are also covered by
 `npm test`, via `tools/contract-gates-unit.mjs` — so a laptop run does check
 them here. See Configuration F.
 
-**Render smoke runs last, and only warns.** It stages the artifact and checks
-it draws something. Warn-only until it earns a track record on shared runners,
-so it annotates and exits 0 — a red build never comes from here today. Its
-own checker is covered by `npm test` (`render-smoke-acceptance.mjs`); smoking
-a *staged artifact* is the part a laptop run skips. See Configuration G.
+**Render smoke runs in its own job, in parallel, and only warns.** It stages
+the artifact and checks it draws something. Warn-only until it earns a track
+record on shared runners, so it annotates and exits 0 — a red build never comes
+from here today. Its own checker is covered by `npm test`
+(`render-smoke-acceptance.mjs`); smoking a *staged artifact* is the part a
+laptop run skips. See Configuration G.
+
+The parallel job is not cosmetic. It used to be the last step of `test`, and
+`deploy` needs all of `test` — so an advisory check that could not fail
+anything still held every publish back by however long it took. Its own job, it
+costs the deploy nothing. The job carries `continue-on-error`, so an advisory
+failure shows a red **job** while the **run** stays green and `deploy` is
+unaffected.
 
 **CI rewrites `sw.js`'s `APP_VERSION` on deploy** — never hand-bump it;
 `repo-gates-unit.mjs` Gate D asserts the line keeps the shape CI's rewrite
-targets.
+targets. `tools/bump-version.mjs` owns that rewrite; see Configuration H to run
+it by hand.
+
+**CI asks the live origin whether it served the deploy.** After
+`actions/deploy-pages`, `tools/verify-origin.mjs` fetches the published `sw.js`
+and asserts its `APP_VERSION` matches the artifact just uploaded. This one **is**
+enforcing: it is an HTTP GET with retries rather than a browser, and it runs
+after the publish, so failing blocks nothing and only turns a silently bad
+deploy into a red build. A laptop can run it against any live app — Configuration
+H — but only a merge exercises it in CI, since `deploy` never runs on a PR.

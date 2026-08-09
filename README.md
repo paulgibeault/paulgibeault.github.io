@@ -123,15 +123,27 @@ npm run test:units                                       # fast tier only — no
 npm run acceptance -- http://127.0.0.1:4791/<gameId>/    # per-game integration checklist (vs dev.sh)
 ```
 
-Two of those checks are **fleet-wide** rather than this repo's own: `fleet-ci.yml`
-runs them against every app that calls it, from this repo's copy, so they are the
-part of a game's gate that does not live in the game's repo. Both take a target,
-so either can be pointed at any app:
+Some of those checks are **fleet-wide** rather than this repo's own:
+`fleet-ci.yml` runs them against every app that calls it, from this repo's copy,
+so they are the part of a game's gate that does not live in the game's repo.
+Each takes a target, so any can be pointed at any app:
 
 ```sh
-node tools/contract-gates.mjs ../some-game          # §5/§6d contract — enforcing
+node tools/contract-gates.mjs ../some-game              # §5/§6d contract — enforcing
 node tools/render-smoke.mjs ../some-game/dist --sdk .   # does the artifact draw — warn-only
 ```
+
+Three more run only in the `deploy` job, which never runs on a pull request —
+so nothing in the fleet exercises them until a merge. They are plain commands
+with unit suites for that reason:
+
+```sh
+node tools/stage-dispatch.mjs dist                      # build-or-stage, one implementation
+node tools/bump-version.mjs --no-commit                 # what a deploy would rewrite
+node tools/verify-origin.mjs <page-url> --artifact dist # does the origin serve it?
+```
+
+See **[TESTING.md](TESTING.md)** Configurations F–H for all of them.
 
 Every acceptance suite is also runnable standalone and hermetically — see
 **[TESTING.md](TESTING.md)** for all configurations (stage filters,

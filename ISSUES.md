@@ -9,6 +9,7 @@ addressed to other maintainers).
 | Issue | Theme | Severity |
 | ----- | ----- | -------- |
 | [#137 — sync-acceptance fails on CI runners when the launcher's starfield re-arms its ambience window](https://github.com/paulgibeault/paulgibeault.github.io/issues/137) | CI reliability | MED |
+| [#141 — three acceptance suites crash instead of reporting when a wait times out](https://github.com/paulgibeault/paulgibeault.github.io/issues/141) | CI diagnostics | MED |
 | [#39 — SDK pattern-lift batch (tween/fx, canvas.autosize, SW template, guide, fmt, undo, …)](https://github.com/paulgibeault/paulgibeault.github.io/issues/39) | SDK ergonomics | LOW |
 
 **#137 is the one to read before trusting a red `sync-acceptance`.** A
@@ -21,6 +22,26 @@ under CPU contention, and its failures point nowhere near their cause, because
 `tools/lib/p2p-test-harness.mjs` boots every device context on the real
 launcher page.
 
+**Updated during #139: the starfield is not necessary for the failure.** The
+suite failed 3/3 with the same opening assertion on a branch touching no
+`index.html`, no `styles.css` and no launcher runtime at all — on a tree
+*byte-identical* to one that had passed six minutes earlier, and which passed
+again on rerun. Same bytes, three outcomes, ~15 minutes. That is a clean
+counterexample to "carries the block → fails", so the block is at most an
+amplifier of something already there, and the weight moves to the
+CPU-contention finding. Corollary worth remembering when reading a failure:
+`run-ci.mjs`'s three retries run back-to-back inside one job, so they sample
+nearly the same runner weather — **"3/3 failed" is not three independent
+samples** and reads as far stronger evidence of a real defect than it is.
+
+**#141 is why a red run in this tier is often unreadable.** Three suites wrap
+their body in `try { … } finally { … }` with no `catch`, so a Playwright
+`TimeoutError` kills the process before their own `check()` reporting runs — the
+output is a line number and a stack from `node:internal`, with no check name and
+no page state. `tools/records-acceptance.mjs:174` already carries the one-line
+fix. Fix the reporting before reaching for a bigger timeout: a hit ceiling is
+meant to send someone to a debugger, and today it hands them nothing to debug.
+
 (Closed since the last revision of this table: #114, #128, #129 — the
 power-saver contract follow-up, landed as one stack. #129 retired the
 launcher's last seven infinite animations, so it meets the §6d bar it asks
@@ -29,8 +50,25 @@ games to meet, with no exemptions. #128 turned §5/§6d into
 every caller, replacing three drifting per-repo copies. #114 shipped
 `tools/render-smoke.mjs` **warn-only**; all nine apps pass it with the default
 declaration, so no app ships a `tools/smoke.mjs` yet. The flip to enforcing is
-dropping `--warn` and `continue-on-error` from one step in `fleet-ci.yml`, and
-wants a track record first.
+dropping `--warn` from the smoke step and `continue-on-error` from the `smoke`
+job in `fleet-ci.yml`, and wants a track record first.
+
+#139 reworked the pipeline itself. `test` still gates `deploy`, but the render
+smoke moved to its **own job running in parallel** — advisory work had been
+sitting in the deploy's critical path, because `deploy` needs the whole `test`
+job — and npm/Playwright caching landed (browser installs 46s → 24s warm). The
+last logic left in the workflow YAML moved into three launcher-owned scripts
+with unit suites: `tools/stage-dispatch.mjs` (one build-or-stage implementation,
+called by both the deploy and smoke jobs, replacing two mirrored shell blocks),
+`tools/bump-version.mjs` (fixing a global `sed` that rewrote every
+version-shaped string in an `index.html`, and a `git push` with no rebase
+retry), and `tools/verify-origin.mjs` — a new **enforcing** post-deploy check
+that asks the live origin whether it serves the version just published. Callers
+now cancel in-progress runs for pull requests only. Note `toolchain_ref`: the
+`.launcher-gates` checkout defaults to this repo's default branch, so pinning a
+caller to a ref pins only the YAML unless that input is passed too — there is
+no context variable exposing a reusable workflow's own revision
+(`job_workflow_sha` and `job_workflow_ref` are both empty inside one).
 
 Earlier: #17, #106, #107, #108, #113,
 #120 — the security batch, the t=0 root-cause + fleet re-audition, the WP2
