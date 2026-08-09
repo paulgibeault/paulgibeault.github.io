@@ -1,0 +1,17 @@
+/* A stacked pair of animations with per-animation counts. A repo ships exactly
+   this: the first effect runs once, the second rides the token.
+
+   A gate that compares the WHOLE declaration against the token string flags
+   this as a violation — which is why Gate B splits on top-level commas and
+   judges each value on its own. Splitting naively also fails, because the
+   token itself contains a comma. */
+.tile--landing {
+  animation-name: settle, glow;
+  animation-duration: 400ms, 1.4s;
+  animation-iteration-count: 1, var(--arcade-pulse-count, 3);
+}
+
+/* And the same idea three deep, with an !important trailing the list. */
+.tile--stacked {
+  animation-iteration-count: 1, var(--arcade-pulse-count, 3), 1 !important;
+}

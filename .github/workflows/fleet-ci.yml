@@ -56,6 +56,35 @@ jobs:
         with:
           node-version: 24
 
+      # ---- the fleet's §5/§6d power-saver contract -------------------------
+      #
+      # Runs for EVERY caller, unconditionally. It deliberately does not ride
+      # the `launcher:` input — only two callers set that, and this has to hold
+      # everywhere or it is just three repos' local copies again under a new
+      # name. Before the installs, because it needs nothing installed: the
+      # script is zero-dep pure Node, and a contract violation should fail in
+      # seconds rather than after a Playwright download.
+      #
+      # The checkout is skipped when the workspace already IS the launcher —
+      # this repo calls the pipeline too, and then the PR's own copy of the
+      # gate is the one that runs, which is what makes a change to the gate
+      # testable in the PR that makes it.
+      #
+      # `.launcher-gates` is untracked in the app's checkout, so the gate's
+      # `git ls-files` enumeration of the target never sees it.
+      - name: Check out the fleet contract gates
+        if: ${{ hashFiles('tools/contract-gates.mjs') == '' }}
+        uses: actions/checkout@v5
+        with:
+          repository: paulgibeault/paulgibeault.github.io
+          path: .launcher-gates
+
+      - name: Fleet contract gates (GAME_INTEGRATION §5/§6d)
+        run: |
+          GATES=tools/contract-gates.mjs
+          [ -f "$GATES" ] || GATES=.launcher-gates/tools/contract-gates.mjs
+          node "$GATES" .
+
       - name: Install dependencies
         run: |
           if [ -f package-lock.json ]; then npm ci

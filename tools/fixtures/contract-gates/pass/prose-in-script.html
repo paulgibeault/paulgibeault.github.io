@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<style>
+  .ring { animation-iteration-count: var(--arcade-pulse-count, 3); }
+</style>
+</head>
+<body>
+<script>
+  // ===== Power saver =====
+  // GAME_INTEGRATION §5 / §6d. The launcher's power-saver switch means "spend
+  // nothing on decoration": ambient effects go out entirely and attention
+  // pulses drop from 3 iterations to 1. The CSS half of that needs nothing from
+  // us — `animation-iteration-count: var(--arcade-pulse-count, 3)` carries its
+  // own fallback — but the ambient gate is a JS read, and it MUST be guarded.
+  //
+  // That comment is a JS comment, inside <script>, quoting a CSS declaration.
+  // Stripping CSS comments does nothing to it; only refusing to read <script>
+  // as CSS does. Left unhandled, Gate B parses the value as
+  // "var(--arcade-pulse-count" / "3)` carries its own fallback — but the…" and
+  // fails a repo that is entirely correct.
+  //
+  // The same paragraph mentions that a pulse must never be infinite, which is
+  // the matching hazard for Gate A.
+  const ambient = false;
+  export { ambient };
+</script>
+</body>
+</html>
