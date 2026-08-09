@@ -9,6 +9,7 @@ addressed to other maintainers).
 | Issue | Theme | Severity |
 | ----- | ----- | -------- |
 | [#137 — sync-acceptance fails on CI runners when the launcher's starfield re-arms its ambience window](https://github.com/paulgibeault/paulgibeault.github.io/issues/137) | CI reliability | MED |
+| [#141 — three acceptance suites crash instead of reporting when a wait times out](https://github.com/paulgibeault/paulgibeault.github.io/issues/141) | CI diagnostics | MED |
 | [#39 — SDK pattern-lift batch (tween/fx, canvas.autosize, SW template, guide, fmt, undo, …)](https://github.com/paulgibeault/paulgibeault.github.io/issues/39) | SDK ergonomics | LOW |
 
 **#137 is the one to read before trusting a red `sync-acceptance`.** A
@@ -32,6 +33,14 @@ CPU-contention finding. Corollary worth remembering when reading a failure:
 `run-ci.mjs`'s three retries run back-to-back inside one job, so they sample
 nearly the same runner weather — **"3/3 failed" is not three independent
 samples** and reads as far stronger evidence of a real defect than it is.
+
+**#141 is why a red run in this tier is often unreadable.** Three suites wrap
+their body in `try { … } finally { … }` with no `catch`, so a Playwright
+`TimeoutError` kills the process before their own `check()` reporting runs — the
+output is a line number and a stack from `node:internal`, with no check name and
+no page state. `tools/records-acceptance.mjs:174` already carries the one-line
+fix. Fix the reporting before reaching for a bigger timeout: a hit ceiling is
+meant to send someone to a debugger, and today it hands them nothing to debug.
 
 (Closed since the last revision of this table: #114, #128, #129 — the
 power-saver contract follow-up, landed as one stack. #129 retired the
