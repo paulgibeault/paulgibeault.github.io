@@ -186,13 +186,46 @@ runs the fixtures, this repo, and three throwaway git checkouts that drive the
 real CLI — the exit code is what the pipeline reads, so it is what the suite
 asserts on.
 
+## Configuration G — render smoke: does the artifact draw?
+
+[`tools/render-smoke.mjs`](tools/render-smoke.mjs) loads a **staged artifact**
+in a real visible browser and asserts the screenshot's pixels are not
+near-uniform. Also launcher-owned, also run per caller by `fleet-ci.yml` —
+**warn-only for now**, so it annotates rather than failing a build.
+
+Stage first, the way the deploy does, then point it at `dist/`:
+
+```sh
+node tools/stage.mjs dist                              # or: npm run build
+node tools/render-smoke.mjs dist --sdk .               # this repo
+node tools/render-smoke.mjs ../some-game/dist --sdk .  # any app's artifact
+```
+
+`--sdk` matters more than it looks. Games load `/arcade-sdk.js` by absolute
+path, so serving an app's `dist/` alone 404s it and the app boots a degraded
+path no player takes — measured on a real game, 230 distinct colours against
+1026 with the SDK in place. Point it at a launcher checkout.
+
+Other flags: `--hints <file>` for an app's own `tools/smoke.mjs` declaration,
+`--warn` to annotate instead of failing, `--shot <file>` to keep the
+screenshot, `--label` and `--port`.
+
+Exit codes: `0` drew, `1` near-uniform frame, `2` no such artifact — a missing
+`dist/` is a staging bug, not a rendering bug, and conflating them sends
+someone hunting in the wrong file.
+
+`tools/render-smoke-acceptance.mjs` runs in the acceptance tier and pins the
+checker itself against a planted blank, a gated fixture and the starter app.
+
 ## Port map & collisions
 
 | Port | Owner |
 | --- | --- |
 | 4791 | dev.sh default **and** the launcher-only preview — one at a time; a forgotten dev.sh server blocks (and masquerades as) the preview. `./dev.sh stop` frees it. |
-| 4784–4807 | acceptance suites, one fixed port each (sequential runs only) |
+| 4784–4808 | acceptance suites, one fixed port each (sequential runs only) |
 | 4799 | `tools/acceptance.mjs --serve` default |
+| 4860 | `tools/render-smoke.mjs` default — deliberately outside the block above, so smoking an artifact by hand never collides with a suite that is up |
+| 4861–4869 | `tools/render-smoke-acceptance.mjs`, one per fixture run |
 
 ## What CI adds that local runs don't
 
@@ -205,6 +238,12 @@ before any install. They are launcher-owned and run against *every*
 that does not live in that repo. For this repo they are also covered by
 `npm test`, via `tools/contract-gates-unit.mjs` — so a laptop run does check
 them here. See Configuration F.
+
+**Render smoke runs last, and only warns.** It stages the artifact and checks
+it draws something. Warn-only until it earns a track record on shared runners,
+so it annotates and exits 0 — a red build never comes from here today. Its
+own checker is covered by `npm test` (`render-smoke-acceptance.mjs`); smoking
+a *staged artifact* is the part a laptop run skips. See Configuration G.
 
 **CI rewrites `sw.js`'s `APP_VERSION` on deploy** — never hand-bump it;
 `repo-gates-unit.mjs` Gate D asserts the line keeps the shape CI's rewrite

@@ -1436,6 +1436,11 @@ This repo calls the same pipeline, with `uses: ./.github/workflows/fleet-ci.yml`
    script, otherwise the floor gate: `node --check` on every tracked JS file.
    Adding a real suite later needs no workflow change.
 3. **`npm run acceptance`** — only when the caller passes `launcher: true`.
+4. **Render smoke** — stages your artifact the way the deploy stages it, loads
+   it in a real browser and checks it drew something. Unconditional too, but
+   **advisory**: it annotates and never fails the run, until a browser check on
+   shared runners has earned the right to block a deploy. See §6d, "CI also
+   checks that your app draws something".
 
 Requirements every app meets (the pipeline detects them; the repo provides them):
 

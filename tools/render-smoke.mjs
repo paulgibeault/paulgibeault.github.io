@@ -182,7 +182,10 @@ for (let i = 2; i < process.argv.length; i++) {
 
 const distDir = path.resolve(positional[0] || 'dist');
 const label = opts['--label'] || path.basename(path.dirname(distDir)) || 'app';
-const port = Number(opts['--port'] || 4801);
+// 4860, not 4801: the acceptance suites own 4784–4808, one fixed port each,
+// and 4801 is export-advanced-acceptance's. Sequential CI runs would not have
+// collided, but anyone smoking an artifact while a suite is up would have.
+const port = Number(opts['--port'] || 4860);
 const warnOnly = Boolean(opts['--warn']);
 const shotPath = opts['--shot'] || null;
 const flag = (name, fallback = null) => opts[name] ?? fallback;
