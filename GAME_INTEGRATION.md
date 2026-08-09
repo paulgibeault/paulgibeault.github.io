@@ -1486,6 +1486,40 @@ the thing deciding whether anyone re-fetches anything had not moved. The two
 usual causes are named in the failure message — a Pages source reset to "deploy
 from branch", and an `sw.js` that has drifted out of the shape CI rewrites.
 
+### Validating a pipeline change before it merges
+
+The launcher calls this pipeline itself, so a change to `fleet-ci.yml` is
+exercised by the PR that makes it — but only along the branches the launcher
+takes. It has `tools/` locally, so it never takes the `.launcher-gates`
+fallback that **every game** takes. A change can be green in the launcher's own
+PR and broken for the other nine callers.
+
+To exercise the game side, open a throwaway draft PR on one app repo pinning
+both halves — the workflow **and** the toolchain:
+
+```yaml
+jobs:
+  fleet:
+    uses: paulgibeault/paulgibeault.github.io/.github/workflows/fleet-ci.yml@my-branch
+    with:
+      toolchain_ref: my-branch # ← without this you get main's scripts
+```
+
+Close it unmerged when it reports. `toolchain_ref` exists for exactly this and
+should never appear in a real caller.
+
+Why it is needed at all: `.launcher-gates` defaults to this repo's default
+branch, so pinning only the `uses:` gets you the branch's YAML with `main`'s
+scripts — which fails as a *missing file*, not as a version skew. Pinning the
+reusable workflow to its own commit would be the tidier fix and is not
+available: measured on runner 2.336.0, `github.job_workflow_sha` and
+`github.job_workflow_ref` are both empty inside a called workflow, and
+`github.workflow_sha`/`workflow_ref` describe the caller. No context variable
+exposes the reusable workflow's own revision.
+
+The same trap applies to any caller that pins `fleet-ci.yml@some-tag` for real:
+pin `toolchain_ref` alongside it or the two halves drift.
+
 ### Scheduled runs exercise the pipeline; they do not publish
 
 A caller may add a `schedule:` trigger. `deploy` skips scheduled events, so the
@@ -1530,7 +1564,12 @@ Requirements every app meets (the pipeline detects them; the repo provides them)
   Three more files sit alongside these, but **only in this repo** — your app
   never carries them. The pipeline checks the launcher out as `.launcher-gates`
   and runs them against your workspace, the same way it runs the contract
-  gates. They are listed here because they decide what happens to your repo:
+  gates. That checkout takes `inputs.toolchain_ref`, which is empty by default
+  and so resolves to this repo's default branch — correct for every real
+  caller, since a pipeline change and the scripts it needs land on `main` in
+  the same merge. See "Validating a pipeline change before it merges" below
+  for the two cases where that is not self-correcting. They are listed here
+  because they decide what happens to your repo:
 
   - `tools/stage-dispatch.mjs` — picks the staging route (`npm run build` if
     you declare one, otherwise your `tools/stage.mjs`) and refuses an empty

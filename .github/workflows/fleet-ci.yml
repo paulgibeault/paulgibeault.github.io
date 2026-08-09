@@ -20,6 +20,33 @@
 # Logic lives in launcher-owned scripts under tools/, not in this file: a
 # laptop can run exactly what CI runs, and a unit suite can assert what it
 # does. What is left here is orchestration.
+#
+# ── Which revision the scripts come from ────────────────────────────────────
+#
+# An app repo does not carry the scripts this pipeline runs. They are checked
+# out from the launcher as `.launcher-gates`, at `inputs.toolchain_ref` —
+# empty by default, which means the launcher's default branch.
+#
+# That default is correct for every real caller, because a pipeline change and
+# the scripts it needs land on main in the SAME merge; the YAML a caller reads
+# from `@main` and the tools it fetches from `main` are already one revision.
+#
+# It is not self-correcting in two cases, so they are worth knowing:
+#
+#   · A caller pinning `fleet-ci.yml@some-tag` gets that tag's YAML with the
+#     default branch's tools. Pinning half-works. Pass `toolchain_ref` too.
+#   · A pipeline change that needs a NEW script cannot be exercised from
+#     another repo before it merges — the canary reaches for a file that is
+#     on the branch and not yet on main. That is not hypothetical: it is how
+#     the canary for this rework failed, which is what `toolchain_ref` is for.
+#
+# The obvious fix — pin to the reusable workflow's own commit — is not
+# available. MEASURED, not assumed, on runner 2.336.0: inside a called
+# workflow `github.job_workflow_sha` and `github.job_workflow_ref` are both
+# EMPTY, and `github.workflow_sha`/`github.workflow_ref` describe the CALLER
+# (`…/hecknsic/.github/workflows/pages.yml@refs/pull/61/merge`), not this
+# file. No context variable exposes this workflow's own revision, so an
+# explicit input is the honest mechanism rather than a clever one.
 
 name: Fleet CI & Deploy
 
@@ -49,6 +76,16 @@ on:
           See tools/bump-version.mjs.
         type: boolean
         default: false
+      toolchain_ref:
+        description: >-
+          Ref of the launcher to take this pipeline's own scripts from (the
+          `.launcher-gates` checkout). Empty — the default — means the
+          launcher's default branch, which is right for every real caller.
+          Set it ONLY to exercise an unmerged pipeline change from another
+          repo, and remove it again afterwards. See "Which revision the
+          scripts come from" above.
+        type: string
+        default: ""
 
 jobs:
   # ===========================================================================
@@ -66,6 +103,11 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: paulgibeault/paulgibeault.github.io
+          # Deliberately NOT pinned to job_workflow_sha, unlike .launcher-gates
+          # below. This checkout is the launcher the game is tested AGAINST —
+          # it stands in for the deployed origin, so it should track what is
+          # live. The gates checkout is the pipeline's own toolchain, which
+          # must match the pipeline. Same repository, two different questions.
           path: .launcher
 
       - uses: actions/setup-node@v5
@@ -98,6 +140,10 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: paulgibeault/paulgibeault.github.io
+          # Empty (the default) means the launcher's default branch, which is
+          # what every real caller wants. See "Which revision the scripts come
+          # from" in the header.
+          ref: ${{ inputs.toolchain_ref }}
           path: .launcher-gates
 
       - name: Fleet contract gates (GAME_INTEGRATION §5/§6d)
@@ -204,6 +250,10 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: paulgibeault/paulgibeault.github.io
+          # Empty (the default) means the launcher's default branch, which is
+          # what every real caller wants. See "Which revision the scripts come
+          # from" in the header.
+          ref: ${{ inputs.toolchain_ref }}
           path: .launcher-gates
 
       # Whichever checkout owns render-smoke.mjs is the one that needs a
@@ -294,6 +344,10 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: paulgibeault/paulgibeault.github.io
+          # Empty (the default) means the launcher's default branch, which is
+          # what every real caller wants. See "Which revision the scripts come
+          # from" in the header.
+          ref: ${{ inputs.toolchain_ref }}
           path: .launcher-gates
 
       - name: Resolve the fleet toolchain
