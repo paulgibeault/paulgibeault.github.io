@@ -204,11 +204,23 @@
     color: #f87171; 
     border: 1px solid rgba(239, 68, 68, 0.2);
 }
-.p2p-status-connecting { 
-    background: rgba(245, 158, 11 0.1); 
-    color: #fbbf24; 
+.p2p-status-connecting {
+    /* Was `rgba(245, 158, 11 0.1)` — a missing comma, so the whole declaration
+       was invalid and this badge has been shipping with no background at all
+       while its two siblings below have one. */
+    background: rgba(245, 158, 11, 0.1);
+    color: #fbbf24;
     border: 1px solid rgba(245, 158, 11, 0.2);
-    animation: p2p-pulse-glow 1.5s infinite alternate;
+    /* The steady state the pulse settles onto — the glow's own `from` stop, so
+       the last iteration lands exactly here instead of dropping to nothing.
+       §6d: "Waiting for them to scan your code" can sit on screen for minutes,
+       which is a visible idle screen by any reading. Colour, border and the
+       label text carry "connecting" on their own; the glow is emphasis. */
+    box-shadow: 0 0 5px rgba(245, 158, 11, 0.1);
+    animation-name: p2p-pulse-glow;
+    animation-duration: 1.5s;
+    animation-direction: alternate;
+    animation-iteration-count: var(--arcade-pulse-count, 3);
 }
 .p2p-status-connected { 
     background: rgba(16, 185, 129, 0.1); 

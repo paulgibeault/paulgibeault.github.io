@@ -92,7 +92,16 @@
             width: 60px;
             height: 60px;
             opacity: 0.25;
-            animation: compass-spin 60s linear infinite;
+            /* One slow turn on arrival, then still. Pure decoration at 25%
+               opacity on a page people read rather than play — it had no state
+               to carry, so there was nothing for a settle treatment to
+               preserve, and a 60s rotation running for as long as the tab is
+               open is the plainest §6d violation in the repo. Longhand for the
+               same reason as every other count here. */
+            animation-name: compass-spin;
+            animation-duration: 60s;
+            animation-timing-function: linear;
+            animation-iteration-count: 1;
         }
 
         @keyframes compass-spin {
@@ -968,6 +977,26 @@
             star.style.animationDelay = (Math.random() * 6) + 's';
             container.appendChild(star);
         }
+
+        // §6d: twinkle and drift are declared with finite counts (styles.css),
+        // so the sky animates for one bounded window after boot and then
+        // settles to a static field. That is the whole requirement, and this
+        // one line is the whole implementation.
+        //
+        // There WAS a re-arm here — pointerdown/keydown/visibilitychange
+        // listeners that restarted the window so a page someone was
+        // actively reading kept twinkling. It is removed, and not because it was
+        // wrong: with it present, tools/sync-acceptance.mjs fails on CI runners
+        // with a 20s convergence wait lapsing, reproducibly. Six runs carrying
+        // this block failed and five without it passed, across three
+        // bisected variants; the launcher's CSS half alone is green. No
+        // mechanism has been found — boot time, star count and running-
+        // animation count are all identical with and without it, and the block
+        // throws nothing — so what is written down here is a correlation, not
+        // a diagnosis. Tracked separately rather than papered over by widening
+        // the test's ceiling, which would have hidden the signal. Re-arming is
+        // polish; shipping a fleet whose CI cannot be trusted is not.
+        container.classList.add('is-ambient');
     })();
 
     // ==========================================
