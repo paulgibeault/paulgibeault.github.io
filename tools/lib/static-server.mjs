@@ -34,9 +34,17 @@ const MIME = {
 //   catalogOverride repo-relative path served in place of /catalog.json
 //   mounts          { gameId: repoRelativeDir } — maps /<gameId>/* onto a
 //                   fixture dir (acceptance.mjs --mount)
+//   overlay         { '/url/path': absoluteFilePath } — individual files
+//                   served from outside `root`. The origin-level scripts a
+//                   game loads by absolute path (/arcade-sdk.js and friends)
+//                   live in the launcher, not in the game's own artifact, so a
+//                   runner serving one app's dist/ needs a way to put them
+//                   back where the real origin has them. Without this, every
+//                   game 404s its SDK and boots down a path no player ever
+//                   takes. catalogOverride is the same idea, fixed to one URL.
 //
 // → { server, port, origin, close() }
-export async function serveRepo({ root, port, cors = false, catalogOverride = null, mounts = null }) {
+export async function serveRepo({ root, port, cors = false, catalogOverride = null, mounts = null, overlay = null }) {
     const server = http.createServer(async (req, res) => {
         try {
             let p = decodeURIComponent(req.url.split('?')[0]);
@@ -46,7 +54,11 @@ export async function serveRepo({ root, port, cors = false, catalogOverride = nu
                 ? path.resolve(root, mounts[seg[0]], ...seg.slice(1))
                 : path.join(root, p);
             if (p === '/catalog.json' && catalogOverride) file = path.resolve(root, catalogOverride);
-            if (!file.startsWith(root)) { res.writeHead(403).end(); return; }
+            const overlaid = overlay && Object.prototype.hasOwnProperty.call(overlay, p);
+            if (overlaid) file = overlay[p];
+            // Overlay entries are named explicitly by the caller, so they are
+            // allowed to sit outside root; everything else still may not.
+            if (!overlaid && !file.startsWith(root)) { res.writeHead(403).end(); return; }
             const body = await readFile(file);
             const headers = { 'content-type': MIME[path.extname(file)] || 'application/octet-stream' };
             if (cors) headers['access-control-allow-origin'] = '*';

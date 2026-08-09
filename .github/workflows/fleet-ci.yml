@@ -123,6 +123,59 @@ jobs:
         if: ${{ inputs.launcher }}
         run: npm run acceptance
 
+      # ---- does the thing this repo is about to deploy actually draw? ------
+      #
+      # Every other gate here can be green while the product is a black
+      # rectangle: the unit tiers cover pure logic and never touch a canvas,
+      # verify-artifact.mjs proves every referenced file is published (a blank
+      # game publishes perfectly), and `node --check` proves the JS parses.
+      #
+      # WARN ONLY, for now. The contract gates above went enforcing on day one
+      # because they are static scans of a fleet verified clean; a browser
+      # check on shared runners has to earn that. It annotates and does not
+      # fail. Flipping it is a one-line change in this file — drop `--warn` and
+      # `continue-on-error` — and should follow a track record, not a hunch.
+      # `continue-on-error` covers the infrastructure half: --warn already
+      # makes a blank frame exit 0, so what this catches is a crashed browser
+      # or a failed install, which must not turn the fleet red in warn mode.
+      #
+      # Runs last: it is advisory, so it must never delay the real gate's
+      # feedback.
+      - name: Render smoke (warn only)
+        continue-on-error: true
+        run: |
+          set -e
+          if [ -f tools/render-smoke.mjs ]; then
+            SMOKE=tools/render-smoke.mjs; SDK=.
+          else
+            SMOKE=.launcher-gates/tools/render-smoke.mjs; SDK=.launcher-gates
+            # The gate checkout above carries no node_modules, and most callers
+            # install no browsers of their own (the `browsers` input is empty
+            # for all but two). Both are cached between runs.
+            (cd .launcher-gates && npm ci --silent)
+            (cd .launcher-gates && npx playwright install --with-deps chromium)
+          fi
+          # Stage the artifact the DEPLOY's own way, not the test's. This block
+          # mirrors "Stage deploy artifact (dist)" in the deploy job below —
+          # change one, change the other. Validating a differently-staged copy
+          # is how two repos once shipped a placeholder sw.js that every test
+          # was happy with: the suite staged one way and the deploy another.
+          if [ -f package.json ] && \
+             [ "$(node -p 'Boolean(require("./package.json").scripts?.build)')" = "true" ]; then
+            npm run build
+          elif [ -f tools/stage.mjs ]; then
+            node tools/stage.mjs dist
+          else
+            echo "No build script and no tools/stage.mjs — nothing staged to smoke"
+            exit 0
+          fi
+          # Optional per-app declaration, for an app whose cold load cannot
+          # reach a drawn frame on its own — an intro tap-gate, a first-run
+          # modal. No app in the fleet needs one today.
+          HINTS=""
+          if [ -f tools/smoke.mjs ]; then HINTS="--hints tools/smoke.mjs"; fi
+          node "$SMOKE" dist --sdk "$SDK" --label "${GITHUB_REPOSITORY##*/}" --warn $HINTS
+
   deploy:
     needs: test
     if: ${{ github.event_name != 'pull_request' }}
@@ -193,6 +246,11 @@ jobs:
           echo "Bumped $CURRENT → $NEW"
 
       - name: Stage deploy artifact (dist)
+        # Mirrored by the "Render smoke (warn only)" step in the test job —
+        # change one, change the other. That step exists to smoke the artifact
+        # this one publishes, so the two must stage identically or it is
+        # proving something about a different build.
+        #
         # The artifact is ALWAYS dist/. An app with a build script produces
         # it; every other app ships tools/stage.mjs — the SAME module its
         # tests/deploy-artifact.test.js staged and asserted against in the

@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<!-- A planted blank. This is what the two blank-game reports in this fleet
+     looked like from outside: every asset 200s, no console errors, the SDK
+     handshake succeeds, the JS parses — and the canvas is never painted.
+     Every other gate the fleet has is green on this file. render-smoke.mjs is
+     the one that must not be. -->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Blank App</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #101018; }
+    canvas { display: block; width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+  <canvas id="board"></canvas>
+  <script>
+    // Sized, contexted, and never drawn to — the shape of the real defect.
+    const c = document.getElementById('board');
+    c.width = window.innerWidth;
+    c.height = window.innerHeight;
+    c.getContext('2d');
+  </script>
+</body>
+</html>

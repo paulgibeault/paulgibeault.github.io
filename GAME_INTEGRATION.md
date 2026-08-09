@@ -732,6 +732,45 @@ Run it yourself before pushing, from your repo's root:
 node /path/to/launcher/tools/contract-gates.mjs .
 ```
 
+#### CI also checks that your app draws something
+
+Separate from the gates above, and **advisory for now** — it annotates, it does
+not fail your build. Every other gate in the pipeline can be green while the
+product is a black rectangle: unit suites cover pure logic and never touch a
+canvas, the artifact verifier proves every referenced file is published (a blank
+app publishes perfectly), and a syntax check proves the JS parses.
+
+So the pipeline stages your app **the same way the deploy stages it**, serves
+that artifact with the launcher's origin-level scripts in their real places,
+loads it in a visible browser, waits, and screenshots. The assertion is that the
+decoded pixels are not near-uniform. It knows nothing about your game's rules;
+it knows "not a black rectangle".
+
+It asserts on the **screenshot**, never on rAF ticks or frame counters. Those
+read as zero under exactly the conditions where the SDK is correctly suspending
+your game, and two "blank game" reports in this fleet turned out to be that
+measurement artifact rather than a rendering failure.
+
+**If your app opens on something the check can't get past** — an intro tap-gate,
+a first-run how-to modal — ship a `tools/smoke.mjs`. Everything in it is
+optional; no app in the fleet needs one today.
+
+```js
+export default {
+  path: '/index.html',   // entry to load, if not index.html
+  settleMs: 2500,        // how long to wait after ready() before the shot
+  async ready(page) {    // Playwright page — dismiss whatever is in the way
+    await page.click('#skip-intro');
+  },
+};
+```
+
+Run it yourself the way CI does — stage first, then:
+
+```
+node /path/to/launcher/tools/render-smoke.mjs dist --sdk /path/to/launcher
+```
+
 ---
 
 ## 7. UI — launcher-mediated chrome (toasts, dialogs, title, quit, files)
