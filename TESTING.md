@@ -60,6 +60,53 @@ written beside the entry (currently just `p2p-multiparty` — its relayed-gossip
 check starves on a 2-core runner). Locally, `npm test` still runs them; the CI
 summary prints each one with its reason, so the exclusion stays loud.
 
+### Runner weather — what to do with an unexplained red acceptance suite
+
+Every retry above assumes the failure is *real* and just needs another shot to
+prove it. Sometimes it isn't real in that sense at all: the same commit fails a
+suite 3/3, and a rerun of that identical commit — no code touched — passes
+clean. That happened twice landing #139, on two different suites
+(`sync-acceptance`, then `backup-dialog-acceptance`), and #137 has a case where
+the same tree produced pass / fail / pass across three runs fifteen minutes
+apart. This is **runner weather**: shared-runner CPU contention that a suite's
+timing-sensitive waits are not immune to, not a regression in the code.
+
+**The workaround, when you hit it:**
+
+1. Confirm the commit that failed is the SAME commit as one that passed
+   nearby (`git log`, or compare the two run URLs' `headSha`). If it isn't —
+   if the failure is on a commit that has never passed — treat it as real and
+   debug it; do not reach for this section.
+2. If it is the same commit: `gh run rerun --failed`, or the "Re-run failed
+   jobs" button. This runs the SAME code again on a fresh runner allocation,
+   which is a genuinely different sample of "weather" — not a repeat of the
+   same three retries `run-ci.mjs` already tried, which run back-to-back
+   inside one job and mostly see the same bad window.
+3. If the rerun is also red, on the same commit: it is very likely real.
+   Escalate — read the assertion, don't rerun a third time hoping for green.
+
+**What NOT to do:** widen the timeout on the wait that failed. A hit ceiling is
+supposed to mean "a real bug wants a debugger", and turning that signal off by
+making the ceiling bigger is how a suite stops being able to catch a real
+regression at all. This is deliberate policy, not an oversight — see #137 for
+the case where the tempting fix (a bigger wait) was rejected on exactly this
+reasoning, and the underlying question was left open rather than papered over.
+
+**Known amplifier:** three suites (`backup-dialog-acceptance.mjs`,
+`user-identity-acceptance.mjs`, `export-advanced-acceptance.mjs`, tracked in
+#141) have no top-level `catch`, so a timeout in one of them crashes the
+process instead of naming the failed check — you'll see a `node:internal`
+stack with a line number and nothing else. That makes step 1 above harder for
+those three specifically; the fix is a one-line `catch`
+(`tools/records-acceptance.mjs:174` has it), not a workaround, and is tracked
+separately in #141 rather than here.
+
+`sync-acceptance` is the suite this has hit most often, and #137 is where the
+investigation into *why* lives, kept open only as long as there is a live
+mechanism being chased. **This section — not further comments on #137 — is
+where the workaround belongs**, because the workaround does not depend on ever
+finding the mechanism.
+
 ## Configuration B — units only: `npm run test:units`
 
 No browser, no ports, seconds not minutes. Discovers and runs every
