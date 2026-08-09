@@ -13,7 +13,7 @@
 // line is CI-owned. tools/repo-gates-unit.mjs Gate D pins its exact shape,
 // because if it stops matching CI's sed the rewrite silently stops firing —
 // which is indistinguishable from a repo that never adopted it.
-const APP_VERSION = '0.0.12';
+const APP_VERSION = '0.0.13';
 
 // Every cache this app has ever owned starts with this prefix — including the
 // old hand-numbered 'paul-arcade-v67' names, so the switch to a version-
