@@ -1,0 +1,30 @@
+/* Every legitimate iteration-count shape in the fleet today, detected rather
+   than configured. */
+
+/* A reduced-motion kill switch. Three repos ship this exact declaration. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001s !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+/* A power-saver override that parks an effect at a single pass. Bare `1`, no
+   !important. */
+:root[data-power-saver="true"] .ambient-glow {
+  animation-iteration-count: 1;
+}
+
+/* The ordinary attention pulse: rides the token, settles onto a resting
+   treatment that still carries the state. */
+.turn-token--active {
+  animation-name: turn-pulse;
+  animation-duration: 1.2s;
+  animation-iteration-count: var(--arcade-pulse-count, 3);
+  border-color: var(--accent);
+}
+
+/* Whitespace inside the token is legal CSS and must not matter. */
+.hint-shimmer {
+  animation-iteration-count: var( --arcade-pulse-count , 3 );
+}

@@ -1,0 +1,4 @@
+/* The ordinary form, on one line — the case every existing copy does catch. */
+.badge::before {
+  animation: live-pulse 2s ease-in-out infinite;
+}

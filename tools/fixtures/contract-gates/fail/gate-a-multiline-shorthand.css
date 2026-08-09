@@ -1,0 +1,9 @@
+/* The violation both line-based per-repo copies walk straight past: `animation`
+   and `infinite` are on different lines of one shorthand. This is the launcher's
+   own former starfield, and it is why Gate A's window spans newlines. */
+.star {
+  animation:
+    twinkle var(--duration) ease-in-out infinite alternate,
+    drift var(--drift-duration) ease-in-out infinite alternate;
+  opacity: 0;
+}

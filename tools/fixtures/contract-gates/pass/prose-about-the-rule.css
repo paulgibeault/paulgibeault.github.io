@@ -1,0 +1,26 @@
+/*
+ * 2. NOTHING PULSES FOREVER (GAME_INTEGRATION §6d "Let the screen rest"). A
+ *    cheap animation is still an animation: while one runs the compositor keeps
+ *    producing frames, so a game that is VISIBLE AND IDLE — which is most of a
+ *    turn-based game's life — never lets the display pipeline reach 0 fps. An
+ *    infinite CSS pulse is a rAF loop that never stops, expressed
+ *    declaratively. So every emphasis animation here declares
+ *
+ *        animation-iteration-count: var(--arcade-pulse-count, 3);
+ *
+ *    The launcher's SDK owns that token: 3 normally, 1 under power saver, 0
+ *    under reduced motion — where the SDK's kill-switch
+ *    `animation-iteration-count: 1 !important` wins anyway and the single
+ *    iteration lasts .001ms.
+ *
+ *    Note what this comment does to a naive gate: the line above parses as a
+ *    declaration whose value is "1 !important` wins anyway and the single…",
+ *    and the block also puts the word `infinite` a few lines under an
+ *    `animation-iteration-count:`. Both gates read a comment-stripped mask, so
+ *    neither sees any of it.
+ */
+.pile-stack--ready {
+  animation-name: ready-pulse;
+  animation-iteration-count: var(--arcade-pulse-count, 3);
+  box-shadow: 0 0 0 2px var(--ready-ring);
+}

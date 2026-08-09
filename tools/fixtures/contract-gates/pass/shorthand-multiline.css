@@ -1,0 +1,15 @@
+/* A multi-line `animation:` shorthand with no `infinite` anywhere. Gate A's
+   match window spans newlines so it can see a violation split across lines —
+   this fixture pins that the widened window does not over-match a clean one. */
+.star {
+  animation:
+    twinkle var(--duration) ease-in-out alternate,
+    drift var(--drift-duration) ease-in-out alternate;
+  animation-iteration-count: var(--arcade-pulse-count, 3), 1;
+}
+
+/* Prose containing the bare word on its own is not a declaration. */
+.note {
+  /* an endless, infinite feeling of scrolling */
+  color: red;
+}

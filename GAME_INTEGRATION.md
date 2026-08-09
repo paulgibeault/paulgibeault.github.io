@@ -481,7 +481,7 @@ To benefit:
 - [ ] If your game has a dark/light theme already, key its CSS off `[data-theme="dark"]` / `[data-theme="light"]` rather than rolling your own toggle.
 - [ ] If your game has tween-heavy effects, multiply durations by `getComputedStyle(document.documentElement).getPropertyValue('--motion-scale')` (or skip animations when `Arcade.settings.reducedMotion()` is `true`).
 - [ ] If your game has handedness-sensitive UI (e.g. control palette position), key it off `[data-handedness="left"]`.
-- [ ] **Attention pulses → `--arcade-pulse-count` (SDK 3.13.0+).** Any looping emphasis effect (turn indicator, "ready" ring, hint shimmer) should declare `animation-iteration-count: var(--arcade-pulse-count, 3)` and end on a static resting treatment that still says the same thing (a colour, a border, a static glow). Never `infinite` — see §6d. The SDK owns the token ladder: `3` normally, `1` under power saver, `0` under reduced motion.
+- [ ] **Attention pulses → `--arcade-pulse-count` (SDK 3.13.0+).** Any looping emphasis effect (turn indicator, "ready" ring, hint shimmer) should declare `animation-iteration-count: var(--arcade-pulse-count, 3)` and end on a static resting treatment that still says the same thing (a colour, a border, a static glow). Never `infinite` — see §6d. The SDK owns the token ladder: `3` normally, `1` under power saver, `0` under reduced motion. Declare it as the `animation-iteration-count` **longhand**, never inside the `animation` shorthand — a `var()` there becomes a pending-substitution value that CSSOM cannot see, and one bad token kills the whole animation rather than just the count. Fleet CI gates both of these for every caller; see §6d, "CI enforces the static half of this".
 
   **Under reduced motion the count a game actually observes is `1`, not `0`.**
   The token does go to `0`, but the kill-switch rule above sets
@@ -501,7 +501,7 @@ To benefit:
   that wants one particular effect to keep looping simply doesn't consume the
   token there. The corollary is the case above — a keep-motion game that *does*
   consume the token gets a literal `0` under reduced motion.
-- [ ] Gate optional ambient effects (particles, background loops, decorative video) off entirely when `Arcade.settings.powerSaver()` is `true` (SDK 3.13.0+), and re-check on `Arcade.onSettingsChange`. **Guard the read if your repo vendors its own copy of the SDK:** on anything older than 3.13.0 `Arcade.settings.powerSaver` is `undefined`, and calling it throws `TypeError: Arcade.settings.powerSaver is not a function` — inside an `onSettingsChange` handler that is a throw on every launcher settings write, not just at startup. Read it as `const saving = Arcade.settings.powerSaver ? Arcade.settings.powerSaver() : false;` and an older SDK degrades to "not saving". The CSS half needs no such guard: `var(--arcade-pulse-count, 3)` carries its own fallback, so an SDK that never defines the token just leaves the effect at 3 pulses.
+- [ ] Gate optional ambient effects (particles, background loops, decorative video) off entirely when `Arcade.settings.powerSaver()` is `true` (SDK 3.13.0+), and re-check on `Arcade.onSettingsChange`. **Guard the read if your repo vendors its own copy of the SDK:** on anything older than 3.13.0 `Arcade.settings.powerSaver` is `undefined`, and calling it throws `TypeError: Arcade.settings.powerSaver is not a function` — inside an `onSettingsChange` handler that is a throw on every launcher settings write, not just at startup. Read it as `const saving = Arcade.settings.powerSaver ? Arcade.settings.powerSaver() : false;` and an older SDK degrades to "not saving". The CSS half needs no such guard: `var(--arcade-pulse-count, 3)` carries its own fallback, so an SDK that never defines the token just leaves the effect at 3 pulses. Fleet CI gates the guard for every caller (§6d, "CI enforces the static half of this") — guarding through an alias is fine, and never reading the setting at all is fine too.
 
 ### Canvas-rendered games
 
@@ -688,6 +688,49 @@ baseline: pulses drop from 3 to 1, ambient effects go out entirely, and the
 launcher pins its pool to the active game. A game that meets this section
 already needs no extra work for power saver beyond honouring the token and
 the ambient-effects gate.
+
+#### CI enforces the static half of this
+
+The parts of §5 and §6d that are visible in source are gated for **every**
+`fleet-ci.yml` caller — no per-repo wiring, no opt-in, no exemption mechanism.
+The pipeline checks out `tools/contract-gates.mjs` from the launcher and runs it
+against your tracked files before it installs anything, so a violation fails in
+seconds. Three gates:
+
+| gate | rule | what it reads |
+|---|---|---|
+| A | no `infinite` in any `animation` / `animation-iteration-count` declaration | tracked `.css`, and the `<style>` blocks and `style=""` attributes of tracked `.html` |
+| B | every `animation-iteration-count` value is `1` or `var(--arcade-pulse-count, 3)` | as above |
+| C | every `powerSaver()` read is guarded on its own receiver | tracked `.js`/`.mjs`, and the `<script>` blocks of tracked `.html` |
+
+Things worth knowing before you meet it:
+
+- **Gate B judges each comma-separated value on its own**, so a stacked list
+  like `animation-iteration-count: 1, var(--arcade-pulse-count, 3)` is fine. A
+  bare number other than `1` is not: a hard-coded count opts that effect out of
+  the power-saver ladder entirely, which is the whole reason the token exists.
+- **Declare the count as the longhand.** A `var()` inside the `animation`
+  *shorthand* becomes a pending-substitution value: CSSOM cannot read it, and
+  one bad token takes down the entire animation rather than just the count.
+  Gate B's failure message says so, because this is the mistake people make
+  once and then back out again.
+- **Gate C matches `.powerSaver(` on any receiver**, and looks for a guard on
+  *that same* receiver nearby — truthiness (`x.powerSaver ? …`, `x.powerSaver && …`)
+  or `typeof x.powerSaver === 'function'`. Guarding through an alias is fine.
+  It does not require that you read the setting at all; plenty of games
+  legitimately never do.
+- **Both halves ignore comments**, including a JS comment inside `<script>`
+  that quotes a CSS declaration. Documenting the rule next to the code that
+  obeys it will not fail your build.
+- **`tests/`, `tools/`, `scripts/`, `docs/`, `.github/` and `.claude/` are not
+  scanned**, at any depth. Gate C's crash risk is shipped code; a test helper
+  calling `powerSaver()` unguarded against a fake is not a bug.
+
+Run it yourself before pushing, from your repo's root:
+
+```
+node /path/to/launcher/tools/contract-gates.mjs .
+```
 
 ---
 
@@ -1340,6 +1383,20 @@ jobs:
 This repo calls the same pipeline, with `uses: ./.github/workflows/fleet-ci.yml`
 — a workflow in the same repository is referenced by relative path, not by
 `owner/repo@ref`. It is the identical pipeline either way.
+
+### What the test job runs, in order
+
+1. **The fleet contract gates** — launcher-owned `tools/contract-gates.mjs`,
+   checked out and run against your tracked files before anything is
+   installed. Unconditional: it is not an opt-in input, because a contract
+   that holds for the repos that remember to enable it is not a contract. It
+   is also the one part of your gate that does not live in your repo — see
+   §6d, "CI enforces the static half of this", for the three rules and how to
+   run it yourself.
+2. **Your own tests** — `npm test` if `package.json` declares a `test`
+   script, otherwise the floor gate: `node --check` on every tracked JS file.
+   Adding a real suite later needs no workflow change.
+3. **`npm run acceptance`** — only when the caller passes `launcher: true`.
 
 Requirements every app meets (the pipeline detects them; the repo provides them):
 

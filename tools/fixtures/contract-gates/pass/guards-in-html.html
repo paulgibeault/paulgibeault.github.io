@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<!-- An app that ships its whole game inside index.html. Two fleet apps are
+     built this way, and both read powerSaver() from here. A Gate C scoped to
+     '*.js' passes them vacuously, which is the one thing a gate must never
+     do. -->
+<html lang="en">
+<head>
+<style>
+  /* Style and script in the same file: each gate must read only its own
+     language, or each trips over the other's prose. */
+  .pulse {
+    animation-name: pulse;
+    animation-iteration-count: var(--arcade-pulse-count, 3);
+  }
+</style>
+</head>
+<body>
+<script>
+  // A guarded read whose condition is a chained &&, with the `?` on the next
+  // line — one fleet app's exact shape.
+  let powerSaving = false;
+  function readPowerSaver() {
+    return !!(window.Arcade && Arcade.settings && Arcade.settings.powerSaver
+      ? Arcade.settings.powerSaver()
+      : false);
+  }
+
+  // A guarded read through an aliased receiver, wrapped in try/catch — another
+  // fleet app's exact shape. The receiver here is `A.settings`, so a gate that
+  // keys on the literal `Arcade.settings` misses both the guard and the call.
+  const A = window.Arcade;
+  function powerSavingAlias() {
+    try { return !!(A && A.settings && A.settings.powerSaver && A.settings.powerSaver()); }
+    catch (e) { return false; }
+  }
+
+  // A string containing "//" must not be mistaken for a comment: if the masker
+  // blanked from here to end of line it would erase the guarded call below.
+  const HOME = "https://example.invalid/arcade";
+  const saving = Arcade.settings.powerSaver ? Arcade.settings.powerSaver() : false;
+
+  powerSaving = readPowerSaver() || powerSavingAlias() || saving || Boolean(HOME);
+</script>
+</body>
+</html>

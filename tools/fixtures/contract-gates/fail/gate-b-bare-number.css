@@ -1,0 +1,6 @@
+/* A hard-coded count opts the effect out of the power-saver ladder entirely:
+   the player's setting never reaches it. */
+.turn-token {
+  animation-name: turn-pulse;
+  animation-iteration-count: 2;
+}
