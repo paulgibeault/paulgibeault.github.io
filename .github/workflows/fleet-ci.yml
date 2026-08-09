@@ -5,9 +5,48 @@
 # follows on its next run; nothing is copy-pasted into app repos, so nothing
 # drifts.
 #
-# Shape: a `test` job gates a `deploy` job. Pull requests run the gate and
-# never deploy; pushes to main deploy only after the gate passes. Apps opt
-# into extras through inputs instead of forking the pipeline.
+# Shape: three jobs.
+#
+#   test    the gate. Contract gates, the app's own suite, and (opt-in) the
+#           launcher acceptance checklist. Nothing deploys without it.
+#   smoke   advisory. Does the artifact actually draw? Runs in PARALLEL with
+#           `test` and gates nothing — see the job for why that matters.
+#   deploy  needs `test` only. Pull requests never reach it; neither do
+#           scheduled runs, which exist to exercise the pipeline, not to
+#           publish an identical site with a new version number.
+#
+# Apps opt into extras through inputs instead of forking the pipeline.
+#
+# Logic lives in launcher-owned scripts under tools/, not in this file: a
+# laptop can run exactly what CI runs, and a unit suite can assert what it
+# does. What is left here is orchestration.
+#
+# ── Which revision the scripts come from ────────────────────────────────────
+#
+# An app repo does not carry the scripts this pipeline runs. They are checked
+# out from the launcher as `.launcher-gates`, at `inputs.toolchain_ref` —
+# empty by default, which means the launcher's default branch.
+#
+# That default is correct for every real caller, because a pipeline change and
+# the scripts it needs land on main in the SAME merge; the YAML a caller reads
+# from `@main` and the tools it fetches from `main` are already one revision.
+#
+# It is not self-correcting in two cases, so they are worth knowing:
+#
+#   · A caller pinning `fleet-ci.yml@some-tag` gets that tag's YAML with the
+#     default branch's tools. Pinning half-works. Pass `toolchain_ref` too.
+#   · A pipeline change that needs a NEW script cannot be exercised from
+#     another repo before it merges — the canary reaches for a file that is
+#     on the branch and not yet on main. That is not hypothetical: it is how
+#     the canary for this rework failed, which is what `toolchain_ref` is for.
+#
+# The obvious fix — pin to the reusable workflow's own commit — is not
+# available. MEASURED, not assumed, on runner 2.336.0: inside a called
+# workflow `github.job_workflow_sha` and `github.job_workflow_ref` are both
+# EMPTY, and `github.workflow_sha`/`github.workflow_ref` describe the CALLER
+# (`…/hecknsic/.github/workflows/pages.yml@refs/pull/61/merge`), not this
+# file. No context variable exposes this workflow's own revision, so an
+# explicit input is the honest mechanism rather than a clever one.
 
 name: Fleet CI & Deploy
 
@@ -31,13 +70,27 @@ on:
       version_bump:
         description: >-
           Auto-bump the patch version on each deploy — package.json,
-          manifest.json start_url cache-buster, the version badge in
+          manifest.json start_url cache-buster, the declared version badge in
           index.html, and sw.js's APP_VERSION where the app declares it —
           and push the commit back. The caller must grant `contents: write`.
+          See tools/bump-version.mjs.
         type: boolean
         default: false
+      toolchain_ref:
+        description: >-
+          Ref of the launcher to take this pipeline's own scripts from (the
+          `.launcher-gates` checkout). Empty — the default — means the
+          launcher's default branch, which is right for every real caller.
+          Set it ONLY to exercise an unmerged pipeline change from another
+          repo, and remove it again afterwards. See "Which revision the
+          scripts come from" above.
+        type: string
+        default: ""
 
 jobs:
+  # ===========================================================================
+  # test — the gate
+  # ===========================================================================
   test:
     runs-on: ubuntu-latest
     env:
@@ -50,11 +103,21 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: paulgibeault/paulgibeault.github.io
+          # Deliberately NOT pinned to job_workflow_sha, unlike .launcher-gates
+          # below. This checkout is the launcher the game is tested AGAINST —
+          # it stands in for the deployed origin, so it should track what is
+          # live. The gates checkout is the pipeline's own toolchain, which
+          # must match the pipeline. Same repository, two different questions.
           path: .launcher
 
       - uses: actions/setup-node@v5
         with:
           node-version: 24
+          # Only three repos in the fleet keep a lockfile; setup-node's cache
+          # HARD-FAILS when it cannot find one, so it is asked for only when
+          # there is something to key on. The repos without a lockfile are the
+          # zero-dependency ones, which have nothing to cache anyway.
+          cache: ${{ hashFiles('package-lock.json') != '' && 'npm' || '' }}
 
       # ---- the fleet's §5/§6d power-saver contract -------------------------
       #
@@ -72,11 +135,15 @@ jobs:
       #
       # `.launcher-gates` is untracked in the app's checkout, so the gate's
       # `git ls-files` enumeration of the target never sees it.
-      - name: Check out the fleet contract gates
+      - name: Check out the fleet toolchain
         if: ${{ hashFiles('tools/contract-gates.mjs') == '' }}
         uses: actions/checkout@v5
         with:
           repository: paulgibeault/paulgibeault.github.io
+          # Empty (the default) means the launcher's default branch, which is
+          # what every real caller wants. See "Which revision the scripts come
+          # from" in the header.
+          ref: ${{ inputs.toolchain_ref }}
           path: .launcher-gates
 
       - name: Fleet contract gates (GAME_INTEGRATION §5/§6d)
@@ -92,10 +159,29 @@ jobs:
           fi
           if [ -n "$ARCADE_LAUNCHER" ]; then (cd "$ARCADE_LAUNCHER" && npm ci); fi
 
+      # Browser downloads were the single largest step in the fleet — 46s of a
+      # 3-minute run, every run, because nothing was cached. (A comment here
+      # used to claim they were. They were not.) The key carries the resolved
+      # Playwright versions, so a dependency bump invalidates it and anything
+      # else reuses it.
+      - name: Cache Playwright browsers
+        if: ${{ inputs.browsers != '' }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          # Lockfiles only. package.json carries the version this pipeline
+          # rewrites on every deploy, so keying on it would miss the cache
+          # every single run — the exact opposite of the point.
+          key: playwright-${{ runner.os }}-${{ inputs.browsers }}-${{ hashFiles('package-lock.json', '.launcher/package-lock.json') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-${{ inputs.browsers }}-
+
       - name: Install Playwright browsers
         if: ${{ inputs.browsers != '' }}
         # Each checkout pins its own Playwright; installing for both sides of
         # a launcher-staged run only costs a download on a version mismatch.
+        # With a warm cache this is a no-op for the browsers themselves and
+        # only re-runs the OS dependency check.
         run: |
           npx playwright install --with-deps ${{ inputs.browsers }}
           if [ -n "$ARCADE_LAUNCHER" ]; then
@@ -123,152 +209,167 @@ jobs:
         if: ${{ inputs.launcher }}
         run: npm run acceptance
 
-      # ---- does the thing this repo is about to deploy actually draw? ------
-      #
-      # Every other gate here can be green while the product is a black
-      # rectangle: the unit tiers cover pure logic and never touch a canvas,
-      # verify-artifact.mjs proves every referenced file is published (a blank
-      # game publishes perfectly), and `node --check` proves the JS parses.
-      #
-      # WARN ONLY, for now. The contract gates above went enforcing on day one
-      # because they are static scans of a fleet verified clean; a browser
-      # check on shared runners has to earn that. It annotates and does not
-      # fail. Flipping it is a one-line change in this file — drop `--warn` and
-      # `continue-on-error` — and should follow a track record, not a hunch.
-      # `continue-on-error` covers the infrastructure half: --warn already
-      # makes a blank frame exit 0, so what this catches is a crashed browser
-      # or a failed install, which must not turn the fleet red in warn mode.
-      #
-      # Runs last: it is advisory, so it must never delay the real gate's
-      # feedback.
-      - name: Render smoke (warn only)
-        continue-on-error: true
-        run: |
-          set -e
-          if [ -f tools/render-smoke.mjs ]; then
-            SMOKE=tools/render-smoke.mjs; SDK=.
-          else
-            SMOKE=.launcher-gates/tools/render-smoke.mjs; SDK=.launcher-gates
-            # The gate checkout above carries no node_modules, and most callers
-            # install no browsers of their own (the `browsers` input is empty
-            # for all but two). Both are cached between runs.
-            (cd .launcher-gates && npm ci --silent)
-            (cd .launcher-gates && npx playwright install --with-deps chromium)
-          fi
-          # Stage the artifact the DEPLOY's own way, not the test's. This block
-          # mirrors "Stage deploy artifact (dist)" in the deploy job below —
-          # change one, change the other. Validating a differently-staged copy
-          # is how two repos once shipped a placeholder sw.js that every test
-          # was happy with: the suite staged one way and the deploy another.
-          if [ -f package.json ] && \
-             [ "$(node -p 'Boolean(require("./package.json").scripts?.build)')" = "true" ]; then
-            npm run build
-          elif [ -f tools/stage.mjs ]; then
-            node tools/stage.mjs dist
-          else
-            echo "No build script and no tools/stage.mjs — nothing staged to smoke"
-            exit 0
-          fi
-          # Optional per-app declaration, for an app whose cold load cannot
-          # reach a drawn frame on its own — an intro tap-gate, a first-run
-          # modal. No app in the fleet needs one today.
-          HINTS=""
-          if [ -f tools/smoke.mjs ]; then HINTS="--hints tools/smoke.mjs"; fi
-          node "$SMOKE" dist --sdk "$SDK" --label "${GITHUB_REPOSITORY##*/}" --warn $HINTS
-
-  deploy:
-    needs: test
-    if: ${{ github.event_name != 'pull_request' }}
+  # ===========================================================================
+  # smoke — does the thing this repo is about to deploy actually draw?
+  # ===========================================================================
+  #
+  # Every gate in `test` can be green while the product is a black rectangle:
+  # the unit tiers cover pure logic and never touch a canvas, verify-artifact
+  # proves every referenced file is published (a blank game publishes
+  # perfectly), and `node --check` proves the JS parses.
+  #
+  # ITS OWN JOB, IN PARALLEL, ON PURPOSE. This used to be the last step of
+  # `test`, which meant an ADVISORY check sat in the deploy's critical path:
+  # `deploy` needs the whole `test` job, so a warn-only step that cannot fail
+  # anything still delayed every publish by however long it took. For the seven
+  # callers with no browser of their own that was about to mean an npm ci plus
+  # a chromium download — roughly two minutes added to deploys that currently
+  # finish in thirty-four seconds. Parallel, it costs the deploy nothing and
+  # still reports on every run.
+  #
+  # WARN ONLY, for now. The contract gates went enforcing on day one because
+  # they are static scans of a fleet verified clean; a browser check on shared
+  # runners has to earn that. Flipping it is a one-line change — drop `--warn`
+  # and `continue-on-error` — and should follow a track record, not a hunch.
+  # `continue-on-error` covers the infrastructure half: --warn already makes a
+  # blank frame exit 0, so what it catches is a crashed browser or a failed
+  # install, which must not turn the fleet red in warn mode.
+  smoke:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v5
 
       - uses: actions/setup-node@v5
         with:
           node-version: 24
+          cache: ${{ hashFiles('package-lock.json') != '' && 'npm' || '' }}
 
+      - name: Check out the fleet toolchain
+        if: ${{ hashFiles('tools/render-smoke.mjs') == '' }}
+        uses: actions/checkout@v5
+        with:
+          repository: paulgibeault/paulgibeault.github.io
+          # Empty (the default) means the launcher's default branch, which is
+          # what every real caller wants. See "Which revision the scripts come
+          # from" in the header.
+          ref: ${{ inputs.toolchain_ref }}
+          path: .launcher-gates
+
+      # Whichever checkout owns render-smoke.mjs is the one that needs a
+      # browser: this repo when it smokes itself, the gates checkout otherwise.
+      - name: Resolve the smoke toolchain
+        run: |
+          if [ -f tools/render-smoke.mjs ]; then
+            echo "SMOKE_ROOT=." >> "$GITHUB_ENV"
+          else
+            echo "SMOKE_ROOT=.launcher-gates" >> "$GITHUB_ENV"
+          fi
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-smoke-${{ hashFiles('package-lock.json', '.launcher-gates/package-lock.json') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-smoke-
+
+      - name: Install the smoke toolchain
+        run: |
+          (cd "$SMOKE_ROOT" && npm ci --silent)
+          (cd "$SMOKE_ROOT" && npx playwright install --with-deps chromium)
+
+      # Staged the DEPLOY's way, by the same module the deploy job calls.
+      # These were two mirrored shell blocks kept in step by a comment on each,
+      # which is how two repos once shipped a placeholder sw.js that every test
+      # was happy with: the suite staged one way and the deploy another.
+      - name: Stage the artifact
+        run: |
+          TOOLS=tools
+          [ -f tools/stage-dispatch.mjs ] || TOOLS=.launcher-gates/tools
+          node "$TOOLS/stage-dispatch.mjs" dist --optional
+
+      - name: Render smoke (warn only)
+        run: |
+          if [ ! -d dist ]; then
+            echo "nothing was staged — no artifact to smoke"; exit 0
+          fi
+          SMOKE="$SMOKE_ROOT/tools/render-smoke.mjs"
+          # Optional per-app declaration, for an app whose cold load cannot
+          # reach a drawn frame on its own — an intro tap-gate, a first-run
+          # modal. No app in the fleet needs one today.
+          HINTS=""
+          if [ -f tools/smoke.mjs ]; then HINTS="--hints tools/smoke.mjs"; fi
+          node "$SMOKE" dist --sdk "$SMOKE_ROOT" --label "${GITHUB_REPOSITORY##*/}" --warn $HINTS
+
+  # ===========================================================================
+  # deploy
+  # ===========================================================================
+  #
+  # `needs: test` only. The smoke job is advisory and must never hold a publish
+  # back — see the note on that job.
+  #
+  # Scheduled runs are excluded alongside pull requests. A caller adds a
+  # `schedule:` trigger to exercise the pipeline against evergreen refs
+  # (fleet-ci@main, checkout@v5, deploy-pages@v4) on a cadence instead of
+  # discovering the breakage mid-feature. That canary must not publish: with
+  # version_bump on it would otherwise republish an identical site under a new
+  # version every week, forcing every returning player's service worker to
+  # reinstall for nothing.
+  deploy:
+    needs: test
+    if: ${{ github.event_name != 'pull_request' && github.event_name != 'schedule' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The bump commit rebases onto whatever landed while the gate ran,
+          # which needs real history. These repos are 27–183 commits; the
+          # difference is not measurable.
+          #
+          # Quoted on purpose. GitHub's `a && b || c` follows JS truthiness, so
+          # an unquoted `version_bump && 0 || 1` yields 1 in BOTH branches —
+          # 0 is falsy and falls through to the `|| 1`. The strings are truthy.
+          fetch-depth: ${{ inputs.version_bump && '0' || '1' }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Check out the fleet toolchain
+        if: ${{ hashFiles('tools/stage-dispatch.mjs') == '' }}
+        uses: actions/checkout@v5
+        with:
+          repository: paulgibeault/paulgibeault.github.io
+          # Empty (the default) means the launcher's default branch, which is
+          # what every real caller wants. See "Which revision the scripts come
+          # from" in the header.
+          ref: ${{ inputs.toolchain_ref }}
+          path: .launcher-gates
+
+      - name: Resolve the fleet toolchain
+        run: |
+          if [ -f tools/stage-dispatch.mjs ]; then
+            echo "FLEET_TOOLS=tools" >> "$GITHUB_ENV"
+          else
+            echo "FLEET_TOOLS=.launcher-gates/tools" >> "$GITHUB_ENV"
+          fi
+
+      # Before staging, so the artifact — and therefore the deployed sw.js —
+      # carries the new version. tools/bump-version.mjs owns the rewrite rules
+      # and the push-with-rebase; it is unit-tested, which the fifty lines of
+      # inline sed it replaced never were.
       - name: Bump patch version
         if: ${{ inputs.version_bump }}
-        run: |
-          CURRENT=$(node -p "require('./package.json').version")
-          NEW=$(node -e "
-            const [maj,min,pat] = '$CURRENT'.split('.').map(Number);
-            console.log(maj+'.'+min+'.'+(pat+1));
-          ")
-          node -e "
-            const fs = require('fs');
-            const p = JSON.parse(fs.readFileSync('package.json'));
-            p.version = '$NEW';
-            fs.writeFileSync('package.json', JSON.stringify(p, null, 2)+'\n');
-          "
-          # Guarded like the sw.js rewrite below: not every app keeps a
-          # manifest at the repo root (one of them ships its PWA manifest as
-          # assets/favicon/site.webmanifest), and an unguarded readFileSync
-          # here fails the whole deploy the moment that app opts into
-          # version_bump. The point of this input is that a repo can adopt the
-          # standard one piece at a time.
-          if [ -f manifest.json ]; then
-            node -e "
-              const fs = require('fs');
-              const m = JSON.parse(fs.readFileSync('manifest.json'));
-              m.start_url = './index.html?v=$NEW';
-              fs.writeFileSync('manifest.json', JSON.stringify(m, null, 2)+'\n');
-            "
-            git add manifest.json
-          fi
-          # Version badge, where an app renders one. Same reasoning.
-          if [ -f index.html ]; then
-            sed -i "s/v[0-9]\+\.[0-9]\+\.[0-9]\+/v$NEW/g" index.html
-            git add index.html
-          fi
-          # Service-worker cache identity. An app whose sw.js declares the
-          # canonical `const APP_VERSION = '…';` line gets it rewritten here, so
-          # every deploy changes sw.js's bytes — which is the only thing that
-          # triggers install → activate → drop the stale cache. Leaving this to
-          # a hand-maintained constant shipped a fix to the origin that no
-          # returning player ever executed (hecknsic#50/#52).
-          # No-op for an app with no sw.js, or one that has not adopted the line.
-          if [ -f sw.js ] && grep -q "^const APP_VERSION = '" sw.js; then
-            sed -i "s/^const APP_VERSION = '[^']*';/const APP_VERSION = '$NEW';/" sw.js
-            git add sw.js
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Only package.json is unconditional — every app has one. The blocks
-          # above stage the files they actually rewrote, so naming manifest.json
-          # or index.html here would fail the deploy for an app that has neither.
-          git add package.json
-          git diff --cached --quiet || git commit -m "chore: auto-bump to v$NEW [skip ci]"
-          git push
-          echo "Bumped $CURRENT → $NEW"
+        run: node "$FLEET_TOOLS/bump-version.mjs"
 
       - name: Stage deploy artifact (dist)
-        # Mirrored by the "Render smoke (warn only)" step in the test job —
-        # change one, change the other. That step exists to smoke the artifact
-        # this one publishes, so the two must stage identically or it is
-        # proving something about a different build.
-        #
-        # The artifact is ALWAYS dist/. An app with a build script produces
-        # it; every other app ships tools/stage.mjs — the SAME module its
-        # tests/deploy-artifact.test.js staged and asserted against in the
-        # gate above. One implementation, so what CI publishes is exactly
-        # what the suite proved correct; there is no second copy here to
-        # drift out of sync with it.
-        run: |
-          if [ -f package.json ] && \
-             [ "$(node -p 'Boolean(require("./package.json").scripts?.build)')" = "true" ]; then
-            if [ -f package-lock.json ]; then npm ci; else npm install; fi
-            npm run build
-          elif [ -f tools/stage.mjs ]; then
-            node tools/stage.mjs dist
-          else
-            echo "No build script and no tools/stage.mjs — the app must produce dist/ (GAME_INTEGRATION §13a)"
-            exit 1
-          fi
-          [ -d dist ] || { echo "nothing produced dist/"; exit 1; }
+        # The same module the smoke job calls, so what gets smoked and what
+        # gets published are staged by one implementation.
+        run: node "$FLEET_TOOLS/stage-dispatch.mjs" dist
 
       - uses: actions/configure-pages@v5
 
@@ -278,3 +379,15 @@ jobs:
 
       - id: deployment
         uses: actions/deploy-pages@v4
+
+      # ---- did any of that reach the public URL? ---------------------------
+      #
+      # deploy-pages succeeding proves GitHub ACCEPTED an artifact, not that a
+      # browser loading the site gets those bytes. That gap is hecknsic#50/#52:
+      # a green deploy of a real fix that no returning player ever executed,
+      # because sw.js's cache identity had not moved. Enforcing, unlike the
+      # smoke job — it is a plain HTTP GET with retries for CDN propagation,
+      # and it runs after the publish, so failing blocks nothing. It only turns
+      # a silent bad deploy into a red build.
+      - name: Verify the origin serves this deploy
+        run: node "$FLEET_TOOLS/verify-origin.mjs" "${{ steps.deployment.outputs.page_url }}" --artifact dist

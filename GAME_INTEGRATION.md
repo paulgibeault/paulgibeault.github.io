@@ -1383,10 +1383,17 @@ gate and every local configuration.
 
 Every app deploys through one shared pipeline,
 [`.github/workflows/fleet-ci.yml`](.github/workflows/fleet-ci.yml) in this
-repo: a `test` job gates a `deploy` job, pull requests run the gate but never
-deploy, and pushes to `main` deploy to GitHub Pages only after the gate
-passes. An app repo carries nothing but this thin caller at
-`.github/workflows/pages.yml`:
+repo. Three jobs:
+
+| job | gates the deploy? | what it is for |
+| --- | --- | --- |
+| `test` | **yes** | contract gates, your suite, opt-in acceptance |
+| `smoke` | no — runs in parallel | does the artifact actually draw? |
+| `deploy` | — | `needs: test` only; publishes, then verifies the origin |
+
+Pull requests run `test` and `smoke` and never deploy. Pushes to `main` deploy
+to GitHub Pages only after `test` passes. An app repo carries nothing but this
+thin caller at `.github/workflows/pages.yml`:
 
 ```yaml
 # Thin caller for the fleet CI/CD standard. The pipeline lives in the
@@ -1405,9 +1412,14 @@ permissions:
   id-token: write
 
 # Per-ref, so a PR run never cancels main's deploy.
+#
+# Cancelling is for PRs ONLY. A main run cancelled mid-deploy can have already
+# pushed the version bump without publishing it, leaving the origin serving a
+# version that no longer matches the repo — the exact drift the bump exists to
+# prevent. Pushes to main queue and drain instead.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   fleet:
@@ -1436,11 +1448,87 @@ This repo calls the same pipeline, with `uses: ./.github/workflows/fleet-ci.yml`
    script, otherwise the floor gate: `node --check` on every tracked JS file.
    Adding a real suite later needs no workflow change.
 3. **`npm run acceptance`** — only when the caller passes `launcher: true`.
-4. **Render smoke** — stages your artifact the way the deploy stages it, loads
-   it in a real browser and checks it drew something. Unconditional too, but
-   **advisory**: it annotates and never fails the run, until a browser check on
-   shared runners has earned the right to block a deploy. See §6d, "CI also
-   checks that your app draws something".
+
+### The smoke job — parallel, and advisory
+
+Stages your artifact the way the deploy stages it, loads it in a real browser
+and checks it drew something. Unconditional, and **advisory**: it annotates and
+never fails the run, until a browser check on shared runners has earned the
+right to block a deploy. See §6d, "CI also checks that your app draws
+something".
+
+It is a **separate job running in parallel with `test`**, and that is
+load-bearing rather than tidy. `deploy` needs the whole `test` job, so an
+advisory step living inside `test` sat in the deploy's critical path: it could
+not fail anything and still delayed every publish by however long it took. For
+a caller with no browser of its own that meant an `npm ci` plus a Chromium
+download — around two minutes added to deploys that otherwise finish in
+thirty-four seconds. In its own job it costs the deploy nothing.
+
+If your app's cold load cannot reach a drawn frame on its own (an intro
+tap-gate, a first-run modal), declare `tools/smoke.mjs` and the job will pass
+it as `--hints`. No app in the fleet needs one today.
+
+### After the deploy — the origin is asked
+
+`actions/deploy-pages` succeeding proves GitHub **accepted** an artifact, not
+that a browser loading your public URL gets those bytes. The last deploy step
+fetches the live `sw.js` and asserts its `APP_VERSION` matches the artifact
+that was just uploaded, retrying while the CDN catches up. An app with no
+service worker gets the floor version of the same question: does the origin
+serve a non-empty page?
+
+This one **is** enforcing, unlike the smoke job. It is a plain HTTP GET rather
+than a browser, and it runs after the publish, so failing blocks nothing — it
+only turns a silently bad deploy into a red build. The failure it exists for is
+real: a green deploy of a real fix that reached no returning player, because
+the thing deciding whether anyone re-fetches anything had not moved. The two
+usual causes are named in the failure message — a Pages source reset to "deploy
+from branch", and an `sw.js` that has drifted out of the shape CI rewrites.
+
+### Validating a pipeline change before it merges
+
+The launcher calls this pipeline itself, so a change to `fleet-ci.yml` is
+exercised by the PR that makes it — but only along the branches the launcher
+takes. It has `tools/` locally, so it never takes the `.launcher-gates`
+fallback that **every game** takes. A change can be green in the launcher's own
+PR and broken for the other nine callers.
+
+To exercise the game side, open a throwaway draft PR on one app repo pinning
+both halves — the workflow **and** the toolchain:
+
+```yaml
+jobs:
+  fleet:
+    uses: paulgibeault/paulgibeault.github.io/.github/workflows/fleet-ci.yml@my-branch
+    with:
+      toolchain_ref: my-branch # ← without this you get main's scripts
+```
+
+Close it unmerged when it reports. `toolchain_ref` exists for exactly this and
+should never appear in a real caller.
+
+Why it is needed at all: `.launcher-gates` defaults to this repo's default
+branch, so pinning only the `uses:` gets you the branch's YAML with `main`'s
+scripts — which fails as a *missing file*, not as a version skew. Pinning the
+reusable workflow to its own commit would be the tidier fix and is not
+available: measured on runner 2.336.0, `github.job_workflow_sha` and
+`github.job_workflow_ref` are both empty inside a called workflow, and
+`github.workflow_sha`/`workflow_ref` describe the caller. No context variable
+exposes the reusable workflow's own revision.
+
+The same trap applies to any caller that pins `fleet-ci.yml@some-tag` for real:
+pin `toolchain_ref` alongside it or the two halves drift.
+
+### Scheduled runs exercise the pipeline; they do not publish
+
+A caller may add a `schedule:` trigger. `deploy` skips scheduled events, so the
+run is a pure canary over everything this pipeline floats on — `fleet-ci@main`,
+`actions/checkout@v5`, `actions/deploy-pages@v4`, the browsers, the runner
+image — without republishing an unchanged site under a new version every week
+and forcing every returning player's service worker to reinstall for nothing.
+This repo carries the fleet's canary (Mondays), because it exercises the
+contract gates, the browser tier, the smoke path and the deploy path in one run.
 
 Requirements every app meets (the pipeline detects them; the repo provides them):
 
@@ -1472,6 +1560,30 @@ Requirements every app meets (the pipeline detects them; the repo provides them)
   SDK, while the launcher must — is detected, not configured: the verifier
   checks whether the artifact ships `arcade-sdk.js` itself. That keeps the
   file identical rather than adding a per-repo flag.
+
+  Three more files sit alongside these, but **only in this repo** — your app
+  never carries them. The pipeline checks the launcher out as `.launcher-gates`
+  and runs them against your workspace, the same way it runs the contract
+  gates. That checkout takes `inputs.toolchain_ref`, which is empty by default
+  and so resolves to this repo's default branch — correct for every real
+  caller, since a pipeline change and the scripts it needs land on `main` in
+  the same merge. See "Validating a pipeline change before it merges" below
+  for the two cases where that is not self-correcting. They are listed here
+  because they decide what happens to your repo:
+
+  - `tools/stage-dispatch.mjs` — picks the staging route (`npm run build` if
+    you declare one, otherwise your `tools/stage.mjs`) and refuses an empty
+    artifact. **Both** the deploy job and the smoke job call it, so what gets
+    smoked and what gets published are staged by one implementation. These
+    were two mirrored shell blocks in the workflow kept in step by a comment
+    on each, which is how two repos once shipped a placeholder `sw.js` that
+    every test was happy with.
+  - `tools/bump-version.mjs` — the `version_bump` rewrite, and the push.
+  - `tools/verify-origin.mjs` — the post-deploy origin check described above.
+
+  All three are unit-tested in this repo, which the inline workflow YAML they
+  replaced never was — the same reasoning that moved this repo's own CI tier
+  into `tools/run-ci.mjs`.
 
   Check the artifact, never the checkout. A repo-level existence check
   cannot catch a staging rule that drops a needed file — every file is
@@ -1507,6 +1619,33 @@ Opt-in inputs for apps that need more (pass under `with:` in the caller):
 `browsers: "chromium webkit"` installs Playwright browsers for the test
 tier; `version_bump: true` auto-bumps the patch version on each deploy
 (requires `contents: write` in the caller's permissions).
+
+### What `version_bump: true` rewrites
+
+Every target is optional and guarded except `package.json` — an app adopts the
+standard one piece at a time.
+
+| file | what moves |
+| --- | --- |
+| `package.json` | `version`, patch +1 |
+| `manifest.json` | the `v=` cache-buster in `start_url`, path preserved; a root-absolute `start_url` is the deployed arcade path and is left alone |
+| `index.html` | the version inside the element with `id="version-tracker"` — **only** that element |
+| `sw.js` | the anchored `const APP_VERSION = '…';` line (§10, Gate D) |
+
+The badge rule is narrow on purpose. This step used to run
+`sed -e 's/v[0-9]\+\.[0-9]\+\.[0-9]\+/vNEW/g'` over the whole of `index.html`,
+which rewrote **every** version-shaped string in the file: a changelog entry, a
+"requires v3.13.0" note, a vendored filename with a version in it. One app in
+the fleet renders a badge and it happened to be the only match, so the blast
+radius was zero by luck rather than design. The badge is now declared, and an
+`index.html` that shows a version but declares no `id="version-tracker"` gets a
+**warning** rather than a guess — a rewrite that cannot be done precisely is one
+that should not be done at all.
+
+The bump commit is pushed with a rebase retry. A commit landing on `main` while
+your gate was running used to make the push reject, failing the deploy *after*
+it had gone green; retrying is safe here because the commit touches only
+generated version declarations and cannot conflict semantically with real work.
 
 ---
 
