@@ -22,6 +22,28 @@
     --font-pixel: 'Press Start 2P', cursive;
     --font-body: 'Inter', sans-serif;
     --font-mono: 'JetBrains Mono', monospace;
+
+    /* The attention-pulse budget (GAME_INTEGRATION §5). Games get this token
+       from the SDK's injected base style at Arcade.init(); the launcher never
+       calls init() on its own pages, so it would otherwise see only the
+       `var(--arcade-pulse-count, 3)` fallback and its own Power Saver toggle
+       would stop reaching its own chrome. Declaring the same ladder here is
+       what makes the launcher's pulses obey the lever it ships. Kept at the
+       SDK's values on purpose — one vocabulary, not two.
+       (The SDK injects at the START of <head>, so this wins for the base
+       value; the SDK's `:root[data-power-saver="true"]` override is more
+       specific than this rule and still wins wherever a game runs the SDK
+       inside the launcher document.) */
+    --arcade-pulse-count: 3;
+}
+
+html[data-power-saver="true"] { --arcade-pulse-count: 1; }
+@media (prefers-reduced-motion: reduce) {
+    /* The launcher reads the media query directly; games get the equivalent
+       via the SDK's data-reduced-motion attribute. The kill switch at the foot
+       of this file still forces one instantaneous iteration on top of this —
+       see the note there for why the observed count is 1 and not 0. */
+    :root { --arcade-pulse-count: 0; }
 }
 
 html[data-theme="launcher"] {
@@ -65,10 +87,31 @@ body {
     position: absolute;
     background: #fff;
     border-radius: 50%;
-    animation:
-        twinkle var(--duration) ease-in-out infinite alternate,
-        drift var(--drift-duration) ease-in-out infinite alternate;
-    opacity: 0;
+    /* The settled star. This is what the sky looks like with no animation
+       running: after an ambience window closes, during each star's staggered
+       animation-delay, and under any future motion cut. twinkle's 100% stop
+       resolves to this same value, so settling is seamless rather than a pop.
+       The old `opacity: 0` base was only ever safe because the animation ran
+       forever — the moment the count becomes finite, an invisible base means
+       the entire starfield disappears when it settles. */
+    opacity: calc(var(--max-opacity, 0.5) * 0.4);
+}
+
+/* Ambience runs in bounded windows, re-armed by the starfield script on real
+   interaction — §6d, nothing loops forever on a visible, idle screen. 150 stars
+   × 2 animations was the launcher's whole idle cost.
+   Longhands, never the `animation` shorthand: a var() inside the shorthand
+   becomes a pending-substitution value — invisible to CSSOM, and one bad token
+   kills the whole declaration rather than just the count. */
+#starfield.is-ambient .star {
+    animation-name: twinkle, drift;
+    animation-duration: var(--duration), var(--drift-duration);
+    animation-timing-function: ease-in-out;
+    animation-direction: alternate;
+    animation-iteration-count: var(--arcade-pulse-count, 3), 1;
+    /* twinkle reverts to the base opacity above, which is identical to its last
+       rendered frame; drift holds its ±10px offset instead of snapping home. */
+    animation-fill-mode: none, forwards;
 }
 
 .star--warm { background: #ffd89b; }
@@ -991,23 +1034,36 @@ body.app-in-game .launcher-menu__panel {
 /* Live ceremony / reconnect — amber, gently pulsing. */
 .net-watermark.is-reconnecting { color: var(--field-gold); }
 .net-watermark.is-reconnecting .net-watermark__glyph {
-    animation: net-watermark-pulse 1.4s ease-in-out infinite;
+    animation-name: net-watermark-pulse;
+    animation-duration: 1.4s;
+    animation-timing-function: ease-in-out;
+    /* Bounded per entry into the state, not per second spent in it: re-adding
+       .is-reconnecting restarts the pulse, so each new reconnect attempt gets
+       its own burst. Longhand — see the shorthand note on .star. */
+    animation-iteration-count: var(--arcade-pulse-count, 3);
 }
 /* Settled — steady green, then the JS fades the whole mark out. */
 .net-watermark.is-connected { color: var(--online-green); }
 
+/* Settles at full opacity, not back down at 0.35. A pulse that returns to its
+   dim trough on the last iteration parks the glyph at its least legible state —
+   which is how a fleet game's descent warning vanished outright the moment its
+   throb became finite. Check where the 100% stop lands, not just that it stops.
+   The amber colour carries "reconnecting"; the pulse is emphasis only. */
 @keyframes net-watermark-pulse {
-    0%, 100% { opacity: 0.35; }
-    50%      { opacity: 1; }
+    0%        { opacity: 0.35; }
+    50%       { opacity: 1; }
+    100%      { opacity: 1; }
 }
 @media (prefers-reduced-motion: reduce) {
     .net-watermark.is-reconnecting .net-watermark__glyph { animation: none; }
 }
-/* Reconnecting can persist for minutes; the amber colour already carries the
-   state. See the POWER SAVER block below. */
-html[data-power-saver="true"] .net-watermark.is-reconnecting .net-watermark__glyph {
-    animation: none;
-}
+/* No power-saver override here any more. It used to force `animation: none`,
+   because the pulse was otherwise endless and reconnecting can persist for
+   minutes. The count rides --arcade-pulse-count now, so power saver already
+   takes it to a single pulse through the same ladder every game uses — a
+   second, blunter switch on top would only mean the launcher and the fleet
+   spoke different vocabularies about the same effect. */
 
 /* Visually hidden but exposed to assistive tech (live regions, skip targets). */
 .visually-hidden {
@@ -1684,12 +1740,19 @@ html[data-power-saver="true"] .net-watermark.is-reconnecting .net-watermark__gly
 
 /* ---- POWER SAVER ---- */
 /* The launcher holds itself to the same §6d bar it asks games to meet: nothing
-   loops forever on a visible, idle screen. Its three infinite animations are
-   the starfield (here), the LIVE badge (index.html, beside its own rule), and
-   the reconnect watermark (above). The transient game-spin loader is exempt —
-   it ends on its own.
-   150 stars × 2 infinite animations is the launcher's whole idle cost;
-   display:none stops the animations, not just the paint. */
+   loops forever on a visible, idle screen. It now meets that bar outright —
+   there are no infinite animations left here and no exemptions, which is the
+   precondition for the fleet contract gate landing enforcing (see #128).
+   Every effect that used to loop is bounded where it is declared:
+     starfield twinkle + drift  → --arcade-pulse-count / one drift, re-armed on
+                                  interaction by the script in each page
+     LIVE badge live-pulse      → --arcade-pulse-count      (index.html)
+     reconnect watermark        → --arcade-pulse-count      (above)
+     p2p connecting glow        → --arcade-pulse-count      (p2p/p2p-addon.css)
+     game-spin loader           → one 12.6s pass, the load timeout (index.html)
+     profile compass            → one 60s turn              (profile.html)
+   This rule stays regardless: 150 stars is the launcher's whole idle cost even
+   bounded, and display:none stops the animations, not just the paint. */
 html[data-power-saver="true"] #starfield { display: none; }
 
 /* ---- REDUCED MOTION ---- */

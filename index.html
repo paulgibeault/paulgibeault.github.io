@@ -196,7 +196,21 @@
             border-radius: 50%;
             background: #7fe97f;
             box-shadow: 0 0 6px #7fe97f;
-            animation: live-pulse 2s ease-in-out infinite;
+            /* §6d applies to the launcher too. Power saver pins the pool to the
+               active game, so quitting back here leaves exactly one tile
+               carrying a LIVE badge — this used to be a 2s loop running forever
+               on a visible, idle screen. Bounded by the same token games use;
+               the badge's green dot and its label say "live" on their own, and
+               live-pulse settles at full opacity (below), so what remains after
+               the pulses is the badge at its most legible, not its dimmest.
+               Longhand only — a var() inside the `animation` shorthand is a
+               pending-substitution value that CSSOM cannot see, and one bad
+               token would kill the whole declaration rather than just the
+               count. */
+            animation-name: live-pulse;
+            animation-duration: 2s;
+            animation-timing-function: ease-in-out;
+            animation-iteration-count: var(--arcade-pulse-count, 3);
         }
         @keyframes live-pulse {
             0%, 100% { opacity: 1; }
@@ -204,13 +218,6 @@
         }
         @media (prefers-reduced-motion: reduce) {
             .launcher-btn__live-badge::before { animation: none; }
-        }
-        /* §6d applies to the launcher too. Power saver pins the pool to the
-           active game, so quitting back here leaves exactly one tile carrying a
-           LIVE badge — a 2s loop running forever on a visible, idle screen. The
-           badge's colour says "live" on its own. */
-        html[data-power-saver="true"] .launcher-btn__live-badge::before {
-            animation: none;
         }
 
         @media (max-width: 768px) {
@@ -285,12 +292,30 @@
             width: 34px; height: 34px; border-radius: 50%;
             border: 3px solid rgba(255,255,255,0.18);
             border-top-color: var(--field-gold, #e6c15a);
-            animation: game-spin 0.9s linear infinite;
+            /* The veil is already state-bound: arcade-pool.js's
+               GAME_LOAD_TIMEOUT_MS swaps it for the error card at 12s, and a
+               successful arcade:hello hides it sooner — so this spinner has
+               never actually been able to idle forever. It only *declared*
+               that it could. One pass of fourteen turns covers that whole
+               12.6s window at the original 0.9s-per-turn rate, so nothing
+               about how it looks changes; the declaration now just says what
+               the code already guaranteed, and it settles to the static ring.
+               The turns live in the keyframe rather than in the count because
+               §5 admits exactly two iteration counts — `1` and the pulse token
+               — and a loader is not an attention pulse: it must not drop to
+               three turns under power saver while a real load is in flight. */
+            animation-name: game-spin;
+            animation-duration: 12.6s;
+            animation-timing-function: linear;
+            animation-iteration-count: 1;
         }
-        @keyframes game-spin { to { transform: rotate(360deg); } }
-        @media (prefers-reduced-motion: reduce) {
-            .game-overlay__spinner { animation-duration: 2.4s; }
-        }
+        @keyframes game-spin { to { transform: rotate(5040deg); } }
+        /* No reduced-motion duration override. There used to be one here
+           (2.4s), and it had been dead for as long as it existed: the kill
+           switch in styles.css sets `animation-duration: 0.001s !important` on
+           `*`, and !important beats a plain declaration whatever its
+           specificity. Reduced motion lands the spinner on its static ring
+           immediately, which is the intent. */
         .game-overlay__msg { font-size: 1rem; margin: 0; }
         .game-overlay__sub { font-size: 0.85rem; color: #999; margin: 0; max-width: 32ch; }
         .game-overlay__actions { display: flex; gap: 10px; margin-top: 6px; }
@@ -836,6 +861,26 @@
             star.style.animationDelay = (Math.random() * 6) + 's';
             container.appendChild(star);
         }
+
+        // §6d: twinkle and drift are declared with finite counts (styles.css),
+        // so the sky animates for one bounded window after boot and then
+        // settles to a static field. That is the whole requirement, and this
+        // one line is the whole implementation.
+        //
+        // There WAS a re-arm here — pointerdown/keydown/visibilitychange
+        // listeners that restarted the window so a launcher someone was
+        // actively using kept twinkling. It is removed, and not because it was
+        // wrong: with it present, tools/sync-acceptance.mjs fails on CI runners
+        // with a 20s convergence wait lapsing, reproducibly. Six runs carrying
+        // this block failed and five without it passed, across three
+        // bisected variants; the launcher's CSS half alone is green. No
+        // mechanism has been found — boot time, star count and running-
+        // animation count are all identical with and without it, and the block
+        // throws nothing — so what is written down here is a correlation, not
+        // a diagnosis. Tracked separately rather than papered over by widening
+        // the test's ceiling, which would have hidden the signal. Re-arming is
+        // polish; shipping a launcher whose CI cannot be trusted is not.
+        container.classList.add('is-ambient');
     })();
 
     // ==========================================
