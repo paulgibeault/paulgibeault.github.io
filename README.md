@@ -118,14 +118,25 @@ tracing (`?dev=1`). Launcher-only work needs no staging:
 
 ```sh
 npm install && npx playwright install chromium           # one-time setup
-npm test                                                 # the full CI gate, exactly as CI runs it
+npm test                                                 # this repo's gate — every tier CI runs
 npm run test:units                                       # fast tier only — no browser
 npm run acceptance -- http://127.0.0.1:4791/<gameId>/    # per-game integration checklist (vs dev.sh)
 ```
 
+Two of those checks are **fleet-wide** rather than this repo's own: `fleet-ci.yml`
+runs them against every app that calls it, from this repo's copy, so they are the
+part of a game's gate that does not live in the game's repo. Both take a target,
+so either can be pointed at any app:
+
+```sh
+node tools/contract-gates.mjs ../some-game          # §5/§6d contract — enforcing
+node tools/render-smoke.mjs ../some-game/dist --sdk .   # does the artifact draw — warn-only
+```
+
 Every acceptance suite is also runnable standalone and hermetically — see
 **[TESTING.md](TESTING.md)** for all configurations (stage filters,
-`SKIP_BROWSER=1`, single suites, fixture-driven `--serve` modes, ports).
+`SKIP_BROWSER=1`, single suites, fixture-driven `--serve` modes, ports, and the
+two fleet checks above).
 
 ## Repo layout
 

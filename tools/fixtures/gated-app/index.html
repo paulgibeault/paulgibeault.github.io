@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<!-- An app the default run cannot reach a drawn frame in: it opens on a
+     full-bleed gate and draws nothing behind it until the gate is dismissed.
+     Two shapes in the real fleet look like this — a tap-to-skip intro and a
+     first-run how-to modal — and neither needs a declaration today, which is
+     precisely why this fixture exists: the per-app hint mechanism has to be
+     exercised by something, or it rots until the first app that needs it
+     discovers it never worked. -->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Gated App</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #0b0b12; }
+    #gate { position: fixed; inset: 0; background: #0b0b12; }
+    #board { display: none; }
+    body.started #gate { display: none; }
+    body.started #board { display: block; }
+  </style>
+</head>
+<body>
+  <div id="gate" role="button" tabindex="0">&nbsp;</div>
+  <canvas id="board" width="1280" height="800"></canvas>
+  <script>
+    document.getElementById('gate').addEventListener('click', () => {
+      document.body.classList.add('started');
+      const ctx = document.getElementById('board').getContext('2d');
+      for (let i = 0; i < 240; i++) {
+        ctx.fillStyle = `hsl(${(i * 7) % 360} 70% ${30 + (i % 40)}%)`;
+        ctx.fillRect((i * 37) % 1200, (i * 61) % 720, 60, 60);
+      }
+    });
+  </script>
+</body>
+</html>
