@@ -129,7 +129,7 @@ friction here is mostly **first-pairing** friction. Once two devices have
 paired once, [auto-reconnect](SELF_HOSTING.md) re-signals through a
 rendezvous dead-drop with no ceremony at all — and that dead-drop is
 *untrusted by construction*: payloads are end-to-end AEAD-sealed with
-per-pair ratcheting keys on unlinkable daily-rotating HMAC topics, so the
+per-pair keys on unlinkable daily-rotating HMAC topics, so the
 worst a malicious broker can do is delay or drop. Playroom cannot make that
 claim about its room server, structurally — the server has to see the
 session to host it. And for players who want zero third parties at all, the
@@ -178,10 +178,13 @@ abstraction is pleasantly minimal.
 Where we differ is protocol rigor at the layer that matters most, the one
 carrying key material. `p2p/rendezvous-crypto.js` implements a proper HKDF
 key schedule with non-extractable WebCrypto keys, AAD-bound AEAD sealing,
-role-bound confirmation MACs, and a transcript-bound ratchet; topics rotate
-daily under an HMAC so observers can't link sessions across days. Trystero
-encrypts signaling payloads, but its threat model for the shared public
-channel is considerably lighter. The full wire spec is in
+and role-bound confirmation MACs that prove both sides derived the same base
+before either persists it; topics rotate daily under an HMAC so observers
+can't link sessions across days. (The transcript-bound ratchet that schedule
+once specified is REMOVED, not shipped — see PROTOCOL.md §7.5 for why, and
+for what it costs. Documenting the retreat is the same rigor as documenting
+the scheme.) Trystero encrypts signaling payloads, but its threat model for
+the shared public channel is considerably lighter. The full wire spec is in
 [p2p/PROTOCOL.md](p2p/PROTOCOL.md) — publishing it for scrutiny is part of
 the point. Trystero wins on mindshare; the protocol here is the stronger
 artifact, and it's the piece of this repo most worth extracting as a

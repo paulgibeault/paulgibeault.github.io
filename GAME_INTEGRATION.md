@@ -854,14 +854,21 @@ Arcade.peer.send({ move: 'e4' });  // broadcast; JSON-safe payload; false unless
 Arcade.peer.send(hand, { to });    // targeted: only deviceId `to` receives it (cap 'peer.sendTo')
 Arcade.peer.onMessage((payload, fromPeer, meta) => ...);  // fromPeer = sender's stable deviceId;
                                    // meta = { relayed, to: 'me'|'all' } (cap 'peer.meta')
+Arcade.peer.request(payload, { to, timeoutMs });  // → Promise of the peer's reply (rejects on
+                                   // timeout / no connection); the SDK owns correlation + cleanup,
+                                   // so stop hand-rolling id/timeout/retry on top of send()
+Arcade.peer.onRequest((payload, fromPeer) => ...);  // answer one: return a value or a Promise;
+                                   // return undefined to defer to another handler
 
 Arcade.peer.self();                // { deviceId, name } for THIS device (null before first pairing)
 Arcade.peer.peers();               // [{ deviceId, name, status, direct }] — the multi-peer roster
 Arcade.peer.onPeersChange(r => ...);  // full roster on any join/leave/rename/status change
 Arcade.peer.onReady(({ deviceId }) => ...);  // remote has THIS game mounted & listening
 
-Arcade.peer.sendBlob(file, { onProgress });  // chunked large payloads; Promise (broadcast only)
-Arcade.peer.onBlob((blob, { name, size, fromPeer }) => ...);
+Arcade.peer.sendBlob(file, { onProgress, to });  // chunked large payloads; Promise.
+                                   // { to } sends the whole transfer privately to ONE seat
+                                   // (cap 'peer.sendTo'); omit it to broadcast to every seat.
+Arcade.peer.onBlob((blob, { name, size, mime, fromPeer, id }) => ...);
 Arcade.peer.onBlobError(({ id, name, reason, received, total }) => ...);
 // reason: 'timeout'   (stalled 60s — e.g. chunks lost to queue overflow),
 //         'aborted'   (sender gave up mid-transfer),
@@ -881,9 +888,13 @@ Arcade.peer.onQueue(q => ...);     // pushed while 'interrupted'; overflowed ⇒
 // every peer API above reflects only that party. With a single party the
 // launcher auto-attaches — you never need these. All resolve async.
 Arcade.peer.party();               // attached party { id, role: 'leader'|'member', leaderName,
-                                   //   status, peers } or null. id is session-scoped — never persist it.
+                                   //   status, peers, members } or null. id is session-scoped —
+                                   //   never persist it.
 Arcade.peer.parties();             // parties this game could attach to (possibly [])
 Arcade.peer.attach(partyId);       // request re-attachment → resulting party, or null if refused
+// members = [{ deviceId, name, status, isLeader, isSelf }], LEADER FIRST — the whole
+// table, including the fellow members peers() omits. status is 'connected'|'interrupted'
+// only for seats this device can actually see, and null otherwise (see the rules below).
 ```
 
 Rules of the road:
@@ -928,7 +939,22 @@ Rules of the road:
       reassembled, **hash-verified** `Blob`. Mind the replay cap when sending
       large files while `'interrupted'` — if chunks are lost to overflow the
       receiver gets `onBlobError` (`'timeout'`) instead of a wedged transfer;
-      resend after recovery.
+      resend after recovery. `{ to: deviceId }` sends the transfer privately to
+      one seat (cap `peer.sendTo`); omitting it broadcasts to every seat in the
+      attached party. What `sendBlob` will NOT do is fan one file out to a
+      SUBSET of seats: a three-person group inside a five-seat party means
+      three separate calls, each re-reading, re-hashing and re-chunking the
+      same bytes under its own transfer id and its own progress stream — and
+      the envelope carries only a name, size, mime type and id, so there is
+      nowhere to hang the application metadata ("which group is this file
+      for?") that a subset send needs, and no way to drop one dead target
+      mid-transfer and keep going for the rest (the first failed send rejects
+      the whole promise). That is why p2p-chat's group file sends still
+      hand-roll chunking: it reads the file once, tags every frame with its
+      `groupId`, targets exactly the group's live members, and prunes the ones
+      that go dark as it goes. For one-file-to-one-seat and
+      one-file-to-everyone — which is most games — use `sendBlob` and don't
+      reinvent any of this.
 - [ ] Don't cache `status()` at init: a game mounted mid-session receives
       `'connected'` in its welcome, and live transitions arrive via `onStatus`.
 
@@ -963,6 +989,35 @@ Multi-seat rules (host holding several standalone connections):
       `direct: true` marks the device your link actually terminates at — for
       a joiner, exactly the host, so the host needs no lobby frame to be
       identified.
+- [ ] **A party MEMBER's roster contains ONLY the hub — and fellow members have
+      no departure signal at all.** `peers()` is derived from this device's
+      DIRECT links, so on a member (a joiner) it holds exactly one entry, the
+      leader, no matter how many devices sit at the table. Fellow members are
+      still fully reachable: their identity reaches you through the hub's
+      relay, so `onReady` fires for them and `send(payload, { to })` routes to
+      them by `deviceId`. They simply never appear in `peers()` — and here is
+      the part that bites: **nothing ever tells you one left**. A fellow member
+      that closes its tab, hangs up, or falls off the network produces no
+      roster removal, no status flip, no event whatsoever on your device; the
+      only thing that clears it is your OWN session ending. A game that wants
+      to show "who is here" beyond its direct link must therefore build its own
+      liveness heuristic out of `onReady` sightings plus its own `status()`,
+      and that heuristic WILL be wrong on departure — it keeps showing a
+      departed member as present. p2p-chat's `isLive()` is exactly this
+      compromise, written out with its reasoning in a comment. So don't design
+      a mechanic that depends on promptly noticing an indirect player leaving.
+      Issue **#143** (WP-L1) proposes a `peer.presence` capability — a
+      hub-relayed member roster carrying a real departure signal — to close
+      this; until it lands, the gap is the contract, not a bug.
+- [ ] **`status: null` on a party member means "unknown", not "offline".** A
+      party entry's `members` array covers the whole table, but a device may
+      only vouch for health it can actually observe — its own direct links, and
+      itself. Fellow members known only through the hub therefore carry
+      `status: null`, deliberately: their health is the hub's knowledge, not
+      ours, and the launcher's own party card renders NO dot for them rather
+      than a guessed one. Copy that discipline — render absence, never a green
+      dot you can't justify. (A leader holds a direct link to every seat, so
+      the `members` it sees never carry null.)
 - [ ] **Spoof check via `meta.relayed`**: a frame claiming host authority
       that arrives with `relayed: true` did NOT come from your direct link
       partner — treat it as another joiner talking, not the host. Targeted
