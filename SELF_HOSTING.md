@@ -33,7 +33,8 @@ Why bother:
 ### What the broker can and cannot see
 
 The broker is untrusted by construction. Everything published through it is
-end-to-end AEAD-sealed with per-pair ratcheting keys, on unlinkable
+end-to-end AEAD-sealed with per-pair keys (fixed for the pair's life — the
+per-reconnect ratchet was removed, PROTOCOL.md §7.2/§7.5), on unlinkable
 daily-rotating HMAC topics; the worst a malicious broker can do is delay or
 drop, which degrades to the one-tap manual re-pair. What any broker (public
 or yours) does learn: the connecting devices' IP addresses, that *some* pair

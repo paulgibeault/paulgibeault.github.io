@@ -76,8 +76,8 @@ opaque-frame storage bridge, and launcher-aware settings/lifecycle hints.
   - **Rendezvous (v1.9):** pairs that opt in can recover from a *total*
     connection loss (both devices offline, browsers killed) by
     re-signaling through a public MQTT dead-drop — everything published is
-    AEAD-sealed with per-pair ratcheting keys, topics are unlinkable daily
-    HMACs, and the relay can only delay or drop, never impersonate.
+    AEAD-sealed with per-pair keys, topics are unlinkable daily HMACs,
+    and the relay can only delay or drop, never impersonate.
 
 - **[TESTING.md](TESTING.md)** — the CLI testing guide: the one-command CI
   gate (`npm test`) and its tiers, running single unit/acceptance suites,
