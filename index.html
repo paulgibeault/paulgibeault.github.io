@@ -1703,39 +1703,36 @@
         // without the second trigger a connection killed by that navigation
         // would never get a chance to heal until the user reconnects by hand.
         function tryResumeOnLaunch() {
-            // A recent live session → active resume. Otherwise, any
-            // auto-reconnect peer that isn't hung up still warrants booting
-            // the bridge: resumeRendezvous() arms quiet standby, which is
-            // what lets the OTHER device's Call reach this one while the
-            // arcade is merely open.
+            // The branch is resumePlan()'s to decide — the SAME call
+            // resumeRendezvous() makes, so this log line can no longer
+            // promise a reconnect the bridge then declines to attempt (the
+            // 2026-08-16 field failure started with exactly that mismatch).
+            // This gate deliberately decides BEFORE loading the bridge, so it
+            // imports only the tiny known-peers module; on a fetch failure
+            // there is no plan to be had, so multiplayer stays cold.
             let lastLive = 0;
             try { lastLive = parseInt(localStorage.getItem('arcade.v1._meta.lastLiveSession') || '0', 10); } catch (e) {}
-            const recentLive = !!(lastLive && Date.now() - lastLive < 6 * 3600 * 1000);
-            // Decide once the callable-peers read is available. knownPeers is
-            // read via readKnownPeers (single owner of that key) rather than a
-            // hand-rolled parse; that means the decision waits one module load,
-            // so on a fetch failure fall back to the lastLive-only signal.
-            const decide = (callable) => {
-                const boot = recentLive || callable;
+            const ACTION = {
+                resume: 'booting multiplayer bridge to actively resume',
+                standby: 'booting multiplayer bridge for standby (listener-role pairs ring; either side connects)',
+                cold: 'multiplayer stays cold'
+            };
+            const decide = (plan) => {
                 // The connection log (Multiplayer dialog) starts with this
                 // decision, so a reconnect that never even booted is visible.
                 import('./arcade-diag.js').then(({ ArcadeDiag }) => {
-                    ArcadeDiag.log('boot', 'launch: last live session '
-                        + (lastLive ? Math.round((Date.now() - lastLive) / 60000) + 'm ago' : 'none')
-                        + ', callable auto-reconnect peer: ' + (callable ? 'yes' : 'no')
-                        + ' → ' + (boot ? 'booting multiplayer bridge' : 'multiplayer stays cold'));
+                    ArcadeDiag.log('boot', `launch: ${plan.why} → ${ACTION[plan.mode]}`);
                 }).catch(() => {});
-                if (boot) {
-                    loadP2P().then((b) => b.resumeRendezvous()).catch((e) => {
-                        import('./arcade-diag.js').then(({ ArcadeDiag }) => {
-                            ArcadeDiag.log('boot', 'resume-on-launch failed: ' + (e && e.message));
-                        }).catch(() => {});
-                    });
-                }
+                if (plan.mode === 'cold') return;
+                loadP2P().then((b) => b.resumeRendezvous()).catch((e) => {
+                    import('./arcade-diag.js').then(({ ArcadeDiag }) => {
+                        ArcadeDiag.log('boot', 'resume-on-launch failed: ' + (e && e.message));
+                    }).catch(() => {});
+                });
             };
-            import('./arcade-known-peers.js').then(({ readKnownPeers }) => {
-                decide(Object.values(readKnownPeers()).some((p) => p && p.autoReconnect && !p.paused));
-            }).catch(() => decide(false));
+            import('./arcade-known-peers.js').then(({ resumePlan }) => {
+                decide(resumePlan(lastLive));
+            }).catch(() => decide({ mode: 'cold', why: 'known-peers module unavailable' }));
         }
 
         // Invite/reply links target the LAUNCHER URL — one stable re-entry
@@ -2594,6 +2591,16 @@
             // actions live in a body that opens on tap. Purpose chips
             // (💾 backup / 🔄 sync / 🔁 auto-reconnect) stay visible on the
             // closed row — what a pairing is FOR shouldn't need a tap.
+            //
+            // Call is the exception, and it earned it: in the 2026-08-16
+            // field test a user with three linked phones and a stuck
+            // reconnect had no visible way to trigger one, because 📞 Call
+            // only rendered inside the opened body and the closed list shows
+            // just a name and a 🔁 chip. It lives in the header now, next to
+            // the toggle rather than inside it (a button cannot nest in a
+            // button) — one Call per row, always in view.
+            const head = document.createElement('div');
+            head.className = 'connections-row__head';
             const top = document.createElement('button');
             top.type = 'button';
             top.className = 'connections-row__top connections-row__toggle';
@@ -2628,7 +2635,32 @@
                 statusEl.textContent = label;
                 top.appendChild(statusEl);
             }
-            row.appendChild(top);
+            head.appendChild(top);
+
+            // Not live, auto-reconnect on: the peer is either idle (its
+            // arcade may be open and standing by) or hung up (calling back
+            // is how you undo that). Both are exactly when a Call is the
+            // thing to do, so the condition is the same one the body used.
+            if (!revoked && !isLive && peer.autoReconnect) {
+                const callBtn = document.createElement('button');
+                callBtn.type = 'button';
+                callBtn.className = 'connections-row__btn connections-row__call';
+                callBtn.textContent = '📞 Call';
+                callBtn.title = 'Call back — tries to reconnect automatically if their device is online too';
+                callBtn.setAttribute('aria-label', 'Call ' + displayName);
+                callBtn.addEventListener('click', async () => {
+                    callBtn.disabled = true;
+                    try {
+                        const b = await window.__arcade.loadP2P();
+                        const tried = await b.callKnownPeer(id);
+                        toast(tried
+                            ? 'Calling ' + displayName + '…'
+                            : 'No saved pairing to call ' + displayName + ' — use "New invite code" to reconnect.');
+                    } catch (e) {} finally { render(); }
+                });
+                head.appendChild(callBtn);
+            }
+            row.appendChild(head);
 
             const body = document.createElement('div');
             body.className = 'connections-row__body';
@@ -2738,25 +2770,8 @@
                     }
                 }
             } else {
-                if (peer.autoReconnect) {
-                    const callBtn = document.createElement('button');
-                    callBtn.type = 'button';
-                    callBtn.className = 'connections-row__btn';
-                    callBtn.textContent = '📞 Call';
-                    callBtn.title = 'Call back — tries to reconnect automatically if their device is online too';
-                    callBtn.addEventListener('click', async () => {
-                        callBtn.disabled = true;
-                        try {
-                            const b = await window.__arcade.loadP2P();
-                            const tried = await b.callKnownPeer(id);
-                            toast(tried
-                                ? 'Calling ' + displayName + '…'
-                                : 'No saved pairing to call ' + displayName + ' — use "New invite code" to reconnect.');
-                        } catch (e) {} finally { render(); }
-                    });
-                    actions.appendChild(callBtn);
-                }
-
+                // Call used to live here too; it is in the row header now
+                // (see there) so there is exactly one of it per row.
                 const reconnectBtn = document.createElement('button');
                 reconnectBtn.type = 'button';
                 reconnectBtn.className = 'connections-row__btn';

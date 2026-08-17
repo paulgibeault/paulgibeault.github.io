@@ -342,8 +342,9 @@ control channel, sent just before closing the link:
 
 The receiver cancels any repair for the pair and records `byeAt`; until the
 pair reconnects (or the receiver itself calls), its episodes start as quiet
-STANDBY (§7.5) — no repair is burned on a link the peer closed on purpose,
-but the device remains callable.
+STANDBY (§7.5) and — uniquely among standby episodes — publish nothing in
+either role. No repair is burned on a link the peer closed on purpose and no
+ring chases a device that just hung up, but the receiver remains callable.
 
 ### 7.2 Key schedule
 
@@ -456,9 +457,9 @@ Triggers (per enabled pair):
 - `resumeAll()` at app startup, for pairs seen within `resumeWindowMs`
   (6 h) — this is what reconnects two *restarted* browsers;
 - `resumePair()` — the app's explicit "call this peer now";
-- `standbyAll()` at app startup outside the resume window — arms
-  subscribe-only STANDBY episodes (below), so a device that merely has the
-  app open stays callable.
+- `standbyAll()` at app startup outside the resume window — arms STANDBY
+  episodes (below), so a device that merely has the app open stays callable
+  *and*, in the listener role, keeps ringing for its peer.
 
 **Caller:** builds a **shadow** connection (fresh `RTCPeerConnection` +
 data channel; any still-interrupted live link is untouched), seals the
@@ -479,11 +480,36 @@ answer (with a few republishes).
 **Quiet phase / standby:** after `episodeTimeoutMs` (10 min) an episode
 DEMOTES rather than dying: `gave-up` is emitted so UIs and wake locks
 release the active session claim, but the subscription stays and the slow
-republish continues (bounded by `resumeWindowMs` since the pair was last
-seen — reachability stays, standing spam doesn't). `standbyAll()` and
-bye-flagged pairs start directly in this subscribe-only state and initiate
-nothing until a ring (caller role) or an offer (listener role) provokes
-them. Episodes end only on settlement or an explicit cancel
+republish continues. `standbyAll()` and bye-flagged pairs start directly in
+this quiet state, and the two roles behave differently there:
+
+- the **caller** role initiates nothing at all and waits to be rung;
+- the **listener** role arms and republishes its ring on a deliberately slow
+  cadence (0 s, 30 s, 5 min, then every 15 min);
+- a standby that exists because the peer sent a **bye** stays silent in
+  *both* roles — the hanging-up side paused the pair and is not listening,
+  and a goodbye is not answered with a doorbell. `resumePair()` on either
+  side revives it.
+
+That asymmetry is load-bearing. With both roles silent, a pair whose two
+devices had *both* launched outside their resume window could never
+reconnect on its own: both sides sat correctly subscribed to the same day
+topics, mutually silent, until a human pressed Call. Three devices spent
+31.9 h in that state on 2026-08-16. Only one side needs to speak to break
+it, and the ring is the cheaper half of the exchange — no SDP, no shadow
+connection, published on a topic the device already subscribes to.
+
+**Republish bound.** Publishing stops — leaving the episode subscribe-only —
+once the pair has not been seen within the bound that applies to it:
+`resumeWindowMs` (6 h) for *speculative* republishing (an episode armed by a
+link drop or `resumeAll()`, publishing on the chance the peer appears), and
+`standbyMaxAgeMs` (30 d) for a standby ring or for any episode that has just
+opened a sealed frame from its peer or been promoted by `resumePair()`. The
+second bound is the same horizon `standbyAll()` uses to decide a pair is
+worth arming, so the arming gate and the publishing gate agree by
+construction. Reachability stays either way; standing spam doesn't.
+
+Episodes end only on settlement or an explicit cancel
 (`pausePair`/`disablePair`/re-pair); a hard error (carrier factory throw,
 RTC failure) re-arms a quiet episode after `rearmDelayMs` (60 s).
 
@@ -525,6 +551,17 @@ random-looking topic — but a long-lived subscription from one IP does link
 that pseudonym across a day, and reconnection at app-open reveals "a
 device that owns some pair is online". Pairs the user paused
 (`pausePair`) subscribe to nothing. See §9.
+
+**Presence trade-off (extended by the standby ring):** a standby LISTENER
+now also *writes*, where before it only read. The delta is one sealed ring
+on the topic it already subscribes to, a handful of times a day, so a
+passive relay observer that could previously see only "someone is listening
+here" can now see "someone is listening here, and something is alive at the
+other end of that pair". It does not add an identifier, a topic, or a
+correlation across pairs; the caller role stays write-silent, and a paused
+pair still publishes nothing at all. The alternative is the state this
+bought its way out of: two devices, both online, both permanently unable to
+reconnect without a human.
 
 ### 7.6 Carriers
 
@@ -605,10 +642,12 @@ Nothing identifying is ever published: topics are pair-secret HMACs rotated
 daily and payloads are sealed. Since 1.10, an enabled pair that is
 DISCONNECTED keeps a standing subscription on its carrier while the app is
 open (see §7.5's presence trade-off) — the relay observes a pseudonymous
-per-day topic and the subscriber's IP/timing, nothing more; initiating
-publishes stop once the pair falls outside the resume window. Users opt in
-per pair; pausing a pair unsubscribes it, and revocation deletes the secret
-locally. STUN (when enabled) learns only what STUN always learns: the
+per-day topic and the subscriber's IP/timing, nothing more. In the listener
+role that pair also publishes a sealed ring a few times a day, on the topic
+it is already subscribed to; speculative publishing still stops once the
+pair falls outside the resume window, and the standby ring stops at
+`standbyMaxAgeMs`. Users opt in per pair; pausing a pair unsubscribes it and
+silences it, and revocation deletes the secret locally. STUN (when enabled) learns only what STUN always learns: the
 reflexive address of a client that asked for it.
 
 ## 10. Registry

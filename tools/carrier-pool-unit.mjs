@@ -9,10 +9,13 @@
  *                   consumers that must not change.
  *   redialDelay   — jittered backoff ladder (thundering-herd spread).
  *   makeDialBrake — page-wide sliding-window dial-rate brake.
+ *   makeFailureBudget — per-session give-up on a broker that has never once
+ *                   connected (the mosquitto leg of the 2026-08-16 log:
+ *                   nine dials, nine failures, half the log volume).
  *
  * No browser, no network. Discovered by tools/run-units.mjs.
  */
-import { CarrierPool, redialDelay, makeDialBrake } from '../p2p/rendezvous-carriers.js';
+import { CarrierPool, redialDelay, makeDialBrake, makeFailureBudget } from '../p2p/rendezvous-carriers.js';
 
 let pass = 0, fail = 0;
 function ok(cond, label) {
@@ -237,11 +240,35 @@ async function releasedLeaseTests() {
 console.log('Carrier pool unit tests — leases, ref counts, linger, jittered redial');
 backoffTests();
 brakeTests();
+function failureBudgetTests() {
+    console.log('\nmakeFailureBudget — per-session give-up on a broker that never answers');
+    const b = makeFailureBudget({ max: 3 });
+    ok(!b.spent && b.noteFail() === false && b.noteFail() === false, 'failures under the cap neither spend nor announce');
+    ok(b.noteFail() === true && b.spent, 'the failure that reaches the cap spends the budget and announces once');
+    ok(b.noteFail() === false && b.spent, 'later failures stay spent and say nothing more (announced once)');
+
+    // A broker that came up once is never given up on: losing a session is
+    // ordinary (free brokers restart, phones suspend) and that is what the
+    // redial ladder is for.
+    const up = makeFailureBudget({ max: 2 });
+    up.noteUp();
+    up.noteFail(); up.noteFail(); up.noteFail();
+    ok(!up.spent, 'a broker that has connected once is never given up on, however many sessions it later loses');
+
+    // "Consecutive": a late success clears the count.
+    const late = makeFailureBudget({ max: 3 });
+    late.noteFail(); late.noteFail();
+    late.noteUp();
+    ok(!late.spent && late.noteFail() === false, 'a success resets the count — the budget is consecutive failures');
+    ok(makeFailureBudget().noteFail() === false, 'the production default is larger than one dial (sanity)');
+}
+
 await poolBasicsTests();
 await refCountTests();
 await sessionUpTests();
 await lifecycleTests();
 await releasedLeaseTests();
+failureBudgetTests();
 console.log('');
 if (fail) { console.log(fail + ' check(s) FAILED.'); process.exit(1); }
 console.log('All ' + pass + ' carrier pool unit checks passed.');
