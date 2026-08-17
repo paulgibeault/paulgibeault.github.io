@@ -890,7 +890,11 @@ Arcade.peer.onQueue(q => ...);     // pushed while 'interrupted'; overflowed ⇒
 // owns the flow: who gets asked, what the prompt says, and whether they say
 // yes. You can ask, never grant.
 Arcade.peer.invite();              // → Promise<number of proposals sent>. 0 means there was
-                                   // nobody to ask — tell the player to connect a device first.
+                                   // nobody to ask — but NOT always "nothing is paired": the
+                                   // user can mute invites per connection (🔔 in Multiplayer),
+                                   // and a muted connection is not a target. Prefer copy that
+                                   // states the fact ("nobody is in this game yet") over copy
+                                   // that diagnoses a cause you cannot see.
                                    // Without the cap it resolves 0: say "invite from the
                                    // launcher menu" instead of inventing a fallback protocol.
                                    // Takes no target: a game may propose ITSELF to the

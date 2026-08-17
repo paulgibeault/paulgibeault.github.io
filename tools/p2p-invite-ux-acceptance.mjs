@@ -31,6 +31,10 @@
 //   U5  D2's dead end, in copy: a device that isn't linked to the one already
 //       playing gets "ask ⟨them⟩ to connect with ⟨device⟩" rather than a
 //       silent nowhere-seat
+//   U6  the two D4 fast-follows: the "connected, but nobody is playing this"
+//       nudge on the topbar door (the one thing a game cannot see for itself),
+//       and the per-connection invite mute — which is BOTH directions from one
+//       switch, is never announced, and is a switch rather than a latch
 //
 // THE DIALOG TRAP, and why every click below names its dialog. The launcher has
 // ONE confirm element with a serialized queue behind it (index.html's
@@ -178,7 +182,10 @@ async function openRow(page, name) {
     if (!found) throw new Error(`no connection row named ${JSON.stringify(name)}`);
 }
 
-/** Read a row's knock button label and D2 hint, after openRow(). */
+/**
+ * Read a row's knock button label, D2 hint, closed-row chips and invite-mute
+ * button, after openRow().
+ */
 const readRow = (page, name) => page.evaluate((n) => {
     const rows = [...document.querySelectorAll('.connections-row')];
     const row = rows.find((r) => {
@@ -189,8 +196,32 @@ const readRow = (page, name) => page.evaluate((n) => {
     const knock = [...row.querySelectorAll('.connections-row__btn')]
         .find((b) => b.textContent.startsWith('🎮'));
     const hint = row.querySelector('.connections-row__hint');
-    return { knock: knock ? knock.textContent : null, hint: hint ? hint.textContent : null };
+    const chips = row.querySelector('.connections-row__chips');
+    const invites = [...row.querySelectorAll('.connections-row__icon-btn')]
+        .find((b) => b.textContent === '🔔' || b.textContent === '🔕');
+    return {
+        knock: knock ? knock.textContent : null,
+        hint: hint ? hint.textContent : null,
+        chips: chips ? chips.textContent : null,
+        invites: invites ? invites.textContent : null
+    };
 }, name);
+
+/** Tap a row's invite-mute toggle (🔔 ⇄ 🔕), after openRow(). */
+const tapInvitesToggle = (page, name) => page.evaluate((n) => {
+    const row = [...document.querySelectorAll('.connections-row')].find((r) => {
+        const el = r.querySelector('.connections-row__name');
+        return el && el.textContent === n;
+    });
+    [...row.querySelectorAll('.connections-row__icon-btn')]
+        .find((b) => b.textContent === '🔔' || b.textContent === '🔕').click();
+}, name);
+
+/** The topbar door's nudge state — the launcher-side "somebody to ask" mark. */
+const nudgeState = (page) => page.evaluate(() => {
+    const b = document.getElementById('game-invite-btn');
+    return { marked: b.classList.contains('topbar-btn--nudge'), title: b.title };
+});
 
 const tapKnock = (page, name) => page.evaluate((n) => {
     const row = [...document.querySelectorAll('.connections-row')].find((r) => {
@@ -379,6 +410,70 @@ try {
         + ' — ask ' + NAMES.H + ' to connect with ' + NAMES.C + '.', JSON.stringify(cRow.hint));
     check('U5: … and no such warning on the device that IS playing it',
         (await readRow(G, NAMES.H)).hint === null);
+    await closeConnections(G);
+
+    // ── U6: the nudge, and the mute (both D4 fast-follows) ────────────────
+    // C is paired to G and playing nothing with it. That state is the whole
+    // reason the nudge exists: from INSIDE a game it is indistinguishable from
+    // having no connections at all (an idle status and an empty roster either
+    // way), so the game cannot tell the player which one they are looking at.
+    // The launcher can, and the difference is one tap of this button.
+    await launch(C, GAME, GAME_NAME, FIXTURE_ONE);
+    let cNudge = await waitFor(async () => (await nudgeState(C)).marked, 20000)
+        ? await nudgeState(C) : await nudgeState(C);
+    check('U6: a connection with nobody playing marks the door — the thing only the launcher can say',
+        cNudge.marked, JSON.stringify(cNudge));
+    check('U6: … and the title counts what the ask would actually reach',
+        cNudge.title === 'A connected device is not playing this game — ask them to join',
+        JSON.stringify(cNudge.title));
+
+    // The mute, tapped as a person taps it. BOTH directions from one switch.
+    await openConnections(C);
+    await openRow(C, NAMES.G);
+    check('U6: invites start ON, and the switch says which way it goes',
+        (await readRow(C, NAMES.G)).invites === '🔔');
+    await tapInvitesToggle(C, NAMES.G);
+    const mutedRow = await readRow(C, NAMES.G);
+    check('U6: muted — the row says so without being opened (🔕 chip)',
+        mutedRow.invites === '🔕' && (mutedRow.chips || '').includes('🔕'), JSON.stringify(mutedRow));
+    check('U6: … and the knock is withheld, because it would now send nothing',
+        mutedRow.knock === null, JSON.stringify(mutedRow.knock));
+    await closeConnections(C);
+
+    // Outbound half: C's own door has nobody left to ask, and says the true
+    // reason. Before the mute existed this branch said "everyone connected is
+    // already playing", which about a muted device is simply false.
+    check('U6: the nudge clears — a muted connection is not somebody to ask',
+        await waitFor(async () => !(await nudgeState(C)).marked, 10000),
+        JSON.stringify((await nudgeState(C)).title));
+    await tapInviteButton(C);
+    check('U6: the door names the mute, and where the switch lives',
+        await waitFor(async () => /invites are muted/.test(await toastText(C)), 10000),
+        JSON.stringify(await toastText(C)));
+    check('U6: … and G was never asked', await expectNoDialog(G));
+
+    // Inbound half: G proposes anyway — it has no way to know, because a mute
+    // is never announced. C must decline it silently: no prompt, no scope, and
+    // nothing the inviter can distinguish from a person saying no.
+    const sentAtMuted = await G.evaluate(([g, d]) =>
+        window.__arcade.p2p.inviteGame(g, d), [GAME2, C_dev]);
+    check('U6: the inviter still thinks it asked — a mute is local, never announced',
+        sentAtMuted === 1, String(sentAtMuted));
+    check('U6: … but the muted device is not asked, at all', await expectNoDialog(C, 2000));
+    check('U6: … and no scope opened on either side',
+        !((await scopesOf(C))[GAME2] || []).includes(G_dev)
+        && !((await scopesOf(G))[GAME2] || []).includes(C_dev));
+
+    // And it is a switch, not a latch.
+    await openConnections(C);
+    await openRow(C, NAMES.G);
+    await tapInvitesToggle(C, NAMES.G);
+    check('U6: unmuted', (await readRow(C, NAMES.G)).invites === '🔔');
+    await closeConnections(C);
+    await G.evaluate(([g, d]) => window.__arcade.p2p.inviteGame(g, d), [GAME2, C_dev]);
+    const askedAgain = await answerDialog(C, 'wants to play', 'cancel');
+    check('U6: … so the very next invite is asked normally',
+        askedAgain === NAMES.G + ' wants to play ' + GAME2_NAME + '.', JSON.stringify(askedAgain));
 
     await H.close(); await G.close(); await C.close();
 } catch (e) {

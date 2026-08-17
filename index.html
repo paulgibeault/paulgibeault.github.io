@@ -379,6 +379,32 @@
             background: var(--field-gold); color: #000;
         }
         .topbar-btn__icon { font-size: 1rem; line-height: 1; }
+        /* "You have connections, but nobody is playing this" (D4 fast-follow).
+           The launcher is the only side that can say this: a game with no open
+           scope reads 'idle' with an empty roster and cannot see the devices it
+           is not playing with, so from in there a full house and an empty house
+           look identical — a wall the games hit from their own side too. Only
+           the door itself is marked: the state being reported is "there is
+           somebody to ask", so the answer belongs on the ask. */
+        .topbar-btn--nudge { border-color: var(--snow-white); }
+        .topbar-btn--nudge::after {
+            content: ''; width: 6px; height: 6px; border-radius: 50%;
+            background: var(--field-gold); margin-left: 5px; flex-shrink: 0;
+        }
+        /* Bounded, never a loop: three pulses say "look here", an animation
+           that never stops is a screen that never settles — and it rides
+           --arcade-pulse-count so Power Saver and reduced-motion already
+           govern it (styles.css §fleet-animation-rules). */
+        @media (prefers-reduced-motion: no-preference) {
+            .topbar-btn--nudge::after {
+                animation: topbar-nudge-pulse 1.4s ease-in-out;
+                animation-iteration-count: var(--arcade-pulse-count, 3);
+            }
+        }
+        @keyframes topbar-nudge-pulse {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.6); opacity: 0.55; }
+        }
         .quit-btn {
             background: rgba(0, 0, 0, 0.5); border: 1px solid var(--field-gold);
             color: var(--snow-white); padding: 4px 10px; border-radius: 4px;
@@ -1307,6 +1333,21 @@
                 }
                 ArcadeP2P.onScopeChange(pushGameScopes);
 
+                // The nudge tracks three different facts, so it listens for all
+                // three rather than inferring them from one: a scope opening or
+                // closing (somebody said yes, or left), the connection roster
+                // changing (a device connected while a game sat empty), and the
+                // ACTIVE GAME changing — each game has its own answer, and a tab
+                // switch moves neither scopes nor roster. showGame() and
+                // hideGameView() both notify the pool, so that last one is
+                // onPoolChanged as well.
+                const nudge = () => { try { window.__arcade.updateInviteNudge(); } catch (e) {} };
+                ArcadeP2P.onScopeChange(nudge);
+                ArcadeP2P.onRosterChange(nudge);
+                const fpForNudge = framePool();
+                if (fpForNudge) fpForNudge.onPoolChanged(nudge);
+                nudge();
+
                 // A game leaving the frame pool closes its scopes: an open
                 // scope must never outlive the frame it was opened for, or the
                 // peer keeps sending into a game that is no longer there.
@@ -1671,13 +1712,45 @@
                         : 'Asked ' + sent + ' devices to play ' + gameName + '.');
                     return;
                 }
-                // Zero proposals has two completely different causes, and
-                // collapsing them into one message is what makes a button feel
-                // broken. connectedPeers() is exactly inviteGame's target
-                // universe before the already-open filter, so the two cases
-                // separate cleanly.
-                if (b.connectedPeers().length > 0) {
-                    showToast('Everyone connected is already playing ' + gameName + '.');
+                // Zero proposals has SEVERAL completely different causes, and
+                // collapsing them is what makes a button feel broken. The mute
+                // added one more (D4 fast-follow) and, until this branch was
+                // split, wore the "already playing" message — a flatly false
+                // sentence about a device that had not opened the game at all.
+                //
+                // The three numbers are all the launcher needs: how many
+                // connections there are, how many have this game open, and how
+                // many the door would even try (invitableCount, which is
+                // inviteGame's own target rule).
+                //
+                // WHY "MUTED" IS A DEDUCTION AND NOT A GUESS, since the branch
+                // below claims it without reading a single invitesOff flag: a
+                // rostered connection is ALWAYS invite-reachable. Both sets walk
+                // the same deviceIndex; rosterSnapshot's live-link branch tests
+                // linkStatus() while seatReachable() tests hasLink(), and those
+                // read the same peers map; and rosterSnapshot's stashed-session
+                // branch is strictly narrower (it also excludes `paused`). So
+                // inviteTargets can only drop a rostered device for one of the
+                // two reasons it filters on — already playing, or muted — and
+                // once the playing ones are accounted for, muted is what is
+                // left. If either predicate ever stops implying the other, this
+                // branch starts naming a switch the user never touched, which
+                // is the wrong-door failure the whole redesign exists to end.
+                const connections = b.connectedPeers().length;
+                if (connections > 0) {
+                    const playing = b.rosterForGame(gameId).length;
+                    const invitable = b.invitableCount(gameId);
+                    if (invitable === 0 && playing >= connections) {
+                        showToast('Everyone connected is already playing ' + gameName + '.');
+                    } else if (invitable === 0) {
+                        // Muted, then — the one cause the user set deliberately,
+                        // so the message names the switch and where it lives.
+                        showToast('No one left to ask — game invites are muted for your other connections (Multiplayer → the 🔔 button on a connection).');
+                    } else {
+                        // Targets existed and every send failed: a link on its
+                        // way down. Not "already playing", and not "nobody".
+                        showToast('Couldn\'t reach anyone just now — try again in a moment.');
+                    }
                     return;
                 }
                 return window.__arcade.dialog({
@@ -1692,6 +1765,45 @@
         if (gameInviteBtn) {
             gameInviteBtn.addEventListener('click', () => inviteToRunningGame(gameInviteBtn));
         }
+
+        // ---- "connected, but nobody is playing this" (D4 fast-follow) ----
+        //
+        // THE ONE THING ONLY THE LAUNCHER CAN SAY. A game with no open scope
+        // reads 'idle' with an empty roster and, by design, cannot see the
+        // devices it is NOT playing with — so from inside a game, "nobody is
+        // paired" and "three devices are paired and none have said yes" are the
+        // same picture. Both of them look like the game is broken. The launcher
+        // knows the difference, and the difference is exactly one tap of the
+        // button this marks.
+        //
+        // STILL LAZY. It reads the bridge only if something else already loaded
+        // it: an unloaded bridge means no transport, which means no live
+        // connection, which means there is nothing to nudge about — so opening
+        // a game still parses no multiplayer bytes on its own account.
+        //
+        // Nothing is nudged once somebody IS playing: the state being reported
+        // is "there is somebody left to ask", not "you could have more people".
+        function updateInviteNudge() {
+            if (!gameInviteBtn) return;
+            const p2p = window.__arcade.p2p;
+            const fp = framePool();
+            const gameId = fp && fp.getActiveGameId();
+            // invitableCount is the door's OWN target rule (reachable, not
+            // already open, not muted), asked without sending anything — so the
+            // mark can never promise an ask that would reach nobody.
+            let waiting = 0;
+            if (p2p && gameId && p2p.rosterForGame(gameId).length === 0) {
+                waiting = p2p.invitableCount(gameId);
+            }
+            gameInviteBtn.classList.toggle('topbar-btn--nudge', waiting > 0);
+            // The count is the honest part: it is what the ask would reach.
+            gameInviteBtn.title = waiting === 0
+                ? 'Invite players to this game'
+                : (waiting === 1
+                    ? 'A connected device is not playing this game — ask them to join'
+                    : waiting + ' connected devices are not playing this game — ask them to join');
+        }
+        window.__arcade.updateInviteNudge = updateInviteNudge; // called from the P2P glue's scope/roster events
 
         // Resume-on-launch (rendezvous): if an auto-reconnect session was
         // live recently, boot the transport and let it find the peer — this
@@ -2486,7 +2598,7 @@
     // force-load the bridge on open — opening this dialog is a deliberate
     // touch, not something that happens on menu open.
     // ==========================================
-    import { readKnownPeers, renameKnownPeer, deleteKnownPeer, setKnownPeerSyncEnabled, setKnownPeerBackupTarget, clearKnownPeerRevoked } from './arcade-known-peers.js';
+    import { readKnownPeers, renameKnownPeer, deleteKnownPeer, setKnownPeerSyncEnabled, setKnownPeerBackupTarget, setKnownPeerInvitesOff, clearKnownPeerRevoked } from './arcade-known-peers.js';
     import { ArcadeDiag } from './arcade-diag.js';
     import { readUserIdentityMeta, ensureUserIdentity, exportRecoveryCode, importRecoveryCode, userIdentitySupported } from './arcade-user-identity.js';
 
@@ -2614,10 +2726,16 @@
             nameEl.textContent = displayName;
             top.appendChild(nameEl);
             if (!revoked) {
+                // 🔕 is the odd one out here and earns its place: the others
+                // show a capability that is ON, this shows one that is OFF.
+                // A muted connection is exactly the row somebody comes looking
+                // for when a game will not start, so making them open the row
+                // to find out would be hiding the answer.
                 const chipText = [
                     peer.backupTarget === true ? '💾' : '',
                     peer.syncEnabled === true ? '🔄' : '',
-                    peer.autoReconnect === true ? '🔁' : ''
+                    peer.autoReconnect === true ? '🔁' : '',
+                    peer.invitesOff === true ? '🔕' : ''
                 ].filter(Boolean).join(' ');
                 if (chipText) {
                     const chips = document.createElement('span');
@@ -2722,11 +2840,14 @@
                 // unaddressed one. Offered only when the game is not already
                 // open with them, because there it would be a button whose
                 // whole effect is to send nothing (inviteGame skips connections
-                // that already have the game open, and returns 0).
+                // that already have the game open, and returns 0). Withheld from
+                // a muted connection for the same reason and no other: the mute
+                // is one of inviteGame's target rules, so the knock would send
+                // nothing there either.
                 const game = runningGame();
                 const p2pNow = window.__arcade.p2p;
                 const seated = game && p2pNow ? p2pNow.rosterForGame(game.id) : [];
-                if (game && !seated.some((e) => e.deviceId === id)) {
+                if (game && peer.invitesOff !== true && !seated.some((e) => e.deviceId === id)) {
                     const knockBtn = document.createElement('button');
                     knockBtn.type = 'button';
                     knockBtn.className = 'connections-row__btn';
@@ -2852,6 +2973,43 @@
                 render();
             });
             if (!revoked) icons.appendChild(backupBtn);
+
+            // Invites off (D4 fast-follow). BOTH DIRECTIONS, because one
+            // direction is not a thing a person means: "we don't play games
+            // together" stops this device proposing to them AND declines their
+            // proposals silently, which is what makes it answer the veto case it
+            // was named for — the spare laptop that lights up with "⟨name⟩
+            // wants to play ⟨game⟩" every time another device is unlocked.
+            //
+            // Local, and never announced. The far end cannot tell a mute from
+            // somebody who keeps saying no, which is the same information a
+            // tapped decline gives it: telling them would turn a quiet switch
+            // into a small social event.
+            //
+            // Not a reason to hang up, and that is the point of it living here
+            // beside sync and backup rather than next to Hang Up: the link stays
+            // welcome, the invitations stop.
+            const invitesBtn = document.createElement('button');
+            invitesBtn.type = 'button';
+            invitesBtn.className = 'connections-row__icon-btn';
+            const invitesOff = peer.invitesOff === true;
+            invitesBtn.textContent = invitesOff ? '🔕' : '🔔';
+            invitesBtn.title = invitesOff
+                ? 'Game invites are OFF for this connection — this device proposes no games to them, and their invites are declined without asking. Tap to allow invites again.'
+                : 'Game invites are ON — tap to mute them for this connection only (the connection itself stays up)';
+            invitesBtn.setAttribute('aria-label',
+                (invitesOff ? 'Allow' : 'Mute') + ' game invites for ' + displayName);
+            invitesBtn.addEventListener('click', () => {
+                setKnownPeerInvitesOff(id, !invitesOff);
+                toast(invitesOff
+                    ? 'Game invites on for ' + displayName + '.'
+                    : 'Game invites muted for ' + displayName + ' — both ways.');
+                // The topbar door's nudge counts invitable connections, and this
+                // just changed that count.
+                if (window.__arcade.updateInviteNudge) window.__arcade.updateInviteNudge();
+                render();
+            });
+            if (!revoked) icons.appendChild(invitesBtn);
 
             // Restoring a stored peer backup moved to the Game Data dialog's
             // Restore section (arcade-backup-ui.js) — one restore surface for

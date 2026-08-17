@@ -10,7 +10,7 @@
  * Entry shape (per deviceId):
  *   { name, remoteName, firstConnectedAt, lastConnectedAt, timesConnected,
  *     fingerprint, fingerprintChangedAt?, pinPendingFingerprint?,
- *     autoReconnect?, paused?, syncEnabled?, backupTarget?,
+ *     autoReconnect?, paused?, syncEnabled?, backupTarget?, invitesOff?,
  *     userPub?, deviceCertIssuedAt?, revoked? }
  *
  * `paused` is a display/intent flag only — it says the user hung up and
@@ -160,6 +160,32 @@ export function setKnownPeerSyncEnabled(id, on) {
     return mutateKnownPeers((map) => {
         if (!ownEntry(map, id)) return null;
         map[id].syncEnabled = !!on;
+        return map;
+    });
+}
+
+/**
+ * Per-connection game-invite mute (D4 fast-follow, plans/tables-2026-08.md).
+ *
+ * LOCAL AND BOTH-WAYS, and the two halves are the same intent. Outbound,
+ * `inviteGame` skips this connection, so neither door proposes to it. Inbound,
+ * an invite from it is declined silently, exactly as a user-tapped decline is —
+ * so the far end learns nothing it would not have learned anyway.
+ *
+ * It is deliberately NOT a wire concept: nothing is announced, and the peer
+ * cannot tell a mute from somebody who keeps saying no. That is the whole point
+ * of D4's veto case — the spare laptop that lights up with "⟨name⟩ wants to
+ * play ⟨game⟩" every time another device is unlocked — and telling the other
+ * end you muted it would make a quiet switch into a small social event.
+ *
+ * `paused` is a near neighbour and a different thing: paused says do not heal
+ * this LINK, this says do not propose GAMES over a link that is perfectly
+ * welcome to stay up.
+ */
+export function setKnownPeerInvitesOff(id, off) {
+    return mutateKnownPeers((map) => {
+        if (!ownEntry(map, id)) return null;
+        map[id].invitesOff = !!off;
         return map;
     });
 }
