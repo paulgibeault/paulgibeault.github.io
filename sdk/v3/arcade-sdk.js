@@ -1978,16 +1978,16 @@
             if (!framed || (peerStatus !== 'connected' && peerStatus !== 'interrupted')) return false;
             var to = opts && opts.to;
             if (to !== undefined) {
-                // Targeted send — routing, not secrecy: joiner→joiner frames
-                // transit the host bridge readable. What it guarantees is
-                // that a non-addressee joiner never RECEIVES the frame.
+                // Targeted send — it travels the addressee's own direct link
+                // and no other, so a non-addressee never RECEIVES the frame.
                 // Refuse rather than broadcast when the launcher can't
                 // target (missing cap) or the payload names a bad target —
                 // a private frame must never silently fan out.
                 // NOTE: true means "handed to the launcher", not delivered —
-                // an unknown or just-departed target is dropped launcher-
-                // side (postMessage is one-way, so its false can't reach
-                // us). A game that needs delivery guarantees uses acks.
+                // an unknown target, a device this game isn't open with, or
+                // a just-departed seat is dropped launcher-side (postMessage
+                // is one-way, so its false can't reach us). A game that needs
+                // delivery guarantees uses acks.
                 if (typeof to !== 'string' || !to) return false;
                 if (peerCaps.indexOf('peer.sendTo') === -1) return false;
                 postToParent({ type: 'arcade:peer.send', payload: payload, to: to });

@@ -254,6 +254,45 @@ export async function startP2PHarness({ port, dropPort }) {
 
     const deviceIdOf = (page) => page.evaluate(() => localStorage.getItem('arcade.v1._meta.deviceId'));
 
+    /**
+     * Opens game `gameId` between two connected launchers: `inviter` proposes,
+     * `invitee` accepts. A CONNECTION is not permission to play — a game reads
+     * 'idle' with an empty roster until both ends agree to it — so every suite
+     * that wants gameplay runs this first (plans/tables-2026-08.md D4).
+     *
+     * Drives the bridge write paths (inviteGame / acceptGameInvite) rather
+     * than the launcher's prompt: WP4 owns the prompt, and the launcher's
+     * dialog chain is shared with the name-this-connection and auto-reconnect
+     * questions a fresh ceremony raises, so clicking "OK" would answer
+     * whichever of them happened to be first. The proposal itself is still
+     * asserted end to end — it has to reach the invitee's onGameInvite, over
+     * the wire, past the envelope gate and the identity binding, before this
+     * resolves.
+     *
+     * Resolves to the number of proposals the inviter sent.
+     */
+    async function openScope(inviter, invitee, gameId) {
+        const inviterDev = await deviceIdOf(inviter);
+        const inviteeDev = await deviceIdOf(invitee);
+        await invitee.evaluate(() => {
+            if (window.__invites) return;
+            window.__invites = [];
+            window.__arcade.p2p.onGameInvite((e) => window.__invites.push(e));
+        });
+        const sent = await inviter.evaluate((g) => window.__arcade.p2p.inviteGame(g), gameId);
+        await invitee.waitForFunction(([dev, g]) =>
+            (window.__invites || []).some((i) => i.deviceId === dev && i.gameId === g),
+            [inviterDev, gameId], { timeout: 15000 });
+        await invitee.evaluate(([dev, g]) => window.__arcade.p2p.acceptGameInvite(dev, g),
+            [inviterDev, gameId]);
+        // The accept has to land back on the inviter for the scope to be
+        // symmetric — waiting on the inviter's own map is what proves it.
+        await inviter.waitForFunction(([dev, g]) =>
+            ((window.__arcade.p2p._gameScopes()[g]) || []).includes(dev),
+            [inviteeDev, gameId], { timeout: 15000 });
+        return sent;
+    }
+
     async function shutdown() {
         await browser.close();
         staticServer.kill();
@@ -262,7 +301,7 @@ export async function startP2PHarness({ port, dropPort }) {
 
     return {
         BASE, browser, dropTopics,
-        newDeviceContext, launcherPage, bootBridge, ceremony,
+        newDeviceContext, launcherPage, bootBridge, ceremony, openScope,
         fixtureFrame, deviceIdOf, shutdown
     };
 }

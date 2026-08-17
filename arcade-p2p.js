@@ -266,11 +266,10 @@ function aggregateStatus(mp) {
 let idleHoldTimer = null;
 function applyStatus(mp) {
     // Per-game status rides the same funnel as the global one, so the two
-    // views can never drift. No sweep timer is needed here any more: a scope
-    // belongs to exactly one link, and a link's own terminal status event
-    // closes it before this runs — there is no multi-step teardown left whose
-    // intermediate state a sweep could misread (v1.13's closeParty was).
+    // views can never drift; the scope sweep rides it too, one beat later
+    // (see scheduleScopeSweep for why it cannot be immediate).
     applyGameStatuses();
+    scheduleScopeSweep();
     const next = aggregateStatus(mp);
     if (idleHoldTimer) { clearTimeout(idleHoldTimer); idleHoldTimer = null; }
     if (next === 'idle' && (sdkStatus === 'connected' || sdkStatus === 'interrupted')) {
@@ -431,13 +430,42 @@ function closeScope(gameId, peerId, why) {
 }
 
 /**
- * Every scope a link holds dies with the link. Called from the terminal
- * status branch and from unbindDevice — the two ways a link stops existing.
- * An 'interrupted' link is a session under repair, NOT a dead one: its scopes
- * stay so the game keeps queueing and resumes where it left off.
+ * Every scope a link holds dies with the link — the deliberate case:
+ * hang-up, start-over, revocation. The user ended the relationship, so
+ * nothing about it should linger for a repair to pick up.
  */
 function closeLinkScopes(peerId, why) {
     for (const gameId of [...gameScopes.keys()]) closeScope(gameId, peerId, why);
+}
+
+// The UNdeliberate case, and the reason it is a deferred sweep rather than a
+// line in the terminal-status branch. A scope must not outlive its link
+// (B-p2p-1) — but a link whose channel just closed is not necessarily gone:
+// the rendezvous layer re-adopts the SAME peerId with the same outbox and the
+// same game still open, and the platform's loudest promise to games is that
+// even a TOTAL connection loss surfaces as 'interrupted', never 'idle', so
+// nobody resets a running game. Closing the scope the instant the channel
+// closed would break exactly that, because the rendezvous claim
+// ('reconnecting' → rdvReconnecting) lands a beat AFTER the terminal event.
+// So the same beat the status idle-hold waits, this waits: after it, a link
+// that is neither live nor under active repair is a departure, and its scopes
+// go. seatReachable is the shared predicate — the roster draws the identical
+// line for the identical reason.
+let scopeSweepTimer = null;
+function scheduleScopeSweep() {
+    if (scopeSweepTimer) return;
+    scopeSweepTimer = setTimeout(() => {
+        scopeSweepTimer = null;
+        let closed = false;
+        for (const [gameId, links] of gameScopes) {
+            for (const peerId of [...links]) {
+                if (seatReachable(peerId)) continue;
+                closeScope(gameId, peerId, 'link gone — no live entry, no repair');
+                closed = true;
+            }
+        }
+        if (closed) applyGameStatuses();
+    }, 1600);
 }
 
 /** Folds one game's scope links (and their repairing stashes) into the SDK vocabulary. */
@@ -1104,14 +1132,11 @@ async function ensureAddon() {
                 const seat = seats.get(peerId);
                 if (seat) { seat.announced = false; seat.minted = false; }
                 forgetIdentityThrottles(peerId);
-                // Nothing outlives its link: every game this link had open
-                // closes here. The binding survives for a repair, the CONSENT
-                // does not — a re-adopted link is re-invited, which is also
-                // the only way the far end can agree again (it ran this same
-                // branch). 'interrupted' deliberately does NOT reach here: a
-                // session under repair keeps its scopes and queues.
-                closeLinkScopes(peerId, 'link died');
-                applyGameStatuses();
+                // The scopes this link held are NOT closed here — a channel
+                // that just closed may be a session about to be repaired, and
+                // that repair is meant to be invisible to games. The deferred
+                // sweep (applyStatus → scheduleScopeSweep) decides once the
+                // rendezvous layer has had its beat to claim the session.
             }
         });
 
