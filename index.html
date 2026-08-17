@@ -1337,17 +1337,38 @@
                 // has not opened this one yet, so it read back a raw gameId
                 // every time it mattered. Peer-supplied strings (`name`) reach
                 // the DOM through dialog()'s textContent, never innerHTML.
+
+                // Two ways to honour an accept: the catalog knows the game
+                // (mount it fresh), or it is already warm in the pool (bring it
+                // forward — showGame reuses the entry and promotes it to MRU
+                // rather than reloading). The catalog is re-read HERE, at accept
+                // time rather than at prompt time, so a game list that arrived
+                // between the question and the answer still counts.
+                function mountInvitedGame(gameId, info) {
+                    if (window.__arcade.openCatalogGame && window.__arcade.openCatalogGame(gameId)) return true;
+                    if (info && window.__arcade.showGame) {
+                        window.__arcade.showGame(gameId, info.src, info.name);
+                        return true;
+                    }
+                    return false;
+                }
                 ArcadeP2P.onGameInvite(({ deviceId, name, gameId }) => {
-                    // Two ways this launcher can honour an accept: the game is
-                    // in the catalog (mount it fresh), or it is already warm in
-                    // the pool (bring it forward). Resolve BEFORE prompting —
-                    // agreeing to a game we cannot open would leave a live scope
-                    // the inviter can see and this device can never sit at.
-                    const entry = (window.__arcade.catalog || []).find((g) => g.id === gameId);
+                    // Resolve BEFORE prompting — agreeing to a game we cannot
+                    // open would leave a live scope the inviter can see and this
+                    // device can never sit at.
+                    //
+                    // But only a catalog we ACTUALLY HAVE may say no. An absent
+                    // window.__arcade.catalog means the list is still in flight
+                    // or its fetch failed, which is not evidence we lack the
+                    // game — declining on it would refuse an invite for a game
+                    // we own, silently to the inviter, and the launcher's own
+                    // boot race would decide who gets to play.
+                    const catalog = window.__arcade.catalog;
+                    const entry = Array.isArray(catalog) ? catalog.find((g) => g.id === gameId) : null;
                     const fp = framePool();
                     const info = fp && fp.getGameInfo ? fp.getGameInfo(gameId) : null;
                     const gameName = (entry && entry.name) || (info && info.name) || gameId;
-                    if (!entry && !info) {
+                    if (Array.isArray(catalog) && !entry && !info) {
                         ArcadeP2P.declineGameInvite(deviceId, gameId);
                         showToast(name + ' invited you to ' + gameName + ', which this arcade doesn\'t have.');
                         return;
@@ -1369,15 +1390,15 @@
                         // Mounting first closes that window: showGame is
                         // synchronous up to the pool insert (only the frame's
                         // LOAD is async), so nothing waits and the scope is
-                        // never open on a game the pool doesn't hold.
-                        //
-                        // This is also the "focus it" half, and it is safe on
-                        // an already-warm frame: the pool reuses the entry and
-                        // promotes it to MRU rather than reloading.
-                        if (entry && window.__arcade.openCatalogGame) {
-                            window.__arcade.openCatalogGame(gameId);
-                        } else if (info && window.__arcade.showGame) {
-                            window.__arcade.showGame(gameId, info.src, info.name);
+                        // never open on a game the pool doesn't hold. It is
+                        // also the "focus it" half.
+                        if (!mountInvitedGame(gameId, info)) {
+                            // Only reachable through the catalog race above: we
+                            // asked without a game list and it still has not
+                            // arrived. Opening the scope anyway is right — they
+                            // agreed, and the list may yet land — but the blank
+                            // launcher grid needs an explanation.
+                            showToast('Couldn\'t open ' + gameName + " — this arcade's game list hasn't loaded.", { error: true });
                         }
                         // The scope opens here, and the presence cascade rides
                         // it: accepting announces to the inviter, and the
