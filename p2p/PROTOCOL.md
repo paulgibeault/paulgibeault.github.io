@@ -46,12 +46,13 @@ state machine in the stack. Implementation: `p2p-core.js`, `sdp-codec.js`,
 - **Session** — the reliability state (sequence counters, outbox) and app
   meaning attached to a `peerId`. A session may span many links over time.
 - **Inviter / joiner** — roles in a ceremony: the inviter creates the offer.
-- **Party** — a disjoint set of links sharing one hub (v1.13). A node's
-  role is per-party: the **leader** relays app frames between that party's
-  links; a **member** holds exactly one link to its leader. One node may
-  hold several parties concurrently. Party identity is local-only — it
-  never appears on the wire; a frame's party is the party of the link it
-  arrived on (§5.6).
+  The roles end with the ceremony: links are symmetric afterwards, and the
+  only lasting asymmetry is which side is polite during renegotiation (§5.5).
+- **Open game (scope)** — game *g* is open on link *L* when both endpoints
+  consented to play it together. Owned by the layer above the transport
+  (the launcher bridge), held in RAM on each side, never on the wire, and
+  dead with its link. It is what decides whether an inbound frame reaches a
+  local game (§5.6). *(Replaces the v1.13 "party", deleted with the relay.)*
 - **Caller / listener** — fixed roles in a *rendezvous pair* (see §7.1),
   independent of who invited whom originally.
 - **Frame** — one data-channel message (UTF-8 JSON in v1.x).
@@ -67,7 +68,7 @@ state machine in the stack. Implementation: `p2p-core.js`, `sdp-codec.js`,
 ├────────────────────────────────────────────────────────────────────┤
 │ §7 Rendezvous      zero-touch re-signaling through untrusted relays│
 │ §6 Identity        persistent DTLS certificate, fingerprint pinning│
-│ §5 Link protocol   reliability · liveness · repair · relay         │
+│ §5 Link protocol   reliability · liveness · repair · direct only   │
 ├────────────────────────────────────────────────────────────────────┤
 │ §4 Ceremonies      QR scan · link tennis (human-carried signaling) │
 │ §3.1 Payload codec packed SDP, ~110–180 chars                      │
@@ -145,7 +146,7 @@ send path always wraps app data under `text`).
 
 ```json
 { "text": "<application payload>", "from": "<origin myId>",
-  "seq": 42, "relayed": true, "noRelay": true }
+  "seq": 42, "noRelay": true }
 ```
 
 | field | presence | meaning |
@@ -153,8 +154,8 @@ send path always wraps app data under `text`).
 | `text` | always | opaque application payload (apps typically nest JSON here) |
 | `from` | always | sender's transport id (app-level attribution; not authenticated) |
 | `seq` | v1.7+ | per-link, per-direction sequence number, starts at 1 |
-| `relayed` | when relayed | stamped **by the relaying host only** (§5.6) |
-| `noRelay` | v1.11, targeted frames | set by the sender: the hub MUST NOT fan this frame out (§5.6) |
+| `relayed` | **reserved legacy** | never set by v1.14+; still parsed, because a pre-v1.14 hub can stamp it (§5.6) |
+| `noRelay` | v1.11, targeted frames | set by the sender: a pre-v1.14 hub MUST NOT fan this frame out (§5.6) |
 
 The app-frame serializer is a whitelist: only the fields above travel, in
 both directions — a sender cannot smuggle arbitrary keys into another
@@ -234,39 +235,49 @@ Repair escalation while interrupted:
    Restart attempts repeat every 10 s within the grace window.
 3. Rendezvous (§7), if the pair opted in.
 
-### 5.6 Multi-peer relay (star topology, per-party since v1.13)
+### 5.6 No relay — game frames travel only on direct links (v1.14)
 
-The inviter of a multi-peer session acts as hub — the **leader** of that
-party: app frames from one spoke are re-sent to every other spoke **of the
-same party**, **through each destination link's own sequence space**,
-stamped `relayed: true` by the leader itself. A spoke cannot launder a
-relayed frame into looking direct (the leader always stamps), and identity
-claims (§6) MUST NOT bind through a relayed frame.
+**A node MUST NOT forward an app frame from one link to another.** Every
+app frame is dispatched to the receiving node's own listeners and re-emitted
+nowhere. There is no hub, no fan-out loop, and no node-level or per-party
+relay role.
 
-**Party scoping (v1.13).** A node MAY hold several parties concurrently —
-leader of some, member of others. Relay authority derives from the
-**arrival link's party**, never from node-global state: a node relays a
-frame only when it leads the party of the link the frame arrived on, and
-only to that party's other links (and their §5.3 adoption stashes). A frame
-MUST NEVER be relayed across parties. Nothing about parties travels on the
-wire — a spoke cannot observe how many parties its leader holds — so v1.13
-nodes interoperate with pre-1.13 nodes unchanged.
+Through v1.13 the inviter of a multi-peer session acted as a hub, re-sending
+each spoke's frames to the other spokes of its party and stamping them
+`relayed: true`. It is deleted rather than rescoped because a sweep of every
+game that names `Arcade.peer` found no consumer for it: gameplay is targeted
+sends over direct links in both games that exist, and the fan-out actively
+broke the flagship one — a member's lobby broadcast reached fellow members
+only as a `relayed` frame, which that game rejects as spoofed
+(`plans/tables-2026-08.md`, "Evidence: what the fleet actually uses").
+Multi-seat routing is the **game's** job, over the direct links its host
+holds; the transport's job is the links.
+
+**Scope admission is a bridge concern.** Which games may exchange frames
+over a given link is decided one layer up, by the launcher bridge's
+**open-game scopes**: game *g* is open on link *L* when both endpoints
+consented, and an inbound frame for *g* arriving on *L* reaches the local
+game **iff *g* is open on *L***. Scope lives in RAM on each side, never on
+the wire, and dies with its link. The in-frame `gameId` selects among a
+link's open games; it can never grant access to one that is not open, so a
+peer cannot reach a game by naming it.
 
 **Targeted frames (v1.11).** `sendTo(peerId, text)` is the public
 single-link send: it delivers to one peer through the same per-link outbox
 (and the adoption stash of a dead-but-repairing session, §5.3), so
 exactly-once replay applies to targeted frames unchanged. Targeted frames
-carry `noRelay: true`; the leader's relay loop MUST skip them, so a targeted
-frame sent to the leader is never fanned out to the other spokes.
+still carry `noRelay: true` — not for this node, which relays nothing, but
+because the peer on the far end may be a pre-v1.14 hub that would otherwise
+fan a private frame out to its spokes.
 
-**Inbound `relayed` sanitization (v1.11, per-party since v1.13).** Only a
-party's leader may stamp `relayed`, and every frame the leader receives on
-a link it leads arrives direct from its origin — an inbound `relayed: true`
-on a led link is therefore always forged, and the leader MUST strip it
-before relay or local dispatch. Without this, a spoke could launder its
-frames into "arrived through the hub" and defeat relay-tag attribution in
-layers above. On a link where the node is a member, an inbound `relayed`
-stamp is its leader's legitimate attribution and MUST be preserved.
+**`relayed` is a reserved legacy field.** A v1.14 node MUST NOT set it. It
+stays in the frame table (§5.1) and MUST still be parsed, because a
+pre-v1.14 hub can still stamp it: a receiver that sees `relayed: true` knows
+the frame did not originate from its direct link partner, and the layers
+above SHOULD refuse such a frame rather than misattribute it to the hub it
+arrived from. Identity claims (§6) MUST NOT bind through a frame carrying
+it. The old inbound sanitization (a leader stripping a forged `relayed` off
+a link it led) has nothing left to protect and is gone with the relay.
 
 ## 6. Identity
 
@@ -565,8 +576,9 @@ and cadences on the wire are identical.
 |---|---|
 | Stale/captured ceremony payload | one-time ICE credentials — replay is inert (§4) |
 | App forging transport control | `__p2pc` unreachable from app send path (§5.2) |
-| Spoke laundering relayed frames | hub stamps `relayed` itself and strips forged inbound `relayed` (§5.6) |
-| Identity claim via relay | fingerprints bind only on direct links (§6) |
+| Peer reaching a game its owner never opened to it | scope admission: a frame reaches a game only when that game is open on the ARRIVAL link; the in-frame `gameId` selects, never grants (§5.6) |
+| Peer laundering a frame into "came through the hub" | nothing relays, so nothing legitimately arrives that way — a frame stamped `relayed` is refused, not re-attributed (§5.6) |
+| Identity claim through a third device | fingerprints bind only on direct links, and there are no other links to arrive on (§6, §5.6) |
 | Relay reads/forges signaling | AEAD with pairing-derived keys; decrypt-then-parse (§7.4) |
 | Relay/observer links a pair across days | daily HMAC topics, no identifiers; standing subscriptions are pseudonymous and per-day (§7.5, §9) |
 | Replay/duplication WITHIN an episode | per-episode exchange nonces (`deadNonces`/`seenRings`) + stalled-exchange retirement (§7.4) |
@@ -631,4 +643,5 @@ resume window 6 h.
 | 1.11 | targeted sends: public `sendTo`, `noRelay` app-frame flag, hub strips forged inbound `relayed` |
 | 1.12 | §3.1 extras trailer on packed payloads (format-1-compatible): exchange nonce `n` now survives the packed wire path — pre-1.12 packers dropped it, leaving the §7.4 offer↔answer replay binding inert there |
 | 1.13 | parties: per-party leader role and relay scoping (§5.6) — one node may lead a party while a member of others; local-only, wire-unchanged. Session adoption re-derives the relay role from the link type, fixing the lost hub relay after a hub restart resume (isHost was never re-derived) |
+| 1.14 | **relay removed** (§5.6): no node forwards an app frame between links; the hub role, per-party scoping, the `relayed` stamp and its inbound strip are all deleted. `relayed` becomes a reserved legacy field — parsed so a pre-1.14 hub's frame can be refused, never set. Wire-unchanged and backward-compatible in both directions: a 1.14 node speaking to a 1.13 hub simply receives frames it declines, and a 1.13 node speaking to a 1.14 node sees a peer that relays nothing. Which games may talk over a link moves up to the bridge's open-game scopes (`plans/tables-2026-08.md`) |
 | 2.x (`RDV_BUILD` `v2.4`) | `pair-confirm` key-confirmation before persisting; serialized per-pair record writes; `MultiCarrier` fan-out across several public brokers; flap-resend. **Ratchet frozen, then removed** (see §7.5) — the sealed epoch is the fixed literal `1` and the never-reachable `+3` acceptance window was deleted (wire-identical); a per-episode decrypt rate-limit + day-topic-rollover resubscribe added |

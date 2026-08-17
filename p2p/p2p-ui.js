@@ -222,9 +222,7 @@ export class P2PUIManager {
                 }
 
                 this.logDiag('info', 'Invite link received. Preparing your reply code...');
-                // Joining always forms a FRESH member party (v1.13) — being
-                // connected elsewhere no longer blocks accepting an invite.
-                const answerData = await this.peerNode.createAnswer(data, { newParty: true });
+                const answerData = await this.peerNode.createAnswer(data);
                 // This join ceremony owns the host's link — without this, the
                 // 'connected' status event is filtered as "not my ceremony"
                 // and the modal never auto-closes on the link path (the QR
@@ -351,9 +349,9 @@ export class P2PUIManager {
     // CONNECTION-STATE RENDERING (single source of truth)
     // Badge text is derived from the peers map in ONE place, so every entry
     // point (restore, start-over, live status events) agrees. The choice
-    // screen itself is stateless (v1.13 multi-party): starting a NEW party is
-    // always allowed, and joining always forms a fresh party — so "New
-    // connection" is a verb that always offers both, never a status screen.
+    // screen itself is stateless: every ceremony mints one standalone link,
+    // in either direction, whatever else is connected — so "New connection"
+    // is a verb that always offers both, never a status screen.
     // ==========================================
 
     /** Snapshot of the transport's connection inventory (transport owns it). */
@@ -375,13 +373,11 @@ export class P2PUIManager {
     }
 
     /**
-     * Show the Start/Join choice. Both actions are ALWAYS available (v1.13):
-     * starting a party mints a fresh one regardless of existing roles, and
-     * joining always forms a fresh member party — the old connected dead-end
-     * ("only the host can add more players") is gone with the node-global
-     * role. Inviting into an EXISTING party is the party card's job (the
-     * launcher opens this modal with {mode:'host', partyId}), not this
-     * screen's.
+     * Show the Start/Join choice. Both actions are ALWAYS available: each one
+     * mints a fresh standalone link and nothing about this device's existing
+     * links can conflict with it — the old connected dead-end ("only the host
+     * can add more players") went with the node-global role, and the
+     * per-party successor went with the parties.
      */
     _renderChoiceButtons() {
         this.ui.choice.style.display = 'block';
@@ -423,7 +419,6 @@ export class P2PUIManager {
     /** Abandon any unfinished attempt and return to the first screen. */
     _startOver(log = true) {
         this._ceremonyPeerId = null;
-        this._ceremonyPartyId = null;
         this._ceremonyRole = null;
         // Abandon unfinished ceremonies only — the transport keeps established
         // sessions (connected or mid-repair) and routes each drop through a
@@ -454,10 +449,8 @@ export class P2PUIManager {
             // One-tap invite entry: skip the choice screen and put a FRESH
             // invite code on screen immediately. Used by "New invite code"
             // (reconnect — WebRTC signaling is one-time-use by design, so
-            // reconnecting means a fresh code with zero navigation) and by
-            // the party card's "Invite another player", which passes the
-            // party the new player should land in (options.partyId).
-            this.startHostCeremony({ partyId: options.partyId });
+            // reconnecting means a fresh code with zero navigation).
+            this.startHostCeremony();
             return;
         }
         setTimeout(() => {
@@ -469,23 +462,19 @@ export class P2PUIManager {
 
     /**
      * Begins the inviter flow: create a fresh offer and show its QR/link.
-     * Reused by the Start-a-party button and show({mode:'host'}). Each
-     * ceremony is a fresh, standalone connection — it never touches existing
-     * peers. Without opts.partyId the invite starts a NEW party this device
-     * leads (always allowed, even while a member elsewhere — v1.13); with it,
-     * the new player is invited into that existing party (leader only — the
-     * transport enforces it).
+     * Reused by the choice screen's invite button and show({mode:'host'}).
+     * Each ceremony is a fresh, standalone connection — it never touches
+     * existing peers, and nothing about this device's current links can
+     * refuse it.
      */
-    async startHostCeremony(opts = {}) {
+    async startHostCeremony() {
         this.logDiag('info', '--- INVITE SEQUENCE ---');
         this.ui.choice.style.display = 'none';
         this._ceremonyRole = 'host';
         this._initStages('host');
 
         try {
-            const partyId = opts.partyId || this.peerNode.createParty();
-            this._ceremonyPartyId = partyId;
-            const offerData = await this.peerNode.createOffer({ partyId });
+            const offerData = await this.peerNode.createOffer();
             // Remember which link THIS ceremony is minting so a status event from
             // an unrelated (already-live) peer can't close this modal on us.
             try { this._ceremonyPeerId = JSON.parse(offerData).peerId; } catch (_) { this._ceremonyPeerId = null; }
@@ -498,8 +487,6 @@ export class P2PUIManager {
             this.ui.btnShareSdp.textContent = 'Send a link instead';
         } catch (e) {
             this._setStage(0, 'error');
-            // Inviting into an existing party as a non-leader lands here —
-            // tell the user why rather than silently failing.
             this.logDiag('error', e && e.message ? e.message : 'Could not create your invite code.');
             this.ui.statusBadge.textContent = e && e.message ? e.message : 'Could not create your invite code.';
             this.ui.statusBadge.className = 'p2p-status-disconnected';
@@ -677,13 +664,13 @@ export class P2PUIManager {
         // ---- Copy full diagnostics transcript (for bug reports / remote debugging) ----
         this.ui.btnCopyTranscript.addEventListener('click', async () => {
             const lines = Array.from(this.ui.diagnosticsOut.children).map(el => el.textContent);
-            const parties = (this.peerNode.statusSummary().parties || [])
-                .map((p) => `${p.role}:${p.connected}/${p.connected + p.interrupted + p.finalizing + p.pending}`)
-                .join(' ') || 'none';
+            const s = this.peerNode.statusSummary();
+            const links = `${s.connected}/${s.connected + s.interrupted + s.finalizing + s.pending}`
+                + (s.stashed ? ` +${s.stashed} repairing` : '');
             const transcript = [
                 `# P2P transcript ${new Date().toISOString()}`,
                 `# UA: ${navigator.userAgent}`,
-                `# Mode: ${this.peerNode.getConfig().iceMode}, parties: ${parties}`,
+                `# Mode: ${this.peerNode.getConfig().iceMode}, links: ${links}`,
                 ...lines
             ].join('\n');
             try {
@@ -768,7 +755,6 @@ export class P2PUIManager {
             if (status === 'connected') {
                 this._setStage(2, 'done');
                 this._ceremonyPeerId = null;
-                this._ceremonyPartyId = null;
                 this._ceremonyRole = null;
                 this.cleanupUI();
                 this._renderChoiceButtons();
@@ -813,9 +799,7 @@ export class P2PUIManager {
                 this.logDiag('info', 'Code scanned! Preparing your reply code...');
                 this._setStage(0, 'done'); // scanned their code
                 try {
-                    // Joining always forms a FRESH member party (v1.13) —
-                    // being connected elsewhere no longer blocks joining.
-                    const answerData = await this.peerNode.createAnswer(offerData, { newParty: true });
+                    const answerData = await this.peerNode.createAnswer(offerData);
                     // The answer is keyed by the host's peerId — that's the link
                     // this join ceremony owns.
                     try { this._ceremonyPeerId = JSON.parse(answerData).peerId; } catch (_) { this._ceremonyPeerId = null; }
