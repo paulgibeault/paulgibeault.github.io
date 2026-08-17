@@ -493,11 +493,6 @@
         <button type="button" class="connections-dialog__new" id="connections-dialog-new">
             <span aria-hidden="true">⚇</span> New connection
         </button>
-        <!-- Live parties (v1.13): the leader-first hierarchy IS the topology
-             lesson — no diagrams, no transport vocabulary. Rendered only
-             while the bridge is loaded (no bridge → nothing can be live). -->
-        <div class="launcher-menu__heading connections-dialog__list-heading" id="connections-dialog-parties-heading" hidden>Parties</div>
-        <div class="connections-dialog__list" id="connections-dialog-parties"></div>
         <div class="launcher-menu__heading connections-dialog__list-heading" id="connections-dialog-list-heading" hidden>Linked devices</div>
         <div class="connections-dialog__list" id="connections-dialog-list"></div>
         <!-- Self-hosted infrastructure overrides (see SELF_HOSTING.md). Writes
@@ -1254,12 +1249,12 @@
                 import('./arcade-p2p.js'),
                 import('./arcade-known-peers.js')
             ]).then(([{ ArcadeP2P }, { readKnownPeers }]) => {
-                // Per-game delivery (v1.13 multi-party): each mounted,
-                // handshaken game gets ITS attached party's status and
-                // roster — never another table's — deduped per game (the
-                // SDK dedupes too; this just keeps the postMessage traffic
-                // quiet). With a single party this reduces exactly to the
-                // old broadcast behavior.
+                // Per-game delivery: each mounted, handshaken game gets the
+                // status and roster of ITS OWN open scopes — the devices that
+                // agreed to play that game with us, never anyone else's table
+                // — deduped per game (the SDK dedupes too; this just keeps the
+                // postMessage traffic quiet). A game with no open scope reads
+                // 'idle' with an empty roster, however many links are live.
                 const perGameScopes = new Map(); // gameId → { status, rosterJson }
                 function pushGameScopes() {
                     const fp = framePool();
@@ -1293,9 +1288,45 @@
                     }
                 }
                 ArcadeP2P.onScopeChange(pushGameScopes);
+
+                // A game leaving the frame pool closes its scopes: an open
+                // scope must never outlive the frame it was opened for, or the
+                // peer keeps sending into a game that is no longer there.
+                // Rides the pool's own shape event so quit and LRU eviction
+                // are covered by one path.
+                const fpForScopes = framePool();
+                if (fpForScopes) {
+                    fpForScopes.onPoolChanged(() => {
+                        const mounted = new Set(fpForScopes.mountedGameIds());
+                        for (const gid of ArcadeP2P.openGameIds()) {
+                            if (!mounted.has(gid)) ArcadeP2P.leaveGame(gid);
+                        }
+                    });
+                }
+
+                // Guest-side invite door — MINIMAL, on purpose: WP4 replaces
+                // it with the real prompt (accept mounts the game via the pool
+                // and focuses it). This much has to exist now because a scope
+                // needs BOTH ends to agree, so without an answer path an
+                // invite can never complete. D3 keeps the copy simple: who
+                // else is at a table is the game's lobby to disclose, before
+                // you sit down.
+                ArcadeP2P.onGameInvite(({ deviceId, name, gameId }) => {
+                    const fp = framePool();
+                    const info = fp && fp.getGameInfo ? fp.getGameInfo(gameId) : null;
+                    const gameName = (info && info.name) || gameId;
+                    window.__arcade.dialog({
+                        message: name + ' wants to play ' + gameName + '.',
+                        okLabel: 'Play', cancelLabel: 'Not now'
+                    }).then((yes) => {
+                        if (yes) ArcadeP2P.acceptGameInvite(deviceId, gameId);
+                        else ArcadeP2P.declineGameInvite(deviceId, gameId);
+                    });
+                });
+
                 let prevPeerStatus = 'idle';
                 ArcadeP2P.onStatus((status) => {
-                    // Games get their own party's view, not this aggregate.
+                    // Games get their own scope's view, not this aggregate.
                     pushGameScopes();
                     const tag = document.getElementById('menu-multiplayer-status');
                     if (tag) {
@@ -1320,8 +1351,11 @@
                             } catch (_) {}
                             showToast(who ? 'Connected to ' + who : 'Multiplayer connected!');
                         }
-                        // Tell the other launcher which handshaken games are
-                        // mounted here, so its games get a ready signal.
+                        // Re-announce presence for the games that already have
+                        // an open scope, so their onReady fires again after a
+                        // repair. A game with no scope announces nothing —
+                        // opening one is an invite, not a side effect of a
+                        // link coming up.
                         const fp = framePool();
                         if (fp) {
                             for (const gid of fp.mountedGameIds()) {
@@ -1335,8 +1369,8 @@
                 });
                 ArcadeP2P.onRosterChange(() => {
                     // Per-peer roster for multi-seat games — re-derived PER
-                    // GAME (each sees only its attached party's seats;
-                    // arcade:welcome.peers seeds it the same way).
+                    // GAME (each sees only the devices its own scope is open
+                    // with; arcade:welcome.peers seeds it the same way).
                     pushGameScopes();
                 });
                 ArcadeP2P.onPresence(({ gameId, deviceId, name, kind }) => {
@@ -1582,63 +1616,6 @@
             if (e.persisted) tryResumeOnLaunch();
         });
 
-        // Game-launch party picker (v1.13): with SEVERAL live parties a
-        // launching game stays unattached (reads 'idle') until someone
-        // decides which table it's for — the bridge deliberately won't
-        // guess. One tap here, named by each party's leader, remembered
-        // while the party lives (ArcadeP2P.attachGame). With zero or one
-        // party the bridge auto-attaches and this never appears.
-        function maybeOfferPartyPicker(gameId, gameName) {
-            if (!p2pBridge) return; // bridge cold → nothing live to pick from
-            let parties;
-            try { parties = p2pBridge.partiesSnapshot(); } catch (_) { return; }
-            if (parties.length < 2) return;
-            if (p2pBridge.gameParty(gameId)) return; // already attached (or decided)
-            document.getElementById('party-picker')?.remove();
-            const overlay = document.createElement('div');
-            overlay.id = 'party-picker';
-            overlay.className = 'party-picker';
-            const sheet = document.createElement('div');
-            sheet.className = 'party-picker__sheet';
-            sheet.setAttribute('role', 'dialog');
-            sheet.setAttribute('aria-label', 'Choose a party');
-            const title = document.createElement('div');
-            title.className = 'party-picker__title';
-            title.textContent = 'Which party is ' + (gameName || 'this game') + ' for?';
-            sheet.appendChild(title);
-            for (const p of parties) {
-                const btn = document.createElement('button');
-                btn.type = 'button';
-                btn.className = 'party-picker__option';
-                // peers counts the REMOTE seats; +1 shows the human total.
-                const label = p.role === 'leader' ? 'Your party' : p.leaderName + "'s party";
-                btn.textContent = '👑 ' + label + ' — ' + (p.peers + 1) + ' players';
-                // Same-named options are real (one device can lead several
-                // parties) — the member names are what tells them apart.
-                const others = (p.members || []).filter((m) => !m.isSelf).map((m) => m.name).join(', ');
-                if (others) {
-                    const who = document.createElement('span');
-                    who.className = 'party-picker__who';
-                    who.textContent = 'with ' + others;
-                    btn.appendChild(who);
-                }
-                btn.addEventListener('click', () => {
-                    p2pBridge.attachGame(gameId, p.id);
-                    overlay.remove();
-                });
-                sheet.appendChild(btn);
-            }
-            const skip = document.createElement('button');
-            skip.type = 'button';
-            skip.className = 'party-picker__skip';
-            skip.textContent = 'Not now — play solo';
-            skip.addEventListener('click', () => overlay.remove());
-            sheet.appendChild(skip);
-            overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
-            overlay.appendChild(sheet);
-            document.body.appendChild(overlay);
-        }
-
         // Event delegation: the grid is fetch-rendered from catalog.json after
         // this classic script runs, so per-button listeners can't be attached
         // at parse time. One listener on the container covers every button,
@@ -1655,7 +1632,6 @@
             // which happens after the POOL + ROUTER block wires showGame —
             // the null-check is belt and braces.
             if (window.__arcade.showGame) window.__arcade.showGame(btn.dataset.gameId, href, name);
-            maybeOfferPartyPicker(btn.dataset.gameId, name);
         });
 
         // ---- postMessage protocol (extracted) ----
@@ -2375,12 +2351,9 @@
         const dialogNew = document.getElementById('connections-dialog-new');
         const listHeading = document.getElementById('connections-dialog-list-heading');
         const list = document.getElementById('connections-dialog-list');
-        const partiesHeading = document.getElementById('connections-dialog-parties-heading');
-        const partiesList = document.getElementById('connections-dialog-parties');
         if (!nameInput || !menuBtn || !dialog || !list) return;
 
         let unsubStatus = null;
-        let unsubScope = null;
         // Linked-device rows are the manage surface: compact by default, tap
         // to open the actions. Remember which are open across the re-renders
         // every live status change triggers.
@@ -2429,118 +2402,6 @@
             paused: ['📵 Hung up', 'paused'],
             idle: ['', '']
         };
-
-        // ---- Parties (v1.13) ----
-        // The card's vertical hierarchy — leader first, members indented —
-        // IS the topology lesson; no diagrams, no transport vocabulary.
-        // Health is the existing dots only (🟢 live / 🟡 reconnecting; no
-        // dot when this device can't see that seat's health). Relay paths,
-        // fingerprints and the rest stay in the Connection log.
-        const MEMBER_DOT = { connected: '🟢', interrupted: '🟡' };
-        function buildPartyCard(party) {
-            const bridge = window.__arcade.p2p;
-            const card = document.createElement('div');
-            card.className = 'connections-row party-card';
-
-            for (const m of party.members) {
-                const row = document.createElement('div');
-                row.className = 'party-card__member' + (m.isLeader ? ' party-card__member--leader' : '');
-                const nameEl = document.createElement('span');
-                nameEl.className = 'party-card__member-name';
-                nameEl.textContent = (m.isLeader ? '👑 ' : '') + (m.isSelf ? 'This device' : (m.name || 'Unnamed device'));
-                row.appendChild(nameEl);
-                if (m.isLeader) {
-                    const tag = document.createElement('span');
-                    tag.className = 'party-card__leader-tag';
-                    tag.textContent = 'Party leader';
-                    row.appendChild(tag);
-                }
-                const dot = m.isSelf ? '🟢' : MEMBER_DOT[m.status];
-                if (dot) {
-                    const dotEl = document.createElement('span');
-                    dotEl.className = 'party-card__dot';
-                    dotEl.textContent = dot;
-                    row.appendChild(dotEl);
-                }
-                card.appendChild(row);
-            }
-
-            // Teaching moment: a member whose leader link is repairing
-            // learns WHY the party stalls — it runs through their device.
-            if (party.role === 'member' && party.status === 'interrupted') {
-                const note = document.createElement('div');
-                note.className = 'connections-row__meta';
-                note.textContent = 'Reconnecting to ' + party.leaderName + ' — the party runs through their device.';
-                card.appendChild(note);
-            }
-
-            // "Playing: …" — mounted games attached to THIS party.
-            const pool = window.__arcade.pool;
-            if (pool && bridge) {
-                const names = [];
-                for (const gid of pool.mountedGameIds()) {
-                    const gp = bridge.gameParty(gid);
-                    if (gp && gp.id === party.id) {
-                        const info = pool.getGameInfo(gid);
-                        names.push((info && info.name) || gid);
-                    }
-                }
-                if (names.length) {
-                    const playing = document.createElement('div');
-                    playing.className = 'connections-row__meta';
-                    playing.textContent = 'Playing: ' + names.join(', ');
-                    card.appendChild(playing);
-                }
-            }
-
-            const actions = document.createElement('div');
-            actions.className = 'connections-row__actions';
-            if (party.role === 'leader') {
-                // Only the leader's device can mint invites for this party —
-                // the caption teaches fact #2: new players scan the LEADER's
-                // screen.
-                const invite = document.createElement('button');
-                invite.type = 'button';
-                invite.className = 'connections-row__btn';
-                invite.textContent = '➕ Invite another player';
-                invite.title = 'New players scan your screen';
-                invite.addEventListener('click', () => {
-                    if (window.__arcade.openMultiplayerPanel) {
-                        window.__arcade.openMultiplayerPanel({ mode: 'host', partyId: party.id });
-                    }
-                });
-                actions.appendChild(invite);
-            }
-            const leave = document.createElement('button');
-            leave.type = 'button';
-            leave.className = 'connections-row__btn';
-            leave.textContent = party.role === 'leader' ? 'End party' : 'Leave party';
-            leave.addEventListener('click', async () => {
-                const msg = party.role === 'leader'
-                    ? "You're the party leader — leaving ends the party for everyone. End it?"
-                    : 'Leave the party? The others keep playing.';
-                if (!window.confirm(msg)) return;
-                leave.disabled = true;
-                try {
-                    const b = await window.__arcade.loadP2P();
-                    await b.leaveParty(party.id);
-                    toast(party.role === 'leader' ? 'Party ended.' : 'You left the party.');
-                } catch (e) {} finally { render(); }
-            });
-            actions.appendChild(leave);
-            card.appendChild(actions);
-            return card;
-        }
-
-        function renderParties() {
-            // Bridge not loaded → nothing can be live; the section hides.
-            const bridge = window.__arcade.p2p;
-            const parties = bridge ? bridge.partiesSnapshot() : [];
-            if (partiesHeading) partiesHeading.hidden = parties.length === 0;
-            if (!partiesList) return;
-            partiesList.innerHTML = '';
-            for (const p of parties) partiesList.appendChild(buildPartyCard(p));
-        }
 
         function buildRow(id, peer) {
             const displayName = peer.name || 'Unnamed device';
@@ -2830,7 +2691,6 @@
         }
 
         function render() {
-            renderParties();
             const known = readKnownPeers();
             const ids = Object.keys(known).sort((a, b) =>
                 Date.parse(known[b].lastConnectedAt || 0) - Date.parse(known[a].lastConnectedAt || 0));
@@ -2861,10 +2721,6 @@
                     if (dialog.hidden) return; // closed before it finished loading
                     render();
                     if (!unsubStatus) unsubStatus = b.onStatus(() => render());
-                    // Parties/attachments shift without an aggregate status
-                    // change (game attach, second party forming) — the scope
-                    // event covers those.
-                    if (!unsubScope) unsubScope = b.onScopeChange(() => render());
                 }).catch(() => {});
             }
             setTimeout(() => {
@@ -2875,7 +2731,6 @@
         function closeDialog() {
             dialog.hidden = true;
             if (unsubStatus) { unsubStatus(); unsubStatus = null; }
-            if (unsubScope) { unsubScope(); unsubScope = null; }
             hideRecoveryReveal(); // never leave the recovery code in the DOM
             closeLogDialog(); // never leave the log overlay orphaned on top
         }

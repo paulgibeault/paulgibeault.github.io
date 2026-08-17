@@ -17,6 +17,9 @@
  * doesn't want this link auto-healed. The actual teardown and the
  * rendezvous pause live in arcade-p2p.js's hangUpKnownPeer/callKnownPeer.
  *
+ * `party` is NOT in that shape any more — see the migration note in
+ * readKnownPeers.
+ *
  * `userPub`/`deviceCertIssuedAt`/`revoked` are the user-identity layer
  * (#32): userPub is the peer's user-level Ed25519 public key, pinned
  * TOFU-style on the first VERIFIED device cert (arcade-p2p.js owns the
@@ -40,7 +43,23 @@ export function readKnownPeers() {
     try {
         const raw = localStorage.getItem(KNOWN_PEERS_KEY);
         const obj = raw ? JSON.parse(raw) : null;
-        return (obj && typeof obj === 'object') ? obj : {};
+        if (!obj || typeof obj !== 'object') return {};
+        // Migration (2026-08): the v1.13 party model persisted `party:
+        // {key, role}` per device so a restart could re-group re-adopted
+        // links into their pre-restart party. Parties are gone
+        // (plans/tables-2026-08.md) and the field has no successor — open-game
+        // scopes are RAM-only and re-negotiated per session — so it is
+        // stripped on READ rather than migrated in a one-shot rewrite: every
+        // reader gets a clean record even on a device that never writes again,
+        // and a downgrade to an older build simply finds it missing and
+        // re-derives, which is the same thing that happens to a fresh install.
+        // Nothing else in the record is touched: pairings, names, sync/backup
+        // flags, revocations and user keys all survive untouched (D6).
+        for (const id of Object.keys(obj)) {
+            const rec = obj[id];
+            if (rec && typeof rec === 'object' && 'party' in rec) delete rec.party;
+        }
+        return obj;
     } catch (e) { return {}; }
 }
 

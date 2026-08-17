@@ -5,16 +5,24 @@
  * talks arcade:peer.* postMessages to the launcher, and the launcher calls
  * this bridge. Links are owned by the launcher and shared by every game.
  *
- * PARTIES (v1.13, plans/multi-party-2026-07.md): links group into disjoint
- * local parties (one ceremony-star each, per-party leader/member role — see
- * the transport's PARTIES comment). The bridge keeps DEVICE-level concerns
- * global (identity, knownPeers, sync/backup/revoke, rendezvous pairing) and
- * scopes GAME-level concerns per party: a running game attaches to exactly
- * one party (auto when a single party is live, else picker/SDK attach), and
- * its whole Arcade.peer.* surface — status, roster, send, presence, hub
- * caps, member→member addressing — reflects only that party. Frames never
- * cross parties. status()/connectedPeers() stay aggregate for the menu
- * badge; statusForGame()/rosterForGame() are the per-game views.
+ * OPEN-GAME SCOPES (plans/tables-2026-08.md, successor to the v1.13 party
+ * model): the bridge keeps DEVICE-level concerns global (identity,
+ * knownPeers, sync/backup/revoke, rendezvous pairing) and gates GAME-level
+ * traffic per link. Game g is OPEN on link L when both ends consented —
+ * proposed by an `invite`, agreed by an `accept`. `gameScopes` (gameId →
+ * Set(peerId)) is the whole model; it lives in RAM and dies with its links.
+ *
+ * The rule it exists to enforce (D1) runs in BOTH directions: an inbound
+ * frame for game g arriving on link L reaches the local iframe iff g is open
+ * on L, and an outbound send only travels links where g is open. The in-frame
+ * gameId is a SELECTOR among a link's open games, never a grant — a peer
+ * cannot reach a game by naming it. Nothing is ever forwarded between links
+ * (the transport has no relay left to ask; PROTOCOL §5.6), so every frame a
+ * game sees arrived on a direct link from the device it is attributed to.
+ *
+ * status()/connectedPeers() stay aggregate for the menu badge;
+ * statusForGame()/rosterForGame() are the per-game views, derived from the
+ * scope map rather than from a pre-declared grouping.
  *
  * Loaded on demand via import() from index.html:
  *   - when the user opens the Multiplayer menu item, or
@@ -25,6 +33,12 @@
  *   { arcade: 1, gameId, payload }        — a game's message, routed by gameId
  *   { arcade: 1, kind: 'identity', deviceId, name } — this device announcing
  *     itself once its data channel opens (see "known peers" below)
+ *   { arcade: 1, kind: 'scope', op, g }   — open-game scope negotiation:
+ *     op 'invite' proposes playing game `g` over this link, 'accept' agrees,
+ *     'decline' refuses silently, 'close' ends it. Same delivery rules as
+ *     'sync' (direct link + identity binding); carries NO top-level gameId
+ *     (the game id rides in `g`) so a pre-scope launcher drops it instead of
+ *     misrouting it into a game.
  *   { arcade: 1, kind: 'sync', ... }      — Arcade.sync launcher-level state
  *     replication (digest/req/diff; see arcade-sync.js). Accepted only from a
  *     DIRECT link with a completed identity binding — never relayed or
@@ -249,29 +263,14 @@ function aggregateStatus(mp) {
 // Terminal teardown and the rendezvous 'reconnecting' claim race on the same
 // event: hold a would-be drop to 'idle' for a beat so games never glimpse a
 // spurious 'idle' when an auto-reconnect is about to take over.
-// Deferred re-sweep of the party maps. Status events fire SYNCHRONOUSLY from
-// inside multi-step transport operations (closeParty tears links down one by
-// one, THEN sweeps stashes and collects the party record) — a sweep run
-// during the event sees the party still alive and never runs again. One
-// coalesced re-check after the current tick closes that gap.
-let partySweepTimer = null;
-function schedulePartySweep(mp) {
-    if (partySweepTimer) return;
-    partySweepTimer = setTimeout(() => {
-        partySweepTimer = null;
-        gcPartyState();
-        applyPartyStatuses(mp);
-    }, 0);
-}
-
 let idleHoldTimer = null;
 function applyStatus(mp) {
-    // Party bookkeeping rides the same funnel as the global status: collect
-    // dead parties' state first, then re-derive each survivor's held status
-    // — and re-check once the tick's transport operation has fully settled.
-    gcPartyState();
-    applyPartyStatuses(mp);
-    schedulePartySweep(mp);
+    // Per-game status rides the same funnel as the global one, so the two
+    // views can never drift. No sweep timer is needed here any more: a scope
+    // belongs to exactly one link, and a link's own terminal status event
+    // closes it before this runs — there is no multi-step teardown left whose
+    // intermediate state a sweep could misread (v1.13's closeParty was).
+    applyGameStatuses();
     const next = aggregateStatus(mp);
     if (idleHoldTimer) { clearTimeout(idleHoldTimer); idleHoldTimer = null; }
     if (next === 'idle' && (sdkStatus === 'connected' || sdkStatus === 'interrupted')) {
@@ -342,8 +341,6 @@ const presenceListeners = [];     // fn({gameId, deviceId, name, kind}) — remo
 // session goes fully idle, so a rendezvous repair can re-adopt it (seatReachable
 // gates any use of a binding whose link isn't currently live). A deliberate
 // hang-up / start-over forgets the seat outright via unbindDevice().
-// (indirectByParty below stays separate — it is keyed by party + relay TAG,
-// not peerId.)
 const seats = new Map();        // peerId → seat
 const deviceIndex = new Map();  // deviceId → peerId of its direct link
 function getSeat(peerId) {
@@ -357,73 +354,40 @@ function bindSeatDevice(peerId, deviceId) {
     deviceIndex.set(deviceId, peerId);
 }
 // Forget everything about one deviceId's seat (deliberate hang-up / start-over).
-// Also drops the persisted party-membership record (v1.13): the relationship
-// was ended on purpose, so no restart resume should re-group by it.
 function unbindDevice(deviceId) {
     const pid = deviceIndex.get(deviceId);
     deviceIndex.delete(deviceId);
-    if (pid !== undefined) seats.delete(pid);
-    const known = readKnownPeers();
-    if (known[deviceId] && known[deviceId].party) {
-        delete known[deviceId].party;
-        writeKnownPeers(known);
+    if (pid !== undefined) {
+        seats.delete(pid);
+        closeLinkScopes(pid, 'device unbound');
     }
 }
 
-// Devices known only THROUGH a party's leader (star topology): fellow
-// members, whose identity frames arrive hub-relayed. PER-PARTY (v1.13): a
-// relay tag is the hub-assigned peerId of the source LINK inside THAT party
-// (unforgeable by the sender — see the transport's relay loop), so the same
-// tag value in two parties names two different links. Used to (a) admit a
-// member's targeted send to a fellow member (routed via the hub), and (b)
-// attribute relayed frames to their true sender instead of the relaying hub.
-const indirectByParty = new Map(); // partyId → Map(deviceId → relay `from` tag)
-
-function indirectMapFor(partyId, create) {
-    let m = indirectByParty.get(partyId);
-    if (!m && create) { m = new Map(); indirectByParty.set(partyId, m); }
-    return m;
-}
-
 // Wire-level capabilities THIS bridge honors, announced in identity frames.
-// A member gates targeted sends on that party's HUB having announced
-// 'peer.sendTo': an older hub would neither honor noRelay (it would
-// blind-relay a private frame to every seat) nor forward member→member
-// targets — refusing locally is the only way the sender can keep its privacy
-// guarantee in a mixed-version party. PER-PARTY (v1.13): each member party
-// records what ITS hub link announced.
+// Nothing here is CONSUMED any more: the gate this list fed — a party member
+// refusing targeted sends until its hub announced 'peer.sendTo', because an
+// older hub would blind-relay a private frame to every seat — died with the
+// relay. It is still ANNOUNCED, because a pre-scope peer on the other end of
+// the link still runs that gate against us, and dropping the announcement
+// would make an older device refuse to send us anything private.
 const WIRE_CAPS = ['peer.sendTo'];
-const hubCapsByParty = new Map(); // partyId → Set(caps the party's hub announced)
 
-function hubCapsFor(partyId) {
-    return hubCapsByParty.get(partyId) || new Set();
-}
-
-// ---- parties (v1.13 bridge side) ------------------------------------------
-// The transport owns party OBJECTS (PeerManager.parties, RAM-only ids); the
-// bridge owns everything device- and game-facing about them:
-//   partyKeys/partyByKey — a persistent random key per party, written into
-//     knownPeers[dev].party = {key, role} on every identity bind so a restart
-//     resume can re-group re-adopted links into their original parties (the
-//     RAM partyId dies with the page; the key does not). `role` is THIS
-//     node's role in that party.
-//   gameParties — gameId → partyId attachment: a running game binds to
-//     exactly one party and its whole Arcade.peer.* surface reflects only
-//     that party. Auto-attach when exactly one live party exists; otherwise
-//     the launcher picker / SDK attach() decides. Remembered while the party
-//     lives — a party's death detaches its games (they fall back to 'idle',
-//     or auto-attach to the single survivor).
-//   partyStatuses — per-party SDK-vocabulary status with the same 1.5s
-//     idle-hold the global status uses (teardown and the rendezvous
-//     'reconnecting' claim race on one event; games must never glimpse a
-//     spurious 'idle' mid-repair).
-// Every map here has an explicit party-death story (gcPartyState below) —
-// the B-p2p-1 lesson: nothing may outlive the thing it describes.
-const partyKeys = new Map();    // partyId → persistent key
-const partyByKey = new Map();   // persistent key → partyId (this session)
-const gameParties = new Map();  // gameId → partyId
-const partyStatuses = new Map();// partyId → { status, holdTimer }
-const scopeListeners = [];      // fn() — parties/attachments/per-party status changed
+// ---- open-game scopes ------------------------------------------------------
+// gameScopes is the whole model: game g is open on link L iff
+// gameScopes.get(g).has(L). Keyed by transport peerId, deliberately — a scope
+// describes a LINK, so it must die exactly when that link does (B-p2p-1: a
+// binding that outlives the thing it describes is the stale-seat bug class).
+// A rendezvous repair re-adopts the SAME peerId, which is why an 'interrupted'
+// link keeps its scopes and a terminal death drops them.
+//
+// gameStatuses carries the per-game SDK-vocabulary status with the same 1.5s
+// idle-hold the global status uses: teardown and the rendezvous 'reconnecting'
+// claim race on one event, and a game must never glimpse a spurious 'idle'
+// mid-repair.
+const gameScopes = new Map();   // gameId → Set(peerId)
+const gameStatuses = new Map(); // gameId → { status, holdTimer }
+const scopeListeners = [];      // fn() — a scope opened/closed, or a per-game status flipped
+const gameInviteListeners = []; // fn({deviceId, name, gameId}) — a peer proposed a game
 
 let scopeTimer = null;
 function notifyScopeChange() {
@@ -434,135 +398,59 @@ function notifyScopeChange() {
     }, 0);
 }
 
-function randomPartyKey() {
-    return 'pk-' + randomDeviceId();
+/** Is game `gameId` open on link `peerId`? The D1 predicate, both directions. */
+function scopeOpen(gameId, peerId) {
+    const s = gameScopes.get(gameId);
+    return !!(s && peerId !== undefined && peerId !== null && s.has(peerId));
 }
 
-function ensurePartyKey(partyId) {
-    let key = partyKeys.get(partyId);
-    if (!key) {
-        key = randomPartyKey();
-        partyKeys.set(partyId, key);
-        partyByKey.set(key, partyId);
-    }
-    return key;
+/** The links a game may talk over — a copy, so callers can't mutate the set. */
+function scopeLinks(gameId) {
+    const s = gameScopes.get(gameId);
+    return s ? [...s] : [];
 }
 
-/**
- * Persists which party a known device's link belongs to (and this node's
- * role in it) so a rendezvous re-adoption after a full restart can land the
- * link back in its party (see adoptPartyIdFor). Written on every completed
- * identity bind; cleared by unbindDevice (deliberate hang-up/start-over —
- * the relationship itself was ended, nothing should resurrect its grouping).
- */
-function recordPartyMembership(deviceId, partyId) {
-    if (!addon) return;
-    const role = addon.peerNode.partyRole(partyId);
-    if (!role) return;
-    const key = ensurePartyKey(partyId);
-    const known = readKnownPeers();
-    const rec = known[deviceId];
-    if (!rec) return; // identity upsert writes the record first; nothing to annotate otherwise
-    if (rec.party && rec.party.key === key && rec.party.role === role) return;
-    rec.party = { key, role };
-    writeKnownPeers(known);
+function openScope(gameId, peerId, why) {
+    let s = gameScopes.get(gameId);
+    if (!s) { s = new Set(); gameScopes.set(gameId, s); }
+    if (s.has(peerId)) return false;
+    s.add(peerId);
+    ArcadeDiag.log('bridge', `scope OPEN ${gameId} on link ${peerId} (${why})`);
+    notifyScopeChange();
+    return true;
 }
 
-/**
- * The rendezvous adoptPartyId hook (v1.13): when a pair reconnects after a
- * full restart (no prior session to inherit a party from), answer which
- * party the adopted link belongs in. Only the LEADER side needs this — it
- * groups the re-adopted members of one pre-restart party into one led party
- * (two led parties must not coalesce). A member-side record returns null:
- * the core's host-typed fallback mints the (single-link) member party
- * correctly on its own.
- */
-function adoptPartyIdFor(deviceId) {
-    if (!addon) return null;
-    const rec = readKnownPeers()[deviceId];
-    const saved = rec && rec.party;
-    if (!saved || typeof saved.key !== 'string' || saved.role !== 'leader') return null;
-    const mapped = partyByKey.get(saved.key);
-    if (mapped && addon.peerNode.partyRole(mapped)) return mapped;
-    const partyId = addon.peerNode.createParty();
-    partyKeys.set(partyId, saved.key);
-    partyByKey.set(saved.key, partyId);
-    // Mirror what the core's own leader-side adoption fallback does for the
-    // first restored party, so legacy party-less consumers (the ceremony UI)
-    // keep operating on it.
-    if (!addon.peerNode.defaultPartyId) {
-        addon.peerNode.defaultPartyId = partyId;
-        addon.peerNode.isHost = true;
-    }
-    return partyId;
-}
-
-/** The partyId of a link (live entry first, then stash), or null. */
-function partyOfLink(peerId) {
-    return addon ? addon.peerNode.partyOf(peerId) : null;
+function closeScope(gameId, peerId, why) {
+    const s = gameScopes.get(gameId);
+    if (!s || !s.has(peerId)) return false;
+    s.delete(peerId);
+    if (!s.size) gameScopes.delete(gameId);
+    ArcadeDiag.log('bridge', `scope CLOSE ${gameId} on link ${peerId} (${why})`);
+    notifyScopeChange();
+    return true;
 }
 
 /**
- * Parties a game could attach to: at least one live link, or a stashed
- * session under active (non-paused) rendezvous repair. A stash-only party
- * whose peer hung up is a departure, not an attachable session — same rule
- * the roster applies per seat.
+ * Every scope a link holds dies with the link. Called from the terminal
+ * status branch and from unbindDevice — the two ways a link stops existing.
+ * An 'interrupted' link is a session under repair, NOT a dead one: its scopes
+ * stay so the game keeps queueing and resumes where it left off.
  */
-function livePartyIds() {
-    if (!addon) return [];
-    const known = readKnownPeers();
-    const out = [];
-    for (const p of addon.peerNode.statusSummary().parties) {
-        const peers = addon.peerNode.partyPeers(p.partyId);
-        const alive = peers.some((e) => {
-            if (e.live) return true;
-            if (!rdvReconnecting.has(e.peerId)) return false;
-            const dev = deviceIdForPeerId(e.peerId);
-            return !(dev && known[dev] && known[dev].paused);
-        });
-        if (alive) out.push(p.partyId);
-    }
-    return out;
+function closeLinkScopes(peerId, why) {
+    for (const gameId of [...gameScopes.keys()]) closeScope(gameId, peerId, why);
 }
 
-/**
- * The party a game's Arcade.peer.* surface reflects. A recorded attachment
- * holds while its party lives; an unattached game auto-attaches when exactly
- * ONE live party exists (today's single-party behavior, zero new UX). With
- * several live parties the game stays unattached — reads as 'idle' — until
- * the launcher picker or the SDK attach() hook decides.
- *
- * `commit` — whether the auto-attach may be RECORDED. Local callers (send,
- * announce, status/roster reads — all keyed by games actually mounted here)
- * commit; the wire paths (inbound game/presence gating) must not, or a peer
- * spraying made-up gameIds would grow the attachment map without bound. The
- * answer is identical either way — commit only affects memory.
- */
-function resolveGameParty(gameId, commit = true) {
-    if (!addon || typeof gameId !== 'string' || !gameId) return null;
-    const cur = gameParties.get(gameId);
-    if (cur !== undefined) {
-        if (addon.peerNode.partyRole(cur)) return cur;
-        gameParties.delete(gameId); // party died since — detach
-    }
-    const live = livePartyIds();
-    if (live.length === 1) {
-        if (commit) gameParties.set(gameId, live[0]);
-        return live[0];
-    }
-    return null;
-}
-
-/** Folds one party's links + repairing stashes into the SDK vocabulary. */
-function computePartyStatus(partyId) {
+/** Folds one game's scope links (and their repairing stashes) into the SDK vocabulary. */
+function computeGameStatus(gameId) {
     if (!addon) return 'idle';
     let connected = 0, interrupted = 0, pending = 0;
-    for (const p of addon.peerNode.partyPeers(partyId)) {
-        if (p.live) {
-            if (p.status === 'connected') connected++;
-            else if (p.status === 'interrupted') interrupted++;
+    for (const peerId of scopeLinks(gameId)) {
+        const live = addon.peerNode.linkStatus(peerId);
+        if (live) {
+            if (live === 'connected') connected++;
+            else if (live === 'interrupted') interrupted++;
             else pending++;
-        } else if (rdvReconnecting.has(p.peerId)) {
+        } else if (rdvReconnecting.has(peerId)) {
             interrupted++; // dead link mid-rendezvous-repair
         }
     }
@@ -572,36 +460,34 @@ function computePartyStatus(partyId) {
     return 'idle';
 }
 
-/** A party's HELD status (the applied value behind the idle-hold beat). */
-function partyStatusOf(partyId) {
-    const e = partyStatuses.get(partyId);
-    return e ? e.status : computePartyStatus(partyId);
+/** A game's HELD status (the applied value behind the idle-hold beat). */
+function gameStatusOf(gameId) {
+    const e = gameStatuses.get(gameId);
+    return e ? e.status : computeGameStatus(gameId);
 }
 
 /**
- * Re-derives every live party's held status. Runs on the same funnel as the
- * global status (applyStatus) so the two views can never drift. The per-party
+ * Re-derives every scoped game's held status. Runs on the same funnel as the
+ * global status (applyStatus) so the two views can never drift. The per-game
  * idle-hold mirrors the global one: a would-be drop to 'idle' from a live
  * session waits a beat for the rendezvous 'reconnecting' claim.
  */
-function applyPartyStatuses(mp) {
-    const alive = new Set();
-    for (const p of mp.peerNode.statusSummary().parties) alive.add(p.partyId);
-    for (const [pid, e] of partyStatuses) {
-        if (alive.has(pid)) continue;
+function applyGameStatuses() {
+    for (const [gameId, e] of gameStatuses) {
+        if (gameScopes.has(gameId)) continue;
         if (e.holdTimer) clearTimeout(e.holdTimer);
-        partyStatuses.delete(pid);
+        gameStatuses.delete(gameId);
         notifyScopeChange();
     }
-    for (const pid of alive) {
-        const next = computePartyStatus(pid);
-        let e = partyStatuses.get(pid);
-        if (!e) { e = { status: 'idle', holdTimer: null }; partyStatuses.set(pid, e); }
+    for (const gameId of gameScopes.keys()) {
+        const next = computeGameStatus(gameId);
+        let e = gameStatuses.get(gameId);
+        if (!e) { e = { status: 'idle', holdTimer: null }; gameStatuses.set(gameId, e); }
         if (e.holdTimer) { clearTimeout(e.holdTimer); e.holdTimer = null; }
         if (next === 'idle' && (e.status === 'connected' || e.status === 'interrupted')) {
             e.holdTimer = setTimeout(() => {
                 e.holdTimer = null;
-                const later = computePartyStatus(pid);
+                const later = computeGameStatus(gameId);
                 if (later !== e.status) { e.status = later; notifyScopeChange(); }
             }, 1500);
             continue;
@@ -610,57 +496,74 @@ function applyPartyStatuses(mp) {
     }
 }
 
+/** Sends one scope-negotiation frame on a single link. */
+function sendScopeOp(peerId, op, gameId) {
+    if (!addon) return false;
+    return addon.sendTo(peerId, { arcade: 1, kind: 'scope', op, g: gameId }) === true;
+}
+
 /**
- * Party-death sweeper (the B-p2p-1 story for every per-party map): when the
- * transport collects a party, its hub caps, indirect addressing, key mapping
- * and game attachments must die with it — a binding that outlives the thing
- * it describes is exactly the stale-seat bug class.
+ * One inbound scope frame from an identity-bound direct link.
+ *
+ *   invite  — a proposal. NOT self-answering: the launcher asks the user
+ *             ("⟨name⟩ wants to play ⟨game⟩") and calls acceptGameInvite /
+ *             declineGameInvite. Consent is per-connection (D3), so an
+ *             already-open scope makes this a no-op rather than a re-prompt.
+ *   accept  — they agreed to a proposal. Opening on THIS side is what makes
+ *             the scope symmetric; the presence announce that follows is what
+ *             fires onReady on both ends, with no new machinery (D3).
+ *   decline — silence. Deliberately no listener: a refusal that notifies is a
+ *             refusal that pressures, and the inviter learns nothing about
+ *             whether the other device is even mounted.
+ *   close   — they left the game. Ends it on this link only; every other link
+ *             with the same game open is untouched.
  */
-function gcPartyState() {
-    if (!addon) return;
-    let changed = false;
-    const tracked = new Set([
-        ...hubCapsByParty.keys(), ...indirectByParty.keys(), ...partyKeys.keys()
-    ]);
-    for (const partyId of tracked) {
-        if (addon.peerNode.partyRole(partyId)) continue; // still alive
-        hubCapsByParty.delete(partyId);
-        indirectByParty.delete(partyId);
-        const key = partyKeys.get(partyId);
-        if (key !== undefined) {
-            partyKeys.delete(partyId);
-            if (partyByKey.get(key) === partyId) partyByKey.delete(key);
-        }
-        changed = true;
+function handleScopeOp(peerId, deviceId, op, gameId) {
+    if (op === 'close') {
+        closeScope(gameId, peerId, `closed by ${deviceId}`);
+        applyGameStatuses();
+        return;
     }
-    for (const [gameId, partyId] of gameParties) {
-        if (!addon.peerNode.partyRole(partyId)) {
-            gameParties.delete(gameId);
-            changed = true;
-        }
+    if (op === 'decline') {
+        ArcadeDiag.log('bridge', `invite for ${gameId} declined by ${deviceId}`);
+        return;
     }
-    if (changed) notifyScopeChange();
+    if (op === 'accept') {
+        if (openScope(gameId, peerId, `accepted by ${deviceId}`)) {
+            applyGameStatuses();
+            // Tell them this game is mounted and listening here, now that the
+            // scope admits the frame — their onReady fires off the back of it.
+            ArcadeP2P.announceGame(gameId, false);
+        }
+        return;
+    }
+    // op === 'invite'
+    if (scopeOpen(gameId, peerId)) return;
+    ArcadeDiag.log('bridge', `invite for ${gameId} from ${deviceId}`);
+    const known = readKnownPeers();
+    const name = (known[deviceId] && known[deviceId].name) || 'Unnamed device';
+    for (const fn of gameInviteListeners) {
+        try { fn({ deviceId, name, gameId }); } catch (e) {}
+    }
 }
 
 function identityFrame() {
     return { arcade: 1, kind: 'identity', deviceId: getMyDeviceId(), name: getMyDeviceName(), caps: WIRE_CAPS };
 }
 
-// Announce our identity into ONE party — the party of the link that
-// triggered the announce — with the user-identity extras (#32) attached when
-// one is set up. A party-scoped broadcast (not a targeted send) on purpose:
-// the frame must reach the hub WITHOUT noRelay so the hub fans it to the
-// party's other members (that relay IS the identity-gossip mechanism fellow
-// members learn us by), while other parties' links hear nothing — a
-// device-level announce is idempotent, but spraying it across every party on
-// every new link inflates their records for no benefit (v1.13). A link with
-// no party (hand-rolled legacy state) falls back to the node-wide send.
+// Announce our identity ON ONE LINK — the one that triggered the announce —
+// with the user-identity extras (#32) attached when one is set up. A TARGETED
+// send now (v1.14): identity is a per-link introduction, and there is no hub
+// left to gossip it onward, so spraying it across every link would only
+// inflate records for no benefit. `noRelay` rides along for free, which also
+// stops a pre-scope hub on the far end from fanning our identity into a party
+// we know nothing about.
 // Async because the device cert is an Ed25519 signature; the frame goes out
 // a microtask later than the sync version did, which is invisible at
 // data-channel timescales. Callers mark seat.announced BEFORE calling (same
 // discipline as before), so no double-announce is possible. Resolves true
-// when the frame was sent/queued on at least one link — a false return means
-// the announce is LOST unless the caller retries (field report 2026-07-17: a
+// when the frame was sent/queued on that link — a false return means the
+// announce is LOST unless the caller retries (field report 2026-07-17: a
 // host that never received the joiner's announce never records the peer,
 // silently and permanently).
 async function sendIdentity(mp, peerId) {
@@ -670,42 +573,13 @@ async function sendIdentity(mp, peerId) {
         if (extras) frame.uid = extras;
     } catch (e) {} // extras are strictly optional — announce plain
     try {
-        const partyId = mp.peerNode.partyOf(peerId);
-        if (partyId) {
-            return mp.peerNode.broadcast(
-                { text: JSON.stringify(frame), from: mp.peerNode.myId }, null, { partyId }) === true;
-        }
-        return mp.send(frame) === true;
+        return mp.sendTo(peerId, frame) === true;
     } catch (e) { return false; }
 }
 
 function deviceIdForPeerId(peerId) {
     const s = seats.get(peerId);
     return s ? s.deviceId : null;
-}
-
-// Relay tags are scoped to the party the frame arrived in (v1.13): the same
-// tag value in two parties names two different hub-side links, so the lookup
-// must never cross parties.
-function deviceIdForRelayFrom(partyId, from) {
-    if (typeof from !== 'string') return null;
-    const m = indirectByParty.get(partyId);
-    if (!m) return null;
-    for (const [devId, tag] of m) {
-        if (tag === from) return devId;
-    }
-    return null;
-}
-
-// The device a frame's arrival link attributes it to: a relayed frame names
-// its relay tag's owner within the ARRIVAL party (the true sender, not the
-// relaying hub); a direct frame names the link's identity binding. Shared by
-// the game-message and presence paths so attribution hardening can never
-// drift between them.
-function linkSenderDeviceId(d) {
-    return d.relayed
-        ? deviceIdForRelayFrom(partyOfLink(d.peerId), d.from)
-        : deviceIdForPeerId(d.peerId);
 }
 
 // Is a transport peerId still a reachable seat? Live in `peers`, or stashed
@@ -813,10 +687,14 @@ function rosterSnapshot() {
                 deviceId,
                 name: (known[deviceId] && known[deviceId].name) || 'Unnamed device',
                 status,
-                direct: true,
-                // The party this seat's link belongs to (v1.13) — additive:
-                // menu consumers ignore it, rosterForGame filters by it.
-                partyId: addon.peerNode.partyOf(peerId)
+                // Every entry is direct, and there may be several. That is the
+                // whole roster contract games are promised now — the indirect
+                // (through-a-hub) seats went with the relay, so `direct` is a
+                // constant rather than a discriminator. It stays in the shape
+                // because games branch on it: the fleet's multi-seat game
+                // gates authenticity on "from a device we hold a direct link
+                // to, and not relayed", and that check should keep running.
+                direct: true
             });
         }
     }
@@ -1089,30 +967,25 @@ function setStatus(next) {
     ArcadeDiag.log('bridge', `status ${sdkStatus} → ${next}`);
     sdkStatus = next;
     // 'idle' means the session truly ended (a rendezvous repair holds
-    // 'interrupted', never 'idle') — seats, indirect (through-the-hub)
-    // addressing, per-party hub caps, party statuses and game attachments
-    // all die with it. Identities re-announce on the next session. Clearing
-    // the seats too stops departed-seat bindings from lingering past the
-    // session (B-p2p-1). The persistent party records in knownPeers survive
-    // on purpose — they are what a restart resume re-groups links by.
+    // 'interrupted', never 'idle') — seats and open-game scopes die with it.
+    // Identities re-announce on the next session, and a game is re-invited
+    // like any other: consent does not survive the session it was given in.
+    // Clearing the seats too stops departed-seat bindings from lingering past
+    // the session (B-p2p-1).
     if (next === 'idle') {
         const hadLinks = deviceIndex.size > 0;
         seats.clear();
         deviceIndex.clear();
-        indirectByParty.clear();
         identityReqSentAt.clear();
         identityReqServedAt.clear();
-        hubCapsByParty.clear();
-        for (const e of partyStatuses.values()) {
+        for (const e of gameStatuses.values()) {
             if (e.holdTimer) clearTimeout(e.holdTimer);
         }
-        partyStatuses.clear();
-        partyKeys.clear();
-        partyByKey.clear();
-        const hadGames = gameParties.size > 0;
-        gameParties.clear();
+        gameStatuses.clear();
+        const hadScopes = gameScopes.size > 0;
+        gameScopes.clear();
         if (hadLinks) notifyRosterChange();
-        if (hadLinks || hadGames) notifyScopeChange();
+        if (hadLinks || hadScopes) notifyScopeChange();
     }
     syncWakeLock();
     for (const fn of statusListeners) {
@@ -1231,6 +1104,14 @@ async function ensureAddon() {
                 const seat = seats.get(peerId);
                 if (seat) { seat.announced = false; seat.minted = false; }
                 forgetIdentityThrottles(peerId);
+                // Nothing outlives its link: every game this link had open
+                // closes here. The binding survives for a repair, the CONSENT
+                // does not — a re-adopted link is re-invited, which is also
+                // the only way the far end can agree again (it ran this same
+                // branch). 'interrupted' deliberately does NOT reach here: a
+                // session under repair keeps its scopes and queues.
+                closeLinkScopes(peerId, 'link died');
+                applyGameStatuses();
             }
         });
 
@@ -1269,18 +1150,30 @@ async function ensureAddon() {
             if (!d.relayed && shape.kind !== 'identity' && !deviceIdForPeerId(d.peerId)) {
                 requestIdentityIfUnbound(mp, d.peerId);
             }
+            if (shape.kind === 'scope') {
+                // Open-game scope negotiation (D4). Same delivery rules as
+                // 'sync': direct link only, identity binding required — the
+                // prompt names a device, so an unattributable proposal is
+                // worthless, and consent must attach to a device the user can
+                // recognize.
+                if (d.relayed) return;
+                const scopeDev = deviceIdForPeerId(d.peerId);
+                if (!scopeDev) return;
+                handleScopeOp(d.peerId, scopeDev, env.op, env.g);
+                return;
+            }
             if (shape.kind === 'presence') {
                 // The remote launcher says a game with this gameId is mounted
-                // and listening over there.
-                // Party gate (v1.13): presence only concerns the game attached
-                // to the ARRIVAL party (auto-attaching it when this is the
-                // only live party) — a game playing in party A must not get a
-                // ready signal because someone in party B mounted it.
-                const presParty = mp.peerNode.partyOf(d.peerId);
-                if (presParty && resolveGameParty(env.gameId, false) !== presParty) return;
-                // Relayed presence originated at a fellow member — attribute
-                // it via the relay tag, not the link (which names the hub).
-                const presDeviceId = linkSenderDeviceId(d);
+                // and listening over there. Scope gate (D1): presence is the
+                // signal onReady rides, so it obeys the same admission rule as
+                // a game frame — a game the peer never opened with us must not
+                // produce a ready event, however loudly they announce it.
+                if (d.relayed) return;
+                if (!scopeOpen(env.gameId, d.peerId)) {
+                    ArcadeDiag.log('bridge', `dropped presence for ${env.gameId} from ${d.peerId}: not open on this link`);
+                    return;
+                }
+                const presDeviceId = deviceIdForPeerId(d.peerId);
                 const knownNow = readKnownPeers();
                 const presName = (presDeviceId && knownNow[presDeviceId] && knownNow[presDeviceId].name)
                     || 'Unnamed device';
@@ -1350,78 +1243,48 @@ async function ensureAddon() {
                 return;
             }
             if (shape.kind === 'game') {
-                // A game's message. Route by gameId, attributing the sending
-                // device when its identity handshake has completed. Relay/
-                // forward AUTHORITY is per-party (v1.13): it comes from the
-                // ARRIVAL link's party role, never a node-global flag — this
-                // node may lead the arrival party while a member elsewhere.
-                const arrivalParty = mp.peerNode.partyOf(d.peerId);
-                const leadsArrival = arrivalParty
-                    ? mp.peerNode.partyRole(arrivalParty) === 'leader'
-                    : mp.peerNode.isHost; // hand-rolled legacy links only
-                // `fromDevice` is a HUB-stamped attribution on frames the hub
-                // bridge forwards member→member. A sender-supplied value must
-                // never survive the hub, or a member could impersonate any
-                // device on frames the hub passes along.
-                if (leadsArrival) delete env.fromDevice;
-                if (typeof env.to === 'string' && env.to !== getMyDeviceId()) {
-                    // Addressed to someone else. As the arrival party's hub,
-                    // forward it down the addressee's direct link (stamping
-                    // the true sender) — but only INSIDE that party: a
-                    // member of party A must not reach a device it can name
-                    // in party B through us (relay never crosses parties).
-                    // Any other arrival is an old host's blind relay of a
-                    // targeted frame — drop it, never dispatch locally.
-                    // A sender with no completed identity is never forwarded:
-                    // an anonymous targeted frame would reach the addressee
-                    // attributable to nobody — and (before the fromDevice-key
-                    // check below existed) could read as hub-authored.
-                    if (leadsArrival && deviceIndex.has(env.to)) {
-                        const destLink = deviceIndex.get(env.to);
-                        if (mp.peerNode.partyOf(destLink) === arrivalParty && seatReachable(destLink)) {
-                            const senderDev = deviceIdForPeerId(d.peerId);
-                            if (senderDev) {
-                                env.fromDevice = senderDev;
-                                mp.sendTo(destLink, env);
-                            }
-                        }
-                    }
+                // A game's message. THE D1 GATE: it reaches the local iframe
+                // iff its gameId is OPEN ON THIS LINK. Scope is the authority
+                // and the in-frame gameId is only a selector among the games
+                // this link already agreed to — a peer naming a game we never
+                // opened with them gets a diag line, not a delivery.
+                if (!scopeOpen(env.gameId, d.peerId)) {
+                    ArcadeDiag.log('bridge', `dropped game frame for ${env.gameId} from ${d.peerId}: not open on this link`);
                     return;
                 }
-                // Attribution, in trust order: a hub-forwarded frame carries
-                // the hub's stamp (only believed on a link we do NOT lead —
-                // i.e. our hub); a transport-relayed broadcast resolves via
-                // its relay tag within the arrival party (the true sender,
-                // not the relaying hub); a direct frame resolves via its
-                // identity binding. The mere PRESENCE of a fromDevice key
-                // marks a forward — even a null/malformed one must not fall
-                // through to the direct-link (hub) attribution, or a
-                // forwarded frame could read as hub-authored.
-                let fromDeviceId = null;
-                let hostForwarded = false;
-                if (!leadsArrival && !d.relayed && 'fromDevice' in env) {
-                    hostForwarded = true;
-                    if (isDeviceId(env.fromDevice)) {
-                        fromDeviceId = env.fromDevice;
-                    }
-                } else {
-                    fromDeviceId = linkSenderDeviceId(d);
+                // A frame stamped `relayed` came through a pre-1.14 hub, so it
+                // did NOT originate from this link's partner — refuse it
+                // rather than attribute it to the device we do hold this link
+                // to. Same rule as sync/backup/revoke; nothing legitimately
+                // arrives this way any more (PROTOCOL §5.6).
+                if (d.relayed) {
+                    ArcadeDiag.log('bridge', `dropped a relayed game frame for ${env.gameId} from ${d.peerId}: nothing relays any more`);
+                    return;
                 }
-                // Party gate (v1.13): a frame reaches only the game attached
-                // to its arrival party. An unattached game auto-attaches when
-                // this is the sole live party (single-party behavior); a game
-                // attached elsewhere — or unattached among several parties —
-                // never hears cross-party traffic.
-                if (arrivalParty && resolveGameParty(env.gameId, false) !== arrivalParty) return;
-                // meta is derived, not carried: a frame is only dispatched
-                // when unaddressed ('all') or addressed to this device
-                // ('me'); relayed covers both transport relays and
-                // hub-bridge forwards — "did NOT arrive from my direct
-                // link partner", which is what spoof checks care about.
+                // `fromDevice` was the hub's attribution stamp on a forwarded
+                // frame. There is no forwarding, so its presence means the
+                // sender is trying to author the attribution — drop the key
+                // and attribute by the link, which cannot be forged.
+                delete env.fromDevice;
+                // Addressed to someone else: with no forwarding path there is
+                // nothing to do but drop it. It is never dispatched locally —
+                // a private frame for another device must not surface here
+                // merely because we can see it.
+                if (typeof env.to === 'string' && env.to !== getMyDeviceId()) {
+                    ArcadeDiag.log('bridge', `dropped a game frame addressed to ${env.to}: frames are never forwarded`);
+                    return;
+                }
+                // meta is derived, not carried. `relayed` is now always false
+                // by construction (the two ways it could be true — a
+                // transport relay and a hub forward — are both gone, and a
+                // frame claiming it was refused above). It stays in the shape
+                // because games spoof-check on it, and that check should keep
+                // running as defense in depth.
                 const meta = {
-                    relayed: !!d.relayed || hostForwarded,
+                    relayed: false,
                     to: typeof env.to === 'string' ? 'me' : 'all'
                 };
+                const fromDeviceId = deviceIdForPeerId(d.peerId);
                 for (const fn of messageListeners) {
                     try { fn(env.gameId, env.payload, fromDeviceId, meta); } catch (err) {}
                 }
@@ -1450,54 +1313,17 @@ async function ensureAddon() {
             finishIdentityBranch(mp, d, env, recordPeerIdentity(env.deviceId, env.name, fp));
         });
 
-        // Everything after an identity frame's upsert: relay bookkeeping,
-        // seat binding, roster, pause-clear, suspect marking, pairing mint.
-        // Extracted verbatim from the listener so the cross-signed (async)
-        // and plain (sync) arrival paths above cannot drift apart.
+        // Everything after an identity frame's upsert: seat binding, roster,
+        // pause-clear, suspect marking, pairing mint. Extracted verbatim from
+        // the listener so the cross-signed (async) and plain (sync) arrival
+        // paths above cannot drift apart.
+        //
+        // The v1.13 relayed-identity branch is gone with the relay: a device
+        // learned only THROUGH a hub could be named but not reached, which is
+        // exactly the asymmetry the field test surfaced. An identity now binds
+        // on the direct link it arrived on, or not at all.
         function finishIdentityBranch(mp, d, env, detail) {
             if (!detail) return; // bind nothing
-            const identParty = mp.peerNode.partyOf(d.peerId);
-            const memberOfArrival = identParty
-                ? mp.peerNode.partyRole(identParty) === 'member'
-                : !mp.peerNode.isHost; // hand-rolled legacy links only
-            if (d.relayed && memberOfArrival && typeof d.from === 'string'
-                    && env.deviceId !== getMyDeviceId()) {
-                // A fellow member, reachable only through the arrival party's
-                // hub. The relay tag is hub-stamped (the source link's
-                // peerId), so a member cannot claim someone else's tag — but
-                // it CAN claim someone else's deviceId; the tag binding at
-                // least keeps its frames attributed to the one link they
-                // actually arrive from. The tag is recorded PER-PARTY
-                // (v1.13): it only ever addresses/attributes within the
-                // party it arrived in.
-                // (A party's hub never takes this branch for that party: it
-                // holds direct links to everyone in it, and the transport
-                // strips any forged inbound `relayed` flag before dispatch.)
-                // A relayed identity must never override a LIVE direct binding:
-                // otherwise a member could relay-claim a directly-connected
-                // peer's deviceId and steal its broadcast attribution (S-sec-2).
-                // Strict live-link check so a stale binding doesn't wrongly block
-                // a legitimate relayed (re)appearance.
-                if (deviceIndex.has(env.deviceId) && mp.peerNode.hasLink(deviceIndex.get(env.deviceId))) {
-                    ArcadeDiag.log('bridge', `ignored relayed identity for ${env.deviceId}: already a live direct seat`);
-                    return;
-                }
-                const im = indirectMapFor(identParty, true);
-                const firstSighting = !im.has(env.deviceId);
-                im.set(env.deviceId, d.from);
-                if (firstSighting) {
-                    // Identity gossip: this device announced itself when ITS
-                    // link connected — a member arriving later never heard
-                    // it. First sighting of a newcomer ⇒ re-broadcast our
-                    // identity once into THIS party; the hub relays it to
-                    // them, making party knowledge symmetric (they can
-                    // target us and attribute our broadcasts). Converges in
-                    // one round: their identity is already recorded here, so
-                    // their handler's own first-sighting re-announce (of us)
-                    // finds nothing new on this side.
-                    sendIdentity(mp, d.peerId);
-                }
-            }
             if (!d.relayed) {
                 // Refuse to rebind a deviceId whose CURRENT link is still LIVE (a
                 // real peer entry, connected or interrupted): a direct peer
@@ -1514,19 +1340,6 @@ async function ensureAddon() {
                     return;
                 }
                 bindSeatDevice(d.peerId, env.deviceId);
-                // On a party we're a member of, the direct link IS that
-                // party's hub — record which wire capabilities it announced
-                // (empty for an older host, which gates targeted sends off;
-                // see WIRE_CAPS). Per-party (v1.13): another party's hub
-                // caps say nothing about this one.
-                if (identParty && memberOfArrival) {
-                    hubCapsByParty.set(identParty, new Set(Array.isArray(env.caps)
-                        ? env.caps.filter((c) => typeof c === 'string') : []));
-                }
-                // Persist which party this device's link lives in (and our
-                // role there) so a restart resume can re-group re-adopted
-                // links — see adoptPartyIdFor.
-                if (identParty) recordPartyMembership(env.deviceId, identParty);
                 // A direct identity binding is a roster join (or a rename —
                 // recordPeerIdentity above already upserted the name).
                 notifyRosterChange();
@@ -1567,13 +1380,7 @@ async function ensureAddon() {
         // (v1.10) means the episode went QUIET — games release the session,
         // but the pair stays subscribed and reachable, so a much later
         // 'reconnected' with no fresh 'reconnecting' in between is normal.
-        rdv = new RendezvousManager(mp.peerNode, {
-            carrierFactory: rdvCarrierFactory,
-            // Restart-resume party continuity (v1.13): pairIds ARE deviceIds
-            // on this bridge, so the persisted knownPeers party record can
-            // re-group a re-adopted link into its pre-restart party.
-            adoptPartyId: (pairId) => adoptPartyIdFor(pairId)
-        });
+        rdv = new RendezvousManager(mp.peerNode, { carrierFactory: rdvCarrierFactory });
         // Which build produced this log? Answer it up front: stale-cache
         // sessions are indistinguishable from real bugs without this line.
         ArcadeDiag.log('rdv', `build ${RDV_BUILD}`);
@@ -1686,9 +1493,10 @@ export const ArcadeP2P = {
      * Subscribe to inbound game messages: fn(gameId, payload, fromDeviceId,
      * meta). fromDeviceId is the sending device's stable id (null until its
      * identity handshake completes — a beat after 'connected'). meta is
-     * { relayed, to }: relayed=true when the frame did NOT arrive from this
-     * device's direct link partner (transport relay or host-bridge forward);
-     * to is 'me' for targeted frames, 'all' for broadcasts.
+     * { relayed, to }: `relayed` is always false now (nothing forwards, and a
+     * frame claiming otherwise is refused before it gets here) and stays in
+     * the shape so a game's spoof check keeps running; `to` is 'me' for
+     * targeted frames, 'all' for scope broadcasts.
      */
     onMessage(fn) {
         messageListeners.push(fn);
@@ -1829,22 +1637,19 @@ export const ArcadeP2P = {
     },
 
     /**
-     * Tell the remote launchers of this game's ATTACHED PARTY (v1.13) that a
-     * game with this gameId is mounted and listening here. isAck answers a
-     * received 'presence' (no further reply, so the two-frame exchange
-     * terminates). Returns false when the game has no live attached party —
-     * presence, like game frames, never crosses parties.
+     * Tell the launchers this game is OPEN WITH that a game with this gameId
+     * is mounted and listening here. isAck answers a received 'presence' (no
+     * further reply, so the two-frame exchange terminates). Returns false
+     * when the game has no open scope — presence obeys the same admission
+     * rule as a game frame, in both directions.
      */
     announceGame(gameId, isAck) {
         if (!addon) return false;
         if (typeof gameId !== 'string' || !gameId) return false;
-        const partyId = resolveGameParty(gameId);
-        if (!partyId) return false;
-        const ps = partyStatusOf(partyId);
-        if (ps !== 'connected' && ps !== 'interrupted') return false;
+        const links = scopeLinks(gameId).filter((pid) => seatReachable(pid));
+        if (!links.length) return false;
         const env = { arcade: 1, kind: isAck ? 'presence-ack' : 'presence', gameId };
-        addon.peerNode.broadcast(
-            { text: JSON.stringify(env), from: addon.peerNode.myId }, null, { partyId });
+        for (const pid of links) addon.sendTo(pid, env);
         return true;
     },
 
@@ -1880,115 +1685,130 @@ export const ArcadeP2P = {
     },
 
     /**
-     * Per-game status (v1.13): the SDK-vocabulary status of the game's
-     * attached party — 'idle' for a game with no live attached party. When a
-     * single party exists this equals status(); with several, each game sees
-     * only its own table. The menu badge keeps using status() (aggregate).
+     * Per-game status: folded from the links this game is OPEN on — 'idle'
+     * for a game with no open scope, whatever else this device is connected
+     * to. The menu badge keeps using status() (aggregate across every link,
+     * game or no game).
      */
     statusForGame(gameId) {
-        const partyId = resolveGameParty(gameId);
-        return partyId ? partyStatusOf(partyId) : 'idle';
+        return gameStatusOf(gameId);
     },
 
     /**
-     * Per-game roster (v1.13): connectedPeers() filtered to the game's
-     * attached party — the seats its Arcade.peer surface may see. Empty for
-     * a game with no live attached party.
+     * Per-game roster: connectedPeers() filtered to the devices this game is
+     * open with — the seats its Arcade.peer surface may see. Empty for a game
+     * with no open scope.
+     *
+     * THE CONTRACT GAMES GET: every entry is `direct: true`, and there may be
+     * more than one. A multi-seat game must NAME the peer it treats as host
+     * rather than assume the single entry is one — the fleet's flagship
+     * multiplayer game was already written for exactly this shape, which is
+     * why it needs no change here (GAME_INTEGRATION.md quotes its own comment
+     * about one direct peer no longer being the only shape).
      */
     rosterForGame(gameId) {
-        const partyId = resolveGameParty(gameId);
-        if (!partyId) return [];
-        return rosterSnapshot().filter((e) => e.partyId === partyId);
+        const links = new Set(scopeLinks(gameId));
+        if (!links.size) return [];
+        return rosterSnapshot().filter((e) => links.has(deviceIndex.get(e.deviceId)));
     },
 
     /**
-     * Live parties a game could attach to (v1.13):
-     * [{id, role, leaderName, status, peers, members}]. role is THIS
-     * device's role; leaderName names the party for humans ("Dana's party"
-     * — the leader's device name, ours when we lead). peers counts
-     * identity-bound seats. members is the launcher's render-ready
-     * hierarchy, LEADER FIRST — [{deviceId, name, status, isLeader,
-     * isSelf}] — because the vertical order IS how the UI teaches "the
-     * party happens through the leader's device". status is 'connected' |
-     * 'interrupted' for seats whose health this device can actually see
-     * (its own direct links, and itself), null for fellow members known
-     * only through the hub — their health is the hub's knowledge, not
-     * ours, and the UI shows no dot rather than a guessed one.
+     * Propose playing `gameId` (D4) — the launcher's invite door. With no
+     * `to`, proposes to EVERY live identity-bound connection that doesn't
+     * already have this game open (the host-side door: no picker, because the
+     * pick that matters happens at the game's own lobby). With a `to`
+     * deviceId, proposes to that one connection (the joiner-side knock).
+     *
+     * Returns how many proposals went out. Zero means there was nobody to ask
+     * — the caller offers the pairing ceremony instead.
      */
-    partiesSnapshot() {
-        if (!addon) return [];
-        const known = readKnownPeers();
-        const roster = rosterSnapshot();
-        const self = { deviceId: getMyDeviceId(), name: getMyDeviceName(), status: 'connected', isSelf: true };
-        return livePartyIds().map((partyId) => {
-            const role = addon.peerNode.partyRole(partyId);
-            const partyRoster = roster.filter((e) => e.partyId === partyId);
-            const seat = (e) => ({ deviceId: e.deviceId, name: e.name, status: e.status, isLeader: false, isSelf: false });
-            let leaderName, members;
-            if (role === 'leader') {
-                leaderName = self.name;
-                members = [{ ...self, isLeader: true }, ...partyRoster.map(seat)];
-            } else {
-                const hub = addon.peerNode.hubLinkId(partyId);
-                const hubDev = hub ? deviceIdForPeerId(hub) : null;
-                leaderName = (hubDev && known[hubDev] && known[hubDev].name) || 'Unnamed device';
-                const hubEntry = partyRoster.find((e) => e.deviceId === hubDev);
-                members = [
-                    { deviceId: hubDev, name: leaderName, status: hubEntry ? hubEntry.status : null, isLeader: true, isSelf: false },
-                    { ...self, isLeader: false }
-                ];
-                const im = indirectByParty.get(partyId);
-                if (im) for (const dev of im.keys()) {
-                    members.push({ deviceId: dev, name: (known[dev] && known[dev].name) || 'Unnamed device', status: null, isLeader: false, isSelf: false });
-                }
+    inviteGame(gameId, to) {
+        if (!addon || typeof gameId !== 'string' || !gameId) return 0;
+        const targets = [];
+        for (const [deviceId, peerId] of deviceIndex) {
+            if (to !== undefined && deviceId !== to) continue;
+            if (!seatReachable(peerId) || scopeOpen(gameId, peerId)) continue;
+            targets.push([deviceId, peerId]);
+        }
+        let sent = 0;
+        for (const [deviceId, peerId] of targets) {
+            if (sendScopeOp(peerId, 'invite', gameId)) {
+                sent++;
+                ArcadeDiag.log('bridge', `invited ${deviceId} to play ${gameId}`);
             }
-            return {
-                id: partyId, role, leaderName,
-                status: partyStatusOf(partyId),
-                peers: partyRoster.length,
-                members
-            };
-        });
+        }
+        return sent;
     },
 
     /**
-     * Attach a game to one live party (v1.13) — the launcher picker's and
-     * the SDK attach() hook's write path. Remembered while the party lives;
-     * the game's status/roster/send surface flips to that party immediately.
-     * Returns false for an unknown or dead party.
+     * Answer an inbound invite (see onGameInvite). Accepting opens the scope
+     * on THIS side and tells the inviter, whose own accept branch opens it on
+     * theirs — the two halves are what make it symmetric. Declining sends a
+     * 'decline' and records nothing: consent is per-invite, so the same peer
+     * may propose the same game again later.
      */
-    attachGame(gameId, partyId) {
+    acceptGameInvite(deviceId, gameId) {
         if (!addon || typeof gameId !== 'string' || !gameId) return false;
-        if (typeof partyId !== 'string' || !addon.peerNode.partyRole(partyId)) return false;
-        if (!livePartyIds().includes(partyId)) return false;
-        if (gameParties.get(gameId) === partyId) return true;
-        gameParties.set(gameId, partyId);
-        ArcadeDiag.log('bridge', `game ${gameId} attached to party ${partyId}`);
-        notifyScopeChange();
-        // Presence into the new party: without this, an attach()ed game and
-        // its new table would never exchange mounted/listening state (the
-        // hello-time announce went to the OLD attachment — or nowhere), so
-        // onReady would never fire on either side.
+        const peerId = deviceIndex.get(deviceId);
+        if (peerId === undefined || !seatReachable(peerId)) return false;
+        openScope(gameId, peerId, `accepted invite from ${deviceId}`);
+        applyGameStatuses();
+        sendScopeOp(peerId, 'accept', gameId);
+        // Presence both ways: ours goes out here so their onReady fires, and
+        // their answering ack fires ours.
         this.announceGame(gameId, false);
         return true;
     },
 
-    /**
-     * The party a game is (or would auto-) attach(ed) to, as a
-     * partiesSnapshot() entry — null when unattached among several live
-     * parties, or when nothing is live.
-     */
-    gameParty(gameId) {
-        const partyId = resolveGameParty(gameId);
-        if (!partyId) return null;
-        return this.partiesSnapshot().find((p) => p.id === partyId) || null;
+    declineGameInvite(deviceId, gameId) {
+        if (!addon) return false;
+        const peerId = deviceIndex.get(deviceId);
+        if (peerId === undefined) return false;
+        return sendScopeOp(peerId, 'decline', gameId);
     },
 
     /**
-     * Subscribe to scope changes (v1.13): fires (no payload, coalesced per
-     * tick) whenever parties appear/die, a per-party status flips, or a game
-     * attachment changes — the launcher re-derives each mounted game's
-     * status/roster from statusForGame/rosterForGame and dedupes per game.
+     * Subscribe to inbound invites: fn({deviceId, name, gameId}). The
+     * launcher prompts and answers with acceptGameInvite/declineGameInvite —
+     * the bridge never decides on its own, because the whole point of a scope
+     * is that both ends agreed to it.
+     */
+    onGameInvite(fn) {
+        gameInviteListeners.push(fn);
+        return () => {
+            const i = gameInviteListeners.indexOf(fn);
+            if (i >= 0) gameInviteListeners.splice(i, 1);
+        };
+    },
+
+    /**
+     * End this game's scopes: tells every link it was open on, then forgets
+     * them. Called when the game leaves the frame pool (quit or eviction) —
+     * an open scope must never outlive the frame it was opened for, or the
+     * peer keeps sending into a game that is no longer there.
+     */
+    leaveGame(gameId) {
+        if (!addon || typeof gameId !== 'string') return false;
+        const links = scopeLinks(gameId);
+        if (!links.length) return false;
+        for (const peerId of links) {
+            if (seatReachable(peerId)) sendScopeOp(peerId, 'close', gameId);
+            closeScope(gameId, peerId, 'game left');
+        }
+        applyGameStatuses();
+        return true;
+    },
+
+    /** Games with at least one open scope — the launcher's unmount sweep reads it. */
+    openGameIds() {
+        return [...gameScopes.keys()];
+    },
+
+    /**
+     * Subscribe to scope changes: fires (no payload, coalesced per tick)
+     * whenever a scope opens or closes or a per-game status flips — the
+     * launcher re-derives each mounted game's status/roster from
+     * statusForGame/rosterForGame and dedupes per game.
      */
     onScopeChange(fn) {
         scopeListeners.push(fn);
@@ -1996,46 +1816,6 @@ export const ArcadeP2P = {
             const i = scopeListeners.indexOf(fn);
             if (i >= 0) scopeListeners.splice(i, 1);
         };
-    },
-
-    /**
-     * Leave one party on purpose (v1.13) — the party card's [Leave party] /
-     * [End party] write path. Works from either role: a member walks away
-     * from its hub link, a leader ends the party for everyone it links.
-     * Same deliberate-goodbye discipline as hangUpKnownPeer, applied per
-     * link: pause OUR pair first (so our rendezvous doesn't repair the very
-     * link we're closing), then bye (so the peer drops to quiet standby —
-     * callable — instead of burning a repair episode), then drop. The
-     * persisted party-membership records are cleared BEFORE any teardown so
-     * no restart can re-group by a party its user chose to leave. Pairings
-     * (secrets, names, sync/backup flags) all survive — a party is not a
-     * relationship.
-     */
-    async leaveParty(partyId) {
-        ArcadeDiag.log('bridge', `user action: leave party ${partyId}`);
-        await ensureAddon();
-        if (!addon.peerNode.partyRole(partyId)) return false;
-        const links = addon.peerNode.partyPeers(partyId);
-        const known = readKnownPeers();
-        let wrote = false;
-        const liveDevices = [];
-        for (const { peerId, live } of links) {
-            const dev = deviceIdForPeerId(peerId);
-            if (dev && known[dev] && known[dev].party) { delete known[dev].party; wrote = true; }
-            if (live && dev) liveDevices.push({ peerId, dev });
-        }
-        if (wrote) writeKnownPeers(known);
-        for (const { peerId, dev } of liveDevices) {
-            setKnownPeerPaused(dev, true);
-            await rdv.pausePair(dev).catch(() => {});
-            if (!rdv.sendBye(peerId)) {
-                ArcadeDiag.log('bridge', `leave party: bye to ${dev} could NOT be sent (channel not open) — that peer will see a plain link death`);
-            }
-        }
-        // Give the bye frames a beat to flush before the pcs close under them.
-        if (liveDevices.length) await new Promise((r) => setTimeout(r, 250));
-        addon.peerNode.closeParty(partyId);
-        return true;
     },
 
     /**
@@ -2148,57 +1928,42 @@ export const ArcadeP2P = {
     },
 
     /**
-     * Send a game's payload, wrapped in the launcher envelope, within the
-     * game's ATTACHED PARTY only (v1.13). No `to` — broadcast to every seat
-     * of that party, exactly the old behavior when one party exists. With
-     * `to` (a deviceId) — targeted: delivered on that device's direct link
-     * (if it belongs to the same party), or (a member addressing a fellow
-     * member) via the party's hub, which forwards down the addressee's
-     * link; non-addressees never RECEIVE the frame. Returns false when the
-     * game has no live attached party, or when `to` is unknown IN THAT
-     * PARTY / its identity exchange hasn't completed — a private frame is
-     * never silently downgraded to broadcast, and no frame ever crosses
-     * parties. During an 'interrupted' party the transport queues and
-     * replays on recovery (exactly-once), targeted or not.
+     * Send a game's payload, wrapped in the launcher envelope — the outbound
+     * half of D1. No `to`: fans out to every link this game is OPEN on, one
+     * targeted frame per link, so a link that never agreed to this game never
+     * carries a byte of it. With `to` (a deviceId): delivered on that device's
+     * direct link, and only if the game is open there.
+     *
+     * Returns false when the game has no open scope, or when `to` is unknown /
+     * unreachable / hasn't opened this game — a private frame is never
+     * silently downgraded to a broadcast, and there is no third device to
+     * route through if the addressee isn't adjacent (D2: seating requires
+     * each player to be adjacent to the host, and the game says so in copy
+     * rather than the transport papering over it).
+     *
+     * While a link is 'interrupted' the transport queues and replays on
+     * recovery (exactly-once), targeted or not.
      */
     send(gameId, payload, to) {
         if (!addon) return false;
-        const partyId = resolveGameParty(gameId);
-        if (!partyId) return false;
-        const ps = partyStatusOf(partyId);
-        if (ps !== 'connected' && ps !== 'interrupted') return false;
         if (to === undefined) {
+            const links = scopeLinks(gameId).filter((pid) => seatReachable(pid));
+            if (!links.length) return false;
             const env = { arcade: 1, gameId, payload };
-            return addon.peerNode.broadcast(
-                { text: JSON.stringify(env), from: addon.peerNode.myId }, null, { partyId }) === true;
+            let sent = false;
+            for (const pid of links) {
+                if (addon.sendTo(pid, env)) sent = true;
+            }
+            return sent;
         }
         if (typeof to !== 'string' || to === getMyDeviceId()) return false;
-        // Every targeted frame a MEMBER sends transits this party's hub,
-        // which must honor noRelay (and forward member→member targets). An
-        // older host announced no wire caps — it would blind-relay the
-        // private frame to every seat — so refuse here; the game's
-        // caps()-negotiated fallback covers mixed-version tables. A leader's
-        // own targeted sends travel only the addressee's direct link, so
-        // they need no such gate.
-        const role = addon.peerNode.partyRole(partyId);
-        if (role === 'member' && !hubCapsFor(partyId).has('peer.sendTo')) return false;
-        const env = { arcade: 1, gameId, payload, to };
         const directLink = deviceIndex.get(to);
-        if (directLink !== undefined && addon.peerNode.partyOf(directLink) === partyId) {
-            // A binding can outlive its link (departed seat whose stash lingers
-            // with no active repair) — refuse rather than report phantom
-            // delivery into a dead session (B-p2p-1).
-            if (!seatReachable(directLink)) return false;
-            return addon.sendTo(directLink, env);
-        }
-        if (role === 'member') {
-            const im = indirectByParty.get(partyId);
-            if (im && im.has(to)) {
-                const hubLink = addon.peerNode.hubLinkId(partyId);
-                if (hubLink) return addon.sendTo(hubLink, env);
-            }
-        }
-        return false;
+        if (directLink === undefined || !scopeOpen(gameId, directLink)) return false;
+        // A binding can outlive its link (departed seat whose stash lingers
+        // with no active repair) — refuse rather than report phantom
+        // delivery into a dead session (B-p2p-1).
+        if (!seatReachable(directLink)) return false;
+        return addon.sendTo(directLink, { arcade: 1, gameId, payload, to });
     },
 
     /**
@@ -2458,29 +2223,18 @@ export const ArcadeP2P = {
     /** Test hook — deviceId → direct-link peerId snapshot. */
     _identityLinks() { return Object.fromEntries(deviceIndex); },
 
-    /** Test hook — deviceId → relay-tag snapshot, merged across parties. */
-    _indirectPeers() {
+    /**
+     * Test hook — gameId → [deviceId] snapshot of the open scopes. Reported
+     * by DEVICE, not by transport peerId: a suite asserting who a game is
+     * open with means the devices, and peerIds are re-minted per ceremony.
+     */
+    _gameScopes() {
+        const byPeer = new Map();
+        for (const [deviceId, peerId] of deviceIndex) byPeer.set(peerId, deviceId);
         const out = {};
-        for (const m of indirectByParty.values()) {
-            for (const [devId, tag] of m) out[devId] = tag;
+        for (const [gameId, links] of gameScopes) {
+            out[gameId] = [...links].map((pid) => byPeer.get(pid) || pid);
         }
-        return out;
-    },
-
-    /** Test hook — partyId → {deviceId: relay tag} snapshot (v1.13). */
-    _indirectPeersByParty() {
-        const out = {};
-        for (const [partyId, m] of indirectByParty) out[partyId] = Object.fromEntries(m);
-        return out;
-    },
-
-    /** Test hook — gameId → attached partyId snapshot (v1.13). */
-    _gameParties() { return Object.fromEntries(gameParties); },
-
-    /** Test hook — partyId → announced hub caps snapshot (v1.13). */
-    _hubCaps() {
-        const out = {};
-        for (const [partyId, caps] of hubCapsByParty) out[partyId] = [...caps];
         return out;
     }
 };

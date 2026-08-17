@@ -254,10 +254,10 @@ async function identityDbPut(key, value) {
 // fanning each spoke's frames out to the other spokes of its party and
 // stamping them `relayed`. A sweep of every game that names Arcade.peer
 // (plans/tables-2026-08.md, "Evidence: what the fleet actually uses") found
-// no consumer for that: cardstock and p2p-chat both send every gameplay
-// frame targeted over a direct link, and the fan-out actively BROKE
-// cardstock — a member's lobby broadcast reached fellow members only as a
-// relayed frame, which cardstock rejects as spoofed. So the hub, the
+// no consumer for that: both games that use the API send every gameplay
+// frame targeted over a direct link, and the fan-out actively BROKE the
+// multi-seat one — a member's lobby broadcast reached fellow members only as
+// a relayed frame, which that game rejects as spoofed. So the hub, the
 // per-party role and the `relayed` stamp/strip are deleted rather than
 // rescoped: this node dispatches every inbound app frame locally and
 // re-emits it nowhere. Which games may talk over which link is decided one

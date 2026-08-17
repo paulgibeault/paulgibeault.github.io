@@ -110,6 +110,18 @@ function peerEnvelopeTests() {
         'presence classified');
     ok(validatePeerEnvelope({ arcade: 1, kind: 'presence-ack', gameId: 'g' }).kind === 'presence',
         'presence-ack classified as presence');
+    for (const op of ['invite', 'accept', 'decline', 'close']) {
+        ok(validatePeerEnvelope({ arcade: 1, kind: 'scope', op, g: 'g' }).kind === 'scope',
+            `scope op '${op}' classified`);
+    }
+    ok(validatePeerEnvelope({ arcade: 1, kind: 'scope', op: 'invite' }).reason === 'bad-scope',
+        'scope without a game id rejected');
+    ok(validatePeerEnvelope({ arcade: 1, kind: 'scope', op: 'invite', g: '' }).reason === 'bad-scope',
+        'scope with an empty game id rejected');
+    ok(validatePeerEnvelope({ arcade: 1, kind: 'scope', op: 'take-over', g: 'g' }).reason === 'bad-scope',
+        'scope with an unknown op rejected (closed set, not a fall-through)');
+    ok(validatePeerEnvelope({ arcade: 1, kind: 'scope', op: 'invite', g: 'g', gameId: 'g' }).kind === 'scope',
+        'scope with a smuggled gameId still classifies as scope, never game');
     ok(validatePeerEnvelope({ arcade: 1, kind: 'sync' }).kind === 'sync',
         'sync passes structurally (body owned by validateSyncEnvelope)');
     ok(validatePeerEnvelope({ arcade: 1, kind: 'leaderboard' }).kind === 'leaderboard',
