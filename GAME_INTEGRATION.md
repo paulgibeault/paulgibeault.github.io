@@ -846,10 +846,12 @@ links, no signaling server. Games never touch any of that; the whole surface is:
 
 ```js
 Arcade.peer.status();              // 'unavailable' | 'idle' | 'connecting' | 'connected' | 'interrupted'
-Arcade.peer.onStatus(s => ...);    // gate multiplayer UI on this (your game's ATTACHED PARTY — see below)
+Arcade.peer.onStatus(s => ...);    // gate multiplayer UI on this — it reflects THIS GAME's open
+                                   // scopes, not the device's links (see below)
 Arcade.peer.caps();                // launcher capability flags: feature-detect additive features
-                                   // ('peer.sendTo', 'peer.roster', 'peer.meta', 'peer.party',
-                                   // 'storage.bridge', 'ui.bridge', 'configs.bridge'); [] standalone
+                                   // ('peer.sendTo', 'peer.roster', 'peer.meta', 'peer.invite',
+                                   // 'peer.party', 'storage.bridge', 'ui.bridge', 'configs.bridge');
+                                   // [] standalone
 Arcade.peer.send({ move: 'e4' });  // broadcast; JSON-safe payload; false unless connected/interrupted
 Arcade.peer.send(hand, { to });    // targeted: only deviceId `to` receives it (cap 'peer.sendTo')
 Arcade.peer.onMessage((payload, fromPeer, meta) => ...);  // fromPeer = sender's stable deviceId;
@@ -883,18 +885,21 @@ Arcade.peer.onBlobError(({ id, name, reason, received, total }) => ...);
 Arcade.peer.queue();               // { depth, limit, overflowed } — replay-queue visibility
 Arcade.peer.onQueue(q => ...);     // pushed while 'interrupted'; overflowed ⇒ resync after recovery
 
-// Parties (cap 'peer.party') — a device can hold several concurrent
-// connection stars ("parties"); your game is attached to exactly ONE, and
-// every peer API above reflects only that party. With a single party the
-// launcher auto-attaches — you never need these. All resolve async.
-Arcade.peer.party();               // attached party { id, role: 'leader'|'member', leaderName,
-                                   //   status, peers, members } or null. id is session-scoped —
-                                   //   never persist it.
-Arcade.peer.parties();             // parties this game could attach to (possibly [])
-Arcade.peer.attach(partyId);       // request re-attachment → resulting party, or null if refused
-// members = [{ deviceId, name, status, isLeader, isSelf }], LEADER FIRST — the whole
-// table, including the fellow members peers() omits. status is 'connected'|'interrupted'
-// only for seats this device can actually see, and null otherwise (see the rules below).
+// Open the game with someone (cap 'peer.invite') — ask the launcher to offer
+// THIS game to the connections that don't already have it open. The launcher
+// owns the flow: who gets asked, what the prompt says, and whether they say
+// yes. You can ask, never grant.
+Arcade.peer.invite();              // → Promise<number of proposals sent>. 0 means there was
+                                   // nobody to ask — tell the player to connect a device first.
+                                   // Without the cap it resolves 0: say "invite from the
+                                   // launcher menu" instead of inventing a fallback protocol.
+
+// RETIRED — parties no longer exist. These stay callable so nothing breaks
+// on a launcher deploy, and always resolve their documented unattached
+// answers. Don't write new code against them.
+Arcade.peer.party();               // → null
+Arcade.peer.parties();             // → []
+Arcade.peer.attach(id);            // → null
 ```
 
 Rules of the road:
@@ -905,10 +910,20 @@ Rules of the road:
 - [ ] Payloads must be JSON-serializable (structured clone is NOT used).
       Keep them small and frequent rather than large and rare; chunk anything
       big (the channel is ordered + reliable).
+- [ ] **A connection is not permission to play.** Pairing two devices makes
+      them reachable; playing a particular game together is a separate,
+      per-game, per-connection agreement — an **open-game scope**. Until one
+      is open, your game reads `'idle'` with an empty `peers()`, however many
+      devices the launcher is linked to. `Arcade.peer.invite()` (or the
+      launcher's own invite door) is what opens one; accepting the prompt on
+      the other device is what completes it. This is also the security rule:
+      a frame for your game reaches you only over a link where your game is
+      open, so naming a `gameId` can never reach a game its owner never
+      opened to you.
 - [ ] Both devices run the same game for a session. Messages are routed by
-      `gameId` — a message sent while the other device has a different game
-      mounted is dropped silently. You no longer need a hand-rolled
-      hello/echo handshake for "is my peer listening yet?": subscribe to
+      `gameId` within an open scope — a message sent while the other device
+      has a different game mounted is dropped silently. You no longer need a
+      hand-rolled hello/echo handshake for "is my peer listening yet?": subscribe to
       `Arcade.peer.onReady(...)` — the launchers exchange presence
       announcements whenever a game mounts (and on every reconnect), so it
       fires as soon as the same game is listening on both ends. It may fire
@@ -940,9 +955,9 @@ Rules of the road:
       large files while `'interrupted'` — if chunks are lost to overflow the
       receiver gets `onBlobError` (`'timeout'`) instead of a wedged transfer;
       resend after recovery. `{ to: deviceId }` sends the transfer privately to
-      one seat (cap `peer.sendTo`); omitting it broadcasts to every seat in the
-      attached party. What `sendBlob` will NOT do is fan one file out to a
-      SUBSET of seats: a three-person group inside a five-seat party means
+      one seat (cap `peer.sendTo`); omitting it broadcasts to every seat this
+      game is open with. What `sendBlob` will NOT do is fan one file out to a
+      SUBSET of seats: a three-person group inside a five-seat table means
       three separate calls, each re-reading, re-hashing and re-chunking the
       same bytes under its own transfer id and its own progress stream — and
       the envelope carries only a name, size, mime type and id, so there is
@@ -961,13 +976,9 @@ Rules of the road:
 Multi-seat rules (host holding several standalone connections):
 
 - [ ] **Feature-detect, don't version-check**: gate targeted sends / roster /
-      meta on `Arcade.peer.caps()` at lobby time. A session's host should
-      announce the chosen wire mode in its own lobby frame so mixed-cap
-      tables degrade to a game-level fallback uniformly. The platform guards
-      the worst mixed-version case itself: a joiner's targeted send returns
-      `false` when its HOST is on an older launcher (the host announces its
-      wire capabilities during the identity handshake), so a private frame
-      is never handed to a hub that would blind-relay it to every seat.
+      meta / invite on `Arcade.peer.caps()` at lobby time. A session's host
+      should announce the chosen wire mode in its own lobby frame so
+      mixed-cap tables degrade to a game-level fallback uniformly.
 - [ ] **Target private state; broadcast shared state.** `send(payload, { to })`
       guarantees a non-addressee joiner never *receives* the frame (real
       routing privacy — no cooperative discard). It never falls back to
@@ -977,51 +988,35 @@ Multi-seat rules (host holding several standalone connections):
       or whose session host is too old to route it. `true` therefore means
       "handed to the launcher", not "delivered" — a game that needs delivery
       guarantees acknowledges at the game layer.
-- [ ] **`to` is routing, not secrecy from the host**: joiner→joiner targeted
-      frames transit the host's bridge readable (inherent to the star
-      topology, and correct for host-authoritative games). End-to-end
-      sealing against the host is a game-layer concern.
+- [ ] **Every roster entry is `direct: true`, and there may be more than
+      one.** That is the whole shape now: `peers()` lists the devices this
+      game is open with, each on a link that terminates at your device. Do
+      NOT assume a single entry means "that's the host" — **name your host**
+      (the caller that joined a table knows which device it joined) and treat
+      `peers().length === 1` as a convenience, not a definition. A game
+      written for one-direct-peer will look like it works right up to the
+      first player who is connected to two people at once.
+- [ ] **Routing between players is your job.** The framework moves frames
+      over direct links and nothing else: there is no relay, and a frame is
+      never forwarded from one device to another. A multi-seat game is
+      host-authoritative — clients send to the host, the host re-sends per
+      seat — which is how the fleet's multi-seat game was already built. If
+      two players want to be at one table, each must have a connection to the
+      host; they do NOT need connections to each other. When a name appears
+      that the host can't reach, say so in copy ("Ask ⟨host⟩ to connect with
+      ⟨device⟩"), don't wait for the transport to bridge it.
 - [ ] **Per-seat status comes from `peers()`**, not `status()`: the aggregate
-      stays `'connected'` while ANY link is up, so a 4-player table must key
-      its "reconnecting…" chips on roster entries flipping to
-      `'interrupted'`. Roster entries hold `'connected' | 'interrupted'`; a
-      seat that's truly gone leaves the roster (that's the leave signal).
-      `direct: true` marks the device your link actually terminates at — for
-      a joiner, exactly the host, so the host needs no lobby frame to be
-      identified.
-- [ ] **A party MEMBER's roster contains ONLY the hub — and fellow members have
-      no departure signal at all.** `peers()` is derived from this device's
-      DIRECT links, so on a member (a joiner) it holds exactly one entry, the
-      leader, no matter how many devices sit at the table. Fellow members are
-      still fully reachable: their identity reaches you through the hub's
-      relay, so `onReady` fires for them and `send(payload, { to })` routes to
-      them by `deviceId`. They simply never appear in `peers()` — and here is
-      the part that bites: **nothing ever tells you one left**. A fellow member
-      that closes its tab, hangs up, or falls off the network produces no
-      roster removal, no status flip, no event whatsoever on your device; the
-      only thing that clears it is your OWN session ending. A game that wants
-      to show "who is here" beyond its direct link must therefore build its own
-      liveness heuristic out of `onReady` sightings plus its own `status()`,
-      and that heuristic WILL be wrong on departure — it keeps showing a
-      departed member as present. p2p-chat's `isLive()` is exactly this
-      compromise, written out with its reasoning in a comment. So don't design
-      a mechanic that depends on promptly noticing an indirect player leaving.
-      Issue **#143** (WP-L1) proposes a `peer.presence` capability — a
-      hub-relayed member roster carrying a real departure signal — to close
-      this; until it lands, the gap is the contract, not a bug.
-- [ ] **`status: null` on a party member means "unknown", not "offline".** A
-      party entry's `members` array covers the whole table, but a device may
-      only vouch for health it can actually observe — its own direct links, and
-      itself. Fellow members known only through the hub therefore carry
-      `status: null`, deliberately: their health is the hub's knowledge, not
-      ours, and the launcher's own party card renders NO dot for them rather
-      than a guessed one. Copy that discipline — render absence, never a green
-      dot you can't justify. (A leader holds a direct link to every seat, so
-      the `members` it sees never carry null.)
-- [ ] **Spoof check via `meta.relayed`**: a frame claiming host authority
-      that arrives with `relayed: true` did NOT come from your direct link
-      partner — treat it as another joiner talking, not the host. Targeted
-      frames arrive with `meta.to === 'me'`; broadcasts with `'all'`.
+      stays `'connected'` while ANY of this game's links is up, so a
+      4-player table must key its "reconnecting…" chips on roster entries
+      flipping to `'interrupted'`. Roster entries hold
+      `'connected' | 'interrupted'`; a seat that's truly gone leaves the
+      roster (that's the leave signal).
+- [ ] **`meta.relayed` is always `false`** — keep checking it anyway. Nothing
+      forwards frames between devices any more, and the launcher refuses a
+      frame that claims otherwise before your game sees it, so a spoof check
+      on `relayed` costs nothing and keeps working if the topology ever
+      changes again. Targeted frames arrive with `meta.to === 'me'`;
+      broadcasts with `'all'`.
 
 Try it: mount `tools/fixtures/p2p-test-game/` on two devices via the launcher
 and watch the message log; `node tools/p2p-acceptance.mjs` runs the automated
@@ -1736,17 +1731,19 @@ parent → child:  arcade:settings.changed   { settings }
 parent → child:  arcade:state.replaced     { state }                // after file import (fresh snapshot)
 parent → child:  arcade:lifecycle.suspend  { }                      // iframe hidden, or about to be evicted
 parent → child:  arcade:lifecycle.resume   { }                      // iframe shown
-parent → child:  arcade:peer.status        { status }               // this game's attached party
+parent → child:  arcade:peer.status        { status }               // this game's OPEN SCOPES
 parent → child:  arcade:peer.message       { payload, fromPeer, meta }  // fromPeer = sender deviceId;
                                            // meta = { relayed, to: 'me'|'all' }
-parent → child:  arcade:peer.roster        { peers }                // attached party's roster on any change
+parent → child:  arcade:peer.roster        { peers }                // the devices this game is open with, on any change
 parent → child:  arcade:peer.identity      { deviceId, name }       // single-entry roster update (peer.roster carries the full set)
 parent → child:  arcade:peer.ready         { deviceId, name }       // remote same-game listening
 parent → child:  arcade:peer.queue         { depth, limit, overflowed }
 child  → parent: arcade:peer.send          { payload, to? }         // to = target deviceId (targeted)
+child  → parent: arcade:peer.invite        { id }                   // cap 'peer.invite'; answered via
+                                           // arcade:bridge.result (value: proposals sent)
 child  → parent: arcade:peer.party.op      { op: 'get'|'list'|'attach', id, partyId? }
-                                           // cap 'peer.party'; answered via arcade:bridge.result
-                                           // (value: party entry | entry list | null)
+                                           // RETIRED — cap 'peer.party' still advertised, but the
+                                           // answer is always null | [] | null (no parties exist)
 child  → parent: arcade:ui.toast           { message, kind, duration }
 
 — config exchange (§7d; cap 'configs.bridge'; the SDK speaks this for you) —

@@ -88,8 +88,11 @@
  *                                 reason: 'timeout'|'aborted'|'integrity'
  *                                 |'malformed'|'oversize'|'too-many', ... }
  *   Arcade.peer.queue() / onQueue(fn)             replay-queue visibility
- *   Arcade.peer.party() / parties() / attach(id)  multi-party star selection
- *                                 (cap 'peer.party'; auto-attached otherwise)
+ *   Arcade.peer.invite()          ask the launcher to offer this game to the
+ *                                 connections that don't have it open yet
+ *                                 (cap 'peer.invite'; → Promise<number sent>)
+ *   Arcade.peer.party() / parties() / attach(id)  RETIRED — always resolve
+ *                                 null / [] / null (parties no longer exist)
  *
  *   // Launcher-mediated UI (#35 — real modals despite the sandbox no-oping
  *   // window.confirm/prompt; framed ops need the launcher's 'ui.bridge' cap
@@ -180,7 +183,7 @@
     // tools/sdk-version-unit.mjs enforces all three. Launcher↔SDK compat is
     // still negotiated by welcome.caps, never by this number; it exists for
     // humans (bug reports, CHANGELOG) and for the pinned-URL publish scheme.
-    var SDK_SEMVER = '3.13.0';
+    var SDK_SEMVER = '3.14.0';
     var HANDSHAKE_TIMEOUT_MS = 300;
     // Opaque-origin (sandboxed, no allow-same-origin) frames have no storage
     // to fall back to, so waiting longer for the launcher costs nothing and
@@ -2050,22 +2053,29 @@
         // Replaces the hand-rolled hello/echo handshake games used to need.
         onReady: makeSubscriber(listeners.peerReady),
 
-        // ─── Parties (star-selection hook; cap 'peer.party') ────────────
-        // A device can hold several concurrent parties (independent
-        // connection stars); a running game is attached to exactly ONE, and
-        // its whole peer surface — status/send/peers/onReady — reflects
-        // only that party. With a single party the launcher auto-attaches
-        // and games never need these; a game that cares can introspect and
-        // choose instead of relying on the launcher's picker. All three
-        // resolve async (launcher round-trip). Party entries look like
-        // { id, role: 'leader'|'member', leaderName, status, peers } — id is
-        // launcher-local and session-scoped: compare and pass it back, never
-        // persist or show it.
-        //
-        // party()  → the attached party entry, or null when unattached.
-        // parties()→ every party this game could attach to (possibly []).
-        // attach(partyId) → request re-attachment; resolves to the
-        //   resulting party entry, or null if the launcher refused.
+        // ─── Invite (cap 'peer.invite') ─────────────────────────────────
+        // Ask the launcher to offer THIS game to the connections that don't
+        // already have it open. The launcher owns the flow — who gets asked,
+        // what the prompt says, and whether the other person says yes; a
+        // game can ask, never grant. Resolves to how many proposals went out
+        // (0 = no connections to ask, so tell the player to connect a device
+        // first). Without the cap it resolves 0 and the game should say
+        // "invite from the launcher menu" instead.
+        invite: function () {
+            if (!framed || peerCaps.indexOf('peer.invite') === -1) return Promise.resolve(0);
+            return bridgeRpc('arcade:peer.invite', {}).then(function (v) {
+                return typeof v === 'number' ? v : 0;
+            }).catch(function () { return 0; });
+        },
+
+        // ─── Parties — RETIRED (cap 'peer.party' still advertised) ───────
+        // Parties are gone from the framework: a device holds connections,
+        // and a game is open on the ones that agreed to play it. These three
+        // now always resolve their documented UNATTACHED answers — null, [],
+        // null — which is what "this game belongs to no party" always meant,
+        // so the branches a game already had for that case are the ones that
+        // run. They stay callable so no shipped game breaks on a launcher
+        // deploy; do not write new code against them.
         party: function () {
             if (!framed || peerCaps.indexOf('peer.party') === -1) return Promise.resolve(null);
             return bridgeRpc('arcade:peer.party.op', { op: 'get' }).catch(function () { return null; });

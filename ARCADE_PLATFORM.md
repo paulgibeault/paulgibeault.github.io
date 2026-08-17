@@ -88,23 +88,25 @@ Arcade.loop(fn)                       // managed rAF loop: { start, stop, kick, 
 Arcade.peer.status()                  // 'unavailable' | 'idle' | 'connecting' | 'connected' | 'interrupted'
                                       // 'interrupted' = live session self-repairing (v1.7):
                                       // sends queue + replay; don't reset game state
-Arcade.peer.onStatus(fn)              // aggregate status (all links folded into one value)
+Arcade.peer.onStatus(fn)              // this GAME's status: folded from the links it is open
+                                      // on, not from every link the device holds
 Arcade.peer.caps()                    // launcher capability flags (frozen array; [] standalone
                                       // or on an older launcher) — feature-detect additive
                                       // features: 'peer.sendTo', 'peer.roster', 'peer.meta',
-                                      // 'peer.party'
-Arcade.peer.send(payload)             // broadcast to every connected peer
+                                      // 'peer.invite', 'peer.party'
+Arcade.peer.send(payload)             // broadcast to every device this game is OPEN with
 Arcade.peer.send(payload, { to })     // targeted: only that deviceId receives it; returns
                                       // false (never broadcasts) when the launcher lacks the
-                                      // 'peer.sendTo' cap or `to` is malformed. Routing, not
-                                      // secrecy: joiner→joiner frames transit the host bridge
+                                      // 'peer.sendTo' cap, `to` is malformed, or this game
+                                      // is not open on that device's link
 Arcade.peer.onMessage(fn)             // fn(payload, fromPeer, meta) — fromPeer is the sending
                                       // device's stable deviceId once identity completes;
                                       // meta = { relayed, to: 'me'|'all' } (cap 'peer.meta')
 Arcade.peer.self() / remote()         // stable device identities ({ deviceId, name } | null)
-Arcade.peer.peers()                   // full roster [{ deviceId, name, status, direct }] —
-                                      // the multi-peer API (cap 'peer.roster'); direct=true
-                                      // marks this device's own link (a joiner's host)
+Arcade.peer.peers()                   // the devices this game is open with
+                                      // [{ deviceId, name, status, direct }] (cap 'peer.roster').
+                                      // EVERY entry is direct:true and there may be several —
+                                      // name your host, never assume the single entry is one
 Arcade.peer.onPeersChange(fn)         // fn(rosterArray) on any join/leave/rename/status change
 Arcade.peer.onReady(fn)               // remote device has THIS game mounted and listening
 Arcade.peer.request(payload, { to, timeoutMs })  // → Promise of the peer's reply
@@ -116,9 +118,12 @@ Arcade.peer.sendBlob(blob, { onProgress, to })   // chunked large payload; paced
                                       // progress, no outbox spike); { to } sends privately
 Arcade.peer.onBlob(fn)                // fn(blob, { name, size, mime, fromPeer, id })
 Arcade.peer.queue() / onQueue(fn)     // replay-queue { depth, limit, overflowed }
-Arcade.peer.party() / parties()       // multi-party star selection (cap 'peer.party'):
-Arcade.peer.attach(partyId)           // a game binds to ONE party; auto-attached when a
-                                      // single party is live — see GAME_INTEGRATION.md
+Arcade.peer.invite()                  // ask the launcher to offer THIS game to the connections
+                                      // that don't have it open yet (cap 'peer.invite') →
+                                      // Promise<proposals sent>; 0 ⇒ nobody to ask
+Arcade.peer.party() / parties()       // RETIRED — parties no longer exist. Still callable
+Arcade.peer.attach(partyId)           // (cap 'peer.party' is still advertised); always resolve
+                                      // null / [] / null — see GAME_INTEGRATION.md
 
 // DETERMINISM — shared seeded RNG for lockstep/turn-based games (identical
 // sequences on both devices from the same seed; never Math.random for shared state)
@@ -205,7 +210,7 @@ All messages namespaced `arcade:` to avoid collision.
 ```
 child → parent:  { type: 'arcade:hello',   gameId }
 parent → child:  { type: 'arcade:welcome', peerStatus: 'idle',
-                   caps: ['peer.sendTo', 'peer.roster', 'peer.meta', 'peer.party', 'storage.bridge', 'ui.bridge', 'configs.bridge'],  // capability flags (absent ⇒ [])
+                   caps: ['peer.sendTo', 'peer.roster', 'peer.meta', 'peer.party', 'peer.invite', 'storage.bridge', 'ui.bridge', 'configs.bridge'],  // capability flags (absent ⇒ [])
                    peers: [{ deviceId, name, status, direct }, ...],   // live remote devices (roster seed)
                    settings: { fontScale, theme, reducedMotion, audioVolume, handedness, powerSaver },
                    state: { '<fullKey>': '<raw string>', ... } }       // storage-bridge snapshot: the app's own
@@ -339,7 +344,7 @@ WebRTC can't skip the offer/answer ceremony — DTLS fingerprints must flow both
 ### One-tap reconnect + identity pinning (IMPLEMENTED, transport v1.8)
 
 - **One-tap reconnect:** the "🔗 New invite code" action on a Multiplayer dialog row opens the connect ceremony modal in `{mode:'host'}` — no Host/Join choice screen, a *fresh* invite code is on screen immediately (show it or send it as a link; link-tennis automates the other device's half). Signaling stays one-time-use by design — that's what keeps a leaked old invite link harmless — so "reconnect" means *fresh code, zero navigation*, not replay.
-- **Persistent identity:** the transport now keeps one ECDSA `RTCCertificate` per browser profile (IndexedDB), so a device's DTLS fingerprint is stable across sessions. Each known peer records the fingerprint of its DIRECT link (`knownPeers[deviceId].fingerprint`); identities arriving via the host's relay never bind a fingerprint (the transport stamps relayed frames).
+- **Persistent identity:** the transport now keeps one ECDSA `RTCCertificate` per browser profile (IndexedDB), so a device's DTLS fingerprint is stable across sessions. Each known peer records the fingerprint of its DIRECT link (`knownPeers[deviceId].fingerprint`) — the only kind of link there is, since nothing forwards frames between devices (`p2p/PROTOCOL.md` §5.6).
 - **Pinning policy is TOFU-with-notice, not hard-fail:** every connection today is a manual in-person ceremony — that exchange IS the authentication — and browsers rotate certificates ~monthly, so a changed fingerprint surfaces a warning toast (`fingerprintChanged` on `onPeerIdentity`) telling the user to re-verify in person if unexpected. Hard cryptographic pair-binding lives in the rendezvous pair secret below. Exception (#32): a rotation **re-attested by the peer's pinned user identity** (next section) auto-promotes the pin silently — `fingerprintAutoPromoted` on `onPeerIdentity`, no warning.
 
 ### Cross-device user identity — recovery + revocation (IMPLEMENTED, #32)
@@ -390,8 +395,8 @@ lives with the other storage allowlists in `arcade-storage-core.js`.
   bounded ≤64 with a 30 s reassembly timeout), `req` (keys wanted), `diff`
   (values / `del:1` tombstones). A digest exchange runs on every identity
   announce for an enabled pair; live single-entry diffs ship as writes happen.
-- **Trust posture:** accepted only from a DIRECT link (relayed frames refused —
-  the transport's forgery-proof `relayed` stamp) with a completed identity
+- **Trust posture:** accepted only from a DIRECT link (a frame carrying the
+  legacy `relayed` stamp is refused outright) with a completed identity
   binding, from a pair the user enabled on BOTH devices (🔄 toggle per saved
   connection in the Multiplayer dialog), and never while the peer's fingerprint
   is suspect. Even then every inbound field is validated before touching
