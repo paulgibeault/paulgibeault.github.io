@@ -3,7 +3,11 @@ import { ConnectionUtils } from './p2p-core.js';
 // Shown in the modal header. Users are told to compare this across devices
 // when a connection fails, so it must track the transport version
 // (see README.md / PROTOCOL.md) — single constant, no other copies.
-const UI_VERSION_LABEL = 'v1.11';
+// It sat at v1.11 through the 1.12, 1.13 and 1.14 transport releases: the
+// invariant this comment states was never enforced by anything, so it drifted
+// silently, and the one moment it is read aloud is a failed connection — the
+// moment a wrong version number sends two people chasing the wrong cause.
+const UI_VERSION_LABEL = 'v1.14';
 
 export class P2PUIManager {
     constructor(peerNode) {
@@ -140,8 +144,8 @@ export class P2PUIManager {
 
     _initStages(role) {
         this._stageLabels = role === 'host'
-            ? ['Show your code', 'Scan theirs', 'Play!']
-            : ['Scan their code', 'Show yours', 'Play!'];
+            ? ['Show your code', 'Scan theirs', 'Connected!']
+            : ['Scan their code', 'Show yours', 'Connected!'];
         this._stageStates = this._stageLabels.map(() => 'pending');
         this._renderStages();
     }
@@ -212,8 +216,13 @@ export class P2PUIManager {
                 // link author's endpoints and broadcasts our answer — enough
                 // to reveal this device's public IP. A crafted link must not
                 // trigger that silently just by being opened.
+                // "connection invite", not "game invite": since WP4 there are two
+                // different invites in the product, and this is the outer one —
+                // it links the devices and asks nothing about games. The open-game
+                // prompt ("⟨name⟩ wants to play ⟨game⟩") is the inner one and
+                // comes later, per game, from an already-linked device.
                 if (!window.confirm(
-                    'Accept this game invite and connect?\n\n' +
+                    'Accept this connection invite?\n\n' +
                     'Connecting shares your network address with the person who sent the link. ' +
                     'If you weren\'t expecting an invite, choose Cancel.')) {
                     this.logDiag('info', 'Invite declined by user. No connection attempted.');
@@ -232,7 +241,7 @@ export class P2PUIManager {
                 // QR-first even on the link path: show OUR code for them to
                 // scan. Replying by link stays available as the fallback.
                 await this.displayQRCode(answerData,
-                    "Now have the party leader tap Scan their code and scan this code. (Or send a reply link back in the same chat.)");
+                    "Now have them tap Scan their code and scan this one. (Or send a reply link back in the same chat.)");
                 this._setStage(1, 'done'); // your code is showing
                 this.ui.btnShareSdp.textContent = 'Send a reply link back';
 
@@ -482,7 +491,7 @@ export class P2PUIManager {
 
             // QR-first: the code IS the invite. Links are the fallback.
             await this.displayQRCode(offerData,
-                "Have your friend tap Join a party and scan this code.");
+                "Have your friend tap Scan a code and point their camera at this.");
             this.ui.btnScanAns.style.display = 'block';
             this.ui.btnShareSdp.textContent = 'Send a link instead';
         } catch (e) {
@@ -503,17 +512,32 @@ export class P2PUIManager {
         <div id="p2p-modal-overlay" class="p2p-modal-overlay" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="p2p-modal-title">
             <div class="p2p-modal">
                 <header class="p2p-header">
-                    <h2 id="p2p-modal-title">Play Together <span style="font-size: 0.5em; color: #888; vertical-align: middle; font-weight: normal; margin-left: 10px;">${UI_VERSION_LABEL}</span></h2>
+                    <!-- "New connection", matching the launcher button that opens
+                         it. It was "Play Together" while finishing this ceremony
+                         really did seat you at a game; it no longer does, and a
+                         header that promises play is the same wrong-door problem
+                         as the party buttons below, one line higher. -->
+                    <h2 id="p2p-modal-title">New connection <span style="font-size: 0.5em; color: #888; vertical-align: middle; font-weight: normal; margin-left: 10px;">${UI_VERSION_LABEL}</span></h2>
                     <button id="p2p-btn-close" class="p2p-btn-danger" style="border:none; border-radius:4px; padding:4px 8px; cursor:pointer;" aria-label="Close">X</button>
                 </header>
                 <div id="p2p-status-badge" class="p2p-status-disconnected">Not connected</div>
                 <div id="p2p-stages" style="display:none; flex-wrap:wrap; align-items:center; gap:6px; font-size:12px; color:#aaa; margin:10px 0; padding:8px 10px; background:#181818; border-radius:8px;"></div>
                 
+                <!-- Two ways to run ONE ceremony, which is the whole content of
+                     this modal: it links two devices and stops there. It used
+                     to say "Start a party" / "Join a party", and the field test
+                     (plans/connection-model-2026-08.md) is what that cost — the
+                     two doors looked alike, minted different groupings, and the
+                     wrong one left a paired device structurally unable to see
+                     the game. There is no grouping left to pick and no leader
+                     to be: whether you show the code or scan it decides nothing
+                     but who holds the camera. Which games you then play
+                     together is asked per game, later, by the invite door. -->
                 <div id="p2p-choice" class="p2p-panel" style="margin-bottom:15px;">
-                    <button id="p2p-btn-host" class="p2p-btn p2p-btn-primary p2p-btn-big">Start a party
-                        <span class="p2p-btn-caption">friends join by scanning your screen</span></button>
-                    <button id="p2p-btn-join" class="p2p-btn p2p-btn-primary p2p-btn-big">Join a party
-                        <span class="p2p-btn-caption">scan the party leader's screen</span></button>
+                    <button id="p2p-btn-host" class="p2p-btn p2p-btn-primary p2p-btn-big">Show invite code
+                        <span class="p2p-btn-caption">they scan it from your screen</span></button>
+                    <button id="p2p-btn-join" class="p2p-btn p2p-btn-primary p2p-btn-big">Scan a code
+                        <span class="p2p-btn-caption">point your camera at their screen</span></button>
                 </div>
 
                 <div id="p2p-work-area" class="p2p-panel" style="margin-bottom: 15px; display:none;">
@@ -793,7 +817,7 @@ export class P2PUIManager {
             this._ceremonyRole = 'joiner';
             this._initStages('joiner');
             this.ui.scanGuide.textContent =
-                'Point your camera at the code on the party leader’s screen.';
+                'Point your camera at the code on their screen.';
 
             this.startScanner(async (offerData) => {
                 this.logDiag('info', 'Code scanned! Preparing your reply code...');
@@ -806,7 +830,7 @@ export class P2PUIManager {
 
                     // Their turn to scan: show OUR code big and clear.
                     await this.displayQRCode(answerData,
-                        "Now have the party leader tap Scan their code and scan this code.");
+                        "Now have them tap Scan their code and scan this one.");
                     this._setStage(1, 'done'); // your code is showing
                     this.ui.btnShareSdp.textContent = 'Send a reply link back';
 
