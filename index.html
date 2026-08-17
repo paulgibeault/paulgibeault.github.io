@@ -1722,6 +1722,20 @@
                 // connections there are, how many have this game open, and how
                 // many the door would even try (invitableCount, which is
                 // inviteGame's own target rule).
+                //
+                // WHY "MUTED" IS A DEDUCTION AND NOT A GUESS, since the branch
+                // below claims it without reading a single invitesOff flag: a
+                // rostered connection is ALWAYS invite-reachable. Both sets walk
+                // the same deviceIndex; rosterSnapshot's live-link branch tests
+                // linkStatus() while seatReachable() tests hasLink(), and those
+                // read the same peers map; and rosterSnapshot's stashed-session
+                // branch is strictly narrower (it also excludes `paused`). So
+                // inviteTargets can only drop a rostered device for one of the
+                // two reasons it filters on — already playing, or muted — and
+                // once the playing ones are accounted for, muted is what is
+                // left. If either predicate ever stops implying the other, this
+                // branch starts naming a switch the user never touched, which
+                // is the wrong-door failure the whole redesign exists to end.
                 const connections = b.connectedPeers().length;
                 if (connections > 0) {
                     const playing = b.rosterForGame(gameId).length;
