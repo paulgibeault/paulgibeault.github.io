@@ -25,7 +25,7 @@ import { startP2PHarness, makeCheck } from './lib/p2p-test-harness.mjs';
 
 const { check, failed } = makeCheck();
 const harness = await startP2PHarness({ port: 4797, dropPort: 4796 });
-const { bootBridge, deviceIdOf, openScope } = harness;
+const { bootBridge, deviceIdOf } = harness;
 
 // One context per simulated device: distinct localStorage/IndexedDB, so
 // deviceIds and DTLS certificates genuinely differ.
