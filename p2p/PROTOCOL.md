@@ -594,7 +594,10 @@ trust boundary (it can lie about `from`, announce false identity fields —
 the pin notice surfaces changes, nothing more); relay operators see IP +
 timing metadata during episodes; rendezvous requires both apps to be
 open — waking a closed app needs push infrastructure, which is out of
-scope; multi-peer sessions rendezvous pairwise with the hub only.
+scope; rendezvous is strictly per-pair, so a device can only ever be
+brought back by someone it holds its own pairing with — since 1.14 that
+is the only kind of peer there is (§5.6), and nobody can be reconnected
+on another player's behalf.
 
 ## 9. Privacy considerations
 

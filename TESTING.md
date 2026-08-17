@@ -56,9 +56,17 @@ flakiness at the desk should be loud enough to get studied, not absorbed.
 
 The one exception is `MANUAL_ONLY`: suites that pass locally but cannot run on
 CI hardware, skipped **only when `CI` is set** and always with the evidence
-written beside the entry (currently just `p2p-multiparty` — its relayed-gossip
-check starves on a 2-core runner). Locally, `npm test` still runs them; the CI
-summary prints each one with its reason, so the exclusion stays loud.
+written beside the entry. Locally, `npm test` still runs them; the CI summary
+prints each one with its reason, so the exclusion stays loud.
+
+**It is empty today, and that is the point of the rule.** Its one entry was
+`p2p-multiparty`, whose old M8 check waited on relayed identity gossip that
+never converged with four Chromium instances on a 2-core runner. The relay is
+gone (`p2p/PROTOCOL.md` §5.6), that suite is the scope-acceptance suite now,
+and it runs three launchers instead of four — so the entry was deleted rather
+than left standing as a permanent excuse. An entry whose underlying cause gets
+fixed goes away with it; an entry nobody can still justify is a suite quietly
+not running.
 
 ### Runner weather — what to do with an unexplained red acceptance suite
 
@@ -142,7 +150,7 @@ source of truth):
 | Sync + leaderboards | `sync-acceptance`, `leaderboard-acceptance` (+ `-unit` pairs) |
 | Records | `records-acceptance` |
 | Storage bridge / store / UI bridge | `bridge-acceptance`, `store-acceptance`, `ui-acceptance` |
-| P2P transport | `p2p-acceptance`, `p2p-multiseat`, `p2p-multiparty`, `p2p-reconnect`, `p2p-crosssign` |
+| P2P transport | `p2p-acceptance`, `p2p-multiseat`, `p2p-multiparty` (open-game scopes — the name is historical), `p2p-invite-ux`, `p2p-reconnect`, `p2p-crosssign` |
 | Identity | `user-identity-acceptance` (+ `-unit`) |
 | Catalog / configs / SDK | `catalog-acceptance`, `configs-acceptance`, `configs-p2p-acceptance`, `sdk-helpers` |
 | Audio graph | `node tools/audio-graph-acceptance.mjs` (real WebAudio, no server) |

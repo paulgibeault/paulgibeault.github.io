@@ -333,7 +333,12 @@ details[open] summary {
 .p2p-stage-error { color: #f87171; }
 .p2p-stage-arrow { color: #555; }
 
-/* ---- v1.6.0: guided "Play Together" experience ---- */
+/* ---- v1.6.0: the guided ceremony (shipped as "Play Together") ----
+   The styles are still exactly these; the name is not. v1.14 renamed the
+   flow to "New connection", because finishing it links two devices and no
+   longer seats anyone at a game (p2p-ui.js's header comment). Kept as a
+   version row rather than rewritten, so the block still says when it
+   arrived. */
 .p2p-guide {
     font-size: 16px;
     line-height: 1.5;

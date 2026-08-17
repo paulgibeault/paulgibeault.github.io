@@ -58,6 +58,15 @@ surface is unchanged in shape; what narrowed is which devices it reflects.
   for an unattached game, which is what a world without parties means. Still
   callable (the `peer.party` cap is still advertised) so no shipped game
   breaks on a launcher deploy; do not write new code against them.
+- **Your game can now be started by someone else's invite.** No SDK change,
+  but a launcher behavior worth knowing: accepting "⟨name⟩ wants to play
+  ⟨game⟩" mounts that game and focuses it. So a game may find itself mounted
+  with a scope already open — `welcome` can carry a live `peerStatus` and a
+  non-empty roster on the very first frame, and `onReady` can fire before any
+  player has touched your UI. Don't cache `status()` at init and don't assume
+  the first thing that happens is a tap on your menu. The prompt names your
+  game from its **catalog** entry, not from any title your game sets at
+  runtime: what is being proposed is the game, not the screen it is on.
 
 ## 3.13.0
 

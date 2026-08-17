@@ -8,8 +8,10 @@
  *   - arcade-save.js's importSaveFile (a save-file restore)
  * and one producer feeds it inbound replication frames from paired devices:
  *   - arcade-p2p.js's onSyncEnvelope, which already restricts delivery to
- *     DIRECT links with a completed identity binding (relayed/host-forwarded
- *     frames are dropped transport-side, never reach here).
+ *     DIRECT links with a completed identity binding (a frame carrying the
+ *     legacy `relayed` stamp is refused there and never reaches here —
+ *     since transport v1.14 nothing forwards frames between devices at all,
+ *     so a stamped frame cannot have come from our direct partner).
  *
  * Trust posture: a paired device only gains write authority over this
  * device's storage once BOTH sides have opted the pair in

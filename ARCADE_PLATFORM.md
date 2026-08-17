@@ -240,6 +240,9 @@ The launcher derives every path from the FRAME's mounted gameId — nothing an a
 
 ```
 child  → parent: { type: 'arcade:peer.send',         payload, to? }        // to = target deviceId (targeted send)
+child  → parent: { type: 'arcade:peer.invite',       id }                 // cap 'peer.invite'; asks the launcher to
+                                                                          // propose THIS game to connections that
+                                                                          // lack it — answered via arcade:bridge.result
 parent → child:  { type: 'arcade:peer.message',      payload, fromPeer, meta }  // fromPeer = sender deviceId;
                                                                            // meta = { relayed, to: 'me'|'all' }
 parent → child:  { type: 'arcade:peer.status',       status }
@@ -277,20 +280,20 @@ dialogs use. `arcade-ui-bridge.js` services the ops behind the launcher's
 frame-identity boundary; dialogs render in the launcher's serialized
 focus-trap modal, prefixed with the app's catalog name.
 
-Twenty-five message types total (see GAME_INTEGRATION.md §14 for the full summary table). The launcher routes peer messages by `gameId` so multiple games could in principle multiplex one connection, though the current design assumes one foreground game at a time. Between launchers, presence frames (`{arcade:1, kind:'presence'|'presence-ack', gameId}`) announce that a game is mounted and listening; the receiving launcher surfaces them to the matching game as `arcade:peer.ready`.
+GAME_INTEGRATION.md §14 carries the full summary table. Peer messages are routed by `gameId`, and several games really do multiplex one connection: a link can carry a different **open-game scope** for each game the two devices agreed to play, and closing one leaves the others alone. `gameId` selects among a link's open scopes — it never grants access to one, which is why an inbound frame naming a game that isn't open on its arrival link is dropped rather than delivered (`p2p/PROTOCOL.md` §5.6). A scope lives exactly as long as its game stays mounted in the frame pool and the link stays up: backgrounding a game keeps it, while quitting or an LRU eviction closes it, so a peer can never be left sending into a game that is no longer there. Between launchers, presence frames (`{arcade:1, kind:'presence'|'presence-ack', gameId}`) announce that a game is mounted and listening; the receiving launcher surfaces them to the matching game as `arcade:peer.ready`.
 
 ---
 
 ## Multiplayer transport — serverless P2P backbone (IMPLEMENTED)
 
-The transport behind `Arcade.peer.*` lives in `p2p/` (v1.13, maintained in this repo — it originated in the now-archived QRCodeP2P project): WebRTC data channels with **no signaling server** — the offer/answer exchange travels through QR codes or chat links. Proven cross-engine (Chrome/Firefox/WebKit) with automated Playwright tests; see `p2p/PROTOCOL.md` for the wire format.
+The transport behind `Arcade.peer.*` lives in `p2p/` (v1.14, maintained in this repo — it originated in the now-archived QRCodeP2P project): WebRTC data channels with **no signaling server** — the offer/answer exchange travels through QR codes or chat links. Proven cross-engine (Chrome/Firefox/WebKit) with automated Playwright tests; see `p2p/PROTOCOL.md` for the wire format.
 
 **Implementation map (this repo):**
 
 | Piece | File | Notes |
 | ----- | ---- | ----- |
 | Transport | `p2p/` | maintained in-repo (see `p2p/README.md`); QR libs vendored under `p2p/vendor/` so runtime never touches a CDN |
-| Launcher bridge | `arcade-p2p.js` | lazy ES module: status mapping (transport → SDK vocabulary), `{arcade:1, gameId, payload}` envelope, per-game routing |
+| Launcher bridge | `arcade-p2p.js` | lazy ES module: status mapping (transport → SDK vocabulary), `{arcade:1, gameId, payload}` envelope, open-game scopes (which games a link may carry) and the per-game routing they gate |
 | Launcher wiring | `index.html` platformController | Multiplayer menu item, `arcade:peer.send` → bridge, bridge status → `arcade:peer.status` broadcast, `#p2p-offer/answer` fragment boot |
 | Game-facing API | `arcade-sdk.js` `Arcade.peer.*` | unchanged — games needed zero edits |
 | Proof | `tools/p2p-acceptance.mjs` (`npm run p2p-acceptance`) + `tools/fixtures/p2p-test-game/` | two headless launchers, real RTCPeerConnection, fixture game speaks only SDK |
