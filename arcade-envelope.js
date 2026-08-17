@@ -56,6 +56,12 @@ export function isCappedString(v, max) {
     return typeof v === 'string' && v.length <= max;
 }
 
+// The four moves of the open-game scope handshake (plans/tables-2026-08.md
+// D4): either end may propose, the other accepts or declines, and either may
+// close afterwards. A closed set, so an unknown op is a malformed frame
+// rather than something a future launcher might mean.
+const SCOPE_OPS = new Set(['invite', 'accept', 'decline', 'close']);
+
 /**
  * Structural classifier for the transport-level arcade envelope — the frames
  * launchers exchange over P2P data channels (see the wire-envelope table in
@@ -64,19 +70,32 @@ export function isCappedString(v, max) {
  * 'sync' BODY is owned by validateSyncEnvelope (arcade-sync-core.js).
  *
  * Mirrors the router's historical accepts exactly, including the deliberate
- * fall-through: any kind other than presence/presence-ack/sync/leaderboard/
- * config/backup/revoke/identity is a game frame and needs a string gameId. New
- * launcher-level kinds MUST classify here (and carry NO top-level gameId) —
- * otherwise a legacy launcher's fall-through misroutes them as game frames.
+ * fall-through: any kind other than presence/presence-ack/scope/sync/
+ * leaderboard/config/backup/revoke/identity is a game frame and needs a string
+ * gameId. New launcher-level kinds MUST classify here (and carry NO top-level
+ * gameId) — otherwise a legacy launcher's fall-through misroutes them as game
+ * frames.
  *
- * @returns {{ok:true, kind:'presence'|'sync'|'leaderboard'|'config'|'backup'|'revoke'|'identity'|'game'} |
- *           {ok:false, reason:'not-arcade'|'bad-gameId'|'bad-deviceId'}}
+ * @returns {{ok:true, kind:'presence'|'scope'|'sync'|'leaderboard'|'config'|'backup'|'revoke'|'identity'|'game'} |
+ *           {ok:false, reason:'not-arcade'|'bad-gameId'|'bad-deviceId'|'bad-scope'}}
  */
 export function validatePeerEnvelope(env) {
     if (!isPlainObject(env) || env.arcade !== 1) return { ok: false, reason: 'not-arcade' };
     if (env.kind === 'presence' || env.kind === 'presence-ack') {
         if (typeof env.gameId !== 'string') return { ok: false, reason: 'bad-gameId' };
         return { ok: true, kind: 'presence' };
+    }
+    if (env.kind === 'scope') {
+        // Open-game scope negotiation (invite/accept/decline/close). The game
+        // id rides in `g`, NOT a top-level gameId: the wire name would put
+        // this frame straight through a pre-scope launcher's fall-through and
+        // into a game's onMessage as a payload-less delivery. `g`-shaped, it
+        // fails that launcher's bad-gameId gate instead, which is the correct
+        // answer for a launcher that cannot honor it. (Same reasoning as
+        // 'config', which carries its game id in `g` for the same reason.)
+        if (typeof env.g !== 'string' || !env.g) return { ok: false, reason: 'bad-scope' };
+        if (!SCOPE_OPS.has(env.op)) return { ok: false, reason: 'bad-scope' };
+        return { ok: true, kind: 'scope' };
     }
     if (env.kind === 'sync') return { ok: true, kind: 'sync' };
     if (env.kind === 'leaderboard') return { ok: true, kind: 'leaderboard' }; // body owned by validateLeaderboardEnvelope

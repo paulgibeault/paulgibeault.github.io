@@ -20,7 +20,7 @@ import { startP2PHarness, makeCheck } from './lib/p2p-test-harness.mjs';
 
 const { check, failed } = makeCheck();
 const harness = await startP2PHarness({ port: 4799, dropPort: 4798 });
-const { launcherPage, bootBridge, ceremony, fixtureFrame } = harness;
+const { launcherPage, bootBridge, ceremony, fixtureFrame, openScope } = harness;
 
 // SEPARATE contexts per simulated device: distinct localStorage + IndexedDB,
 // so deviceIds and identity certificates genuinely differ like real devices.
@@ -59,9 +59,41 @@ try {
         });
     }
     const fH = await fixtureFrame(H, 'p2p-test-game'), fJ = await fixtureFrame(J, 'p2p-test-game');
-    await fH.waitForFunction(`window.__peerStatus && window.__peerStatus() === 'connected'`, null, { timeout: 10000 });
-    await fJ.waitForFunction(`window.__peerStatus && window.__peerStatus() === 'connected'`, null, { timeout: 10000 });
-    check('game sees peer.status connected via SDK handshake alone', true);
+
+    // 4a. A CONNECTION IS NOT PERMISSION TO PLAY. The devices are paired and
+    //     the same game is mounted on both, and that is deliberately not
+    //     enough: until the two ends agree to play THIS game together, the
+    //     game reads 'idle' with an empty roster.
+    await fH.waitForFunction(`window.__peerStatus && typeof window.__invite === 'function'`, null, { timeout: 10000 });
+    const preStatus = await fH.evaluate(() => window.__peerStatus());
+    const prePeers = await fH.evaluate(() => window.__peers());
+    check("game reads 'idle' with an empty roster on a live link with no open scope",
+        preStatus === 'idle' && prePeers.length === 0, `${preStatus} / ${prePeers.length} peers`);
+    const preSend = await fH.evaluate(() => window.__send({ preScope: 1 }));
+    check('send() before the scope opens is refused, not queued', preSend === false);
+
+    // 4b. Open it: host proposes, joiner accepts.
+    const proposals = await openScope(H, J, 'p2p-test-game');
+    check('inviteGame proposed to the one live connection', proposals === 1, String(proposals));
+    await fH.waitForFunction(`window.__peerStatus() === 'connected'`, null, { timeout: 10000 });
+    await fJ.waitForFunction(`window.__peerStatus() === 'connected'`, null, { timeout: 10000 });
+    check('both games see peer.status connected once the scope is open', true);
+    check('the pre-scope broadcast never arrived',
+        !(await fJ.evaluate(() => window.__got.some(p => p && p.preScope))));
+    check('accepting the invite fires onReady on both ends',
+        (await fH.evaluate(() => window.__readyEvents.length > 0))
+        && (await fJ.evaluate(() => window.__readyEvents.length > 0)));
+
+    // 4c. The retired party trio still answers its documented unattached
+    //     values, which is the promise that lets shipped games run unmodified.
+    const [party, parties, attached] = await Promise.all([
+        fH.evaluate(() => window.__party()),
+        fH.evaluate(() => window.__parties()),
+        fH.evaluate(() => window.__attach('anything'))
+    ]);
+    check('retired peer.party()/parties()/attach() resolve null / [] / null',
+        party === null && Array.isArray(parties) && parties.length === 0 && attached === null,
+        JSON.stringify([party, parties, attached]));
 
     // 5. Game-to-game messages through the full stack, both directions.
     await fH.evaluate(() => window.__send({ hello: 'from-host', n: 42 }));
@@ -85,7 +117,11 @@ try {
 
     // 7. Resilience (transport v1.7): a link blip must surface to games as
     //    'interrupted' — never 'idle' — sends must keep working (queued), and
-    //    the link must heal itself without any ceremony.
+    //    the link must heal itself without any ceremony. The 'idle' baseline
+    //    is taken HERE, not at mount: a game legitimately reads 'idle' before
+    //    its scope opens, and the promise under test is about what happens
+    //    after it does.
+    const statusBaseH = await fH.evaluate(() => window.__statuses.length);
     await H.evaluate(() => {
         const pm = window.__arcade.p2p._addon().peerNode;
         const peerId = Array.from(pm.peers.keys())[0];
@@ -107,7 +143,7 @@ try {
     await fH.waitForFunction(`window.__peerStatus() === 'connected'`, null, { timeout: 15000 });
     check('link self-heals back to connected without a new ceremony', true);
 
-    const sawIdle = await fH.evaluate(() => window.__statuses.includes('idle'));
+    const sawIdle = await fH.evaluate((n) => window.__statuses.slice(n).includes('idle'), statusBaseH);
     check("game never saw 'idle' during the blip", !sawIdle);
 
     // 8. Identity pinning (transport v1.8): the host must have recorded the

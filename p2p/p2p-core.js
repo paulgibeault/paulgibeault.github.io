@@ -243,37 +243,31 @@ async function identityDbPut(key, value) {
 // already have — it can only renegotiate the one link it is an endpoint of.
 //
 // TARGETED SENDS (v1.11): sendTo(peerId, text) is the public single-link
-// send. App frames may carry `noRelay: true` — the host's relay loop skips
-// such frames, so a targeted frame sent to the host is never fanned out to
-// the other clients. Targeted frames ride the same per-link outbox (and the
-// session stash of a dead-but-repairing link), so exactly-once replay across
-// blips and rendezvous repairs applies to them unchanged. The transport
-// knows nothing about WHO a target is beyond its transient peerId — any
-// higher-level addressing (stable device identity) lives in the layer above.
+// send. Targeted frames ride the same per-link outbox (and the session stash
+// of a dead-but-repairing link), so exactly-once replay across blips and
+// rendezvous repairs applies to them unchanged. The transport knows nothing
+// about WHO a target is beyond its transient peerId — any higher-level
+// addressing (stable device identity) lives in the layer above.
 //
-// PARTIES (v1.13): links group into disjoint local "parties" — one
-// ceremony-star each. The node's role is PER-PARTY ('leader' fans app frames
-// between that party's links; 'member' holds one link to its leader),
-// replacing the node-global isHost/relay pair, so one node can lead a party
-// while being a member of others (and hold utility links that relay
-// nothing). Party ids are LOCAL-ONLY and never travel on the wire: a frame's
-// party is the party of the link it arrived on, which is what keeps relay —
-// and the forged-`relayed` strip — from ever crossing party boundaries.
-// `isHost` survives as a deprecated single-party mirror for legacy
-// party-less callers (createOffer()/createAnswer() with no party opts) and
-// hand-rolled embedder state; nothing inside this class keys behavior on it
-// except as a fallback for links that carry no partyId.
+// NO RELAY (v1.14): an app frame is NEVER forwarded from one link to
+// another. Through v1.13 the inviter of a multi-peer session acted as a hub,
+// fanning each spoke's frames out to the other spokes of its party and
+// stamping them `relayed`. A sweep of every game that names Arcade.peer
+// (plans/tables-2026-08.md, "Evidence: what the fleet actually uses") found
+// no consumer for that: both games that use the API send every gameplay
+// frame targeted over a direct link, and the fan-out actively BROKE the
+// multi-seat one — a member's lobby broadcast reached fellow members only as
+// a relayed frame, which that game rejects as spoofed. So the hub, the
+// per-party role and the `relayed` stamp/strip are deleted rather than
+// rescoped: this node dispatches every inbound app frame locally and
+// re-emits it nowhere. Which games may talk over which link is decided one
+// layer up — the bridge's open-game scopes (PROTOCOL §5.6) — and the
+// transport stays what it already mostly was: links, identity binding,
+// resilience, replay, signaling.
 export class PeerManager extends EventTarget {
     constructor(options = {}) {
         super();
         this.peers = new Map();
-        this.isHost = false;
-        // partyId → { role: 'leader' | 'member' }. Ids come from generateId()
-        // and exist only in this node's RAM (see the PARTIES class comment).
-        this.parties = new Map();
-        // The party legacy party-less entry points operate on — the v1.12
-        // single-party world reduces to "the default party is the only one".
-        this.defaultPartyId = null;
         this.myId = this.generateId();
 
         // Configuration options
@@ -302,10 +296,12 @@ export class PeerManager extends EventTarget {
             wakeProbeTimeoutMs: options.wakeProbeTimeoutMs || 3000,
             outboxLimit: options.outboxLimit || 1000,
             // Largest single app frame accepted off a link (measured as wire
-            // string length). Bounds the host relay's per-frame fan-out to the
-            // other N-1 clients — an amplification vector otherwise. Generous:
-            // real game-state frames sit far below this; big transfers go
-            // through the SDK's chunked sendBlob path, not send().
+            // string length). A sanity bound on what one peer can hand this
+            // device's message handlers in a single frame. Generous: real
+            // game-state frames sit far below this; big transfers go through
+            // the SDK's chunked sendBlob path, not send(). (Through v1.13 it
+            // also capped the hub relay's fan-out amplification — there is no
+            // relay left to amplify.)
             maxAppFrameBytes: options.maxAppFrameBytes || 256 * 1024,
             // A stashed dead session is only resumable for this long. Beyond it
             // the buffered outbox is stale and the entry is discarded rather
@@ -415,7 +411,6 @@ export class PeerManager extends EventTarget {
         const desc = peerData.connection && peerData.connection.remoteDescription;
         return {
             type: peerData.type,
-            partyId: peerData.partyId || null,
             outSeq: peerData.outSeq,
             lastInSeq: peerData.lastInSeq,
             outbox: peerData.outbox,
@@ -463,10 +458,8 @@ export class PeerManager extends EventTarget {
         // outbox) carries over from a live entry or the stash, so the resync
         // exchange on channel-open replays anything the peer missed.
         let inherited = null;
-        let priorPartyId = null;
         if(this.peers.has(peerId)) {
             const existing = this.peers.get(peerId);
-            priorPartyId = existing.partyId || null;
             if (opts.preserveSession) inherited = this._sessionSnapshot(existing);
             this._clearPeerTimers(existing);
             existing._tearingDown = true;
@@ -475,7 +468,6 @@ export class PeerManager extends EventTarget {
             this.peers.delete(peerId);
         } else if (opts.preserveSession && this.sessionStash.has(peerId)) {
             inherited = this.sessionStash.get(peerId);
-            priorPartyId = inherited.partyId || null;
             this.sessionStash.delete(peerId);
         }
         // Only resume a session onto a link that proves it's the same remote
@@ -495,10 +487,6 @@ export class PeerManager extends EventTarget {
             dataChannel: null,
             status: 'new',
             type: type,
-            // A repaired link rejoins the party its session belonged to; a
-            // fresh link takes the ceremony's party. null only for
-            // hand-rolled legacy state (see the PARTIES class comment).
-            partyId: (inherited && inherited.partyId) || opts.partyId || null,
             // Resilience state (v1.7) — see the class comment.
             polite: type === 'host',   // the JOINER defers during offer glare
             canRenegotiate: false,     // true once the data channel first opens
@@ -525,9 +513,6 @@ export class PeerManager extends EventTarget {
             peerData.outboxOverflowed = !!inherited.outboxOverflowed;
         }
         this.peers.set(peerId, peerData);
-        // Replacing a link can strand its old party (e.g. a stale stash whose
-        // session was refused resumption into a different ceremony).
-        if (priorPartyId && priorPartyId !== peerData.partyId) this._gcParty(priorPartyId);
 
         peerConnection.oniceconnectionstatechange = () => {
             const pd = this.peers.get(peerId);
@@ -667,11 +652,9 @@ export class PeerManager extends EventTarget {
             return;
         }
 
-        // Cap app-frame size before it can be relayed to the other N-1 clients
-        // or dispatched locally. One client sending a multi-megabyte frame would
-        // otherwise be fanned out by the host as an amplification vector; real
-        // frames are small (large transfers use the SDK's chunked sendBlob).
-        // Dropped without an ack so we never pretend to have delivered it — the
+        // Cap app-frame size before dispatching it locally: real frames are
+        // small (large transfers use the SDK's chunked sendBlob). Dropped
+        // without an ack so we never pretend to have delivered it — the
         // sender's own outbox cap bounds any retry.
         if (raw.length > this.options.maxAppFrameBytes) {
             this.dispatchEvent(new CustomEvent('diagnostic', { detail: {
@@ -681,25 +664,6 @@ export class PeerManager extends EventTarget {
         }
 
         const msg = (parsed && typeof parsed === 'object') ? parsed : { text: raw, from: peerId }; // legacy string fallback
-
-        // Relay authority is PER-PARTY (v1.13): it comes from the ARRIVAL
-        // LINK's party, never from a node-global flag — a node that leads
-        // party A while a member of party B relays frames arriving on A's
-        // links and treats frames arriving on B's hub link like any joiner.
-        // Links without a party (hand-rolled legacy state) fall back to the
-        // deprecated isHost mirror.
-        const arrivalPartyId = peerData.partyId || null;
-        const leadsArrivalParty = arrivalPartyId
-            ? this.partyRole(arrivalPartyId) === 'leader'
-            : this.isHost;
-
-        // The party's leader is the ONLY node that stamps `relayed` — every
-        // frame the leader receives arrived on a direct link from its origin,
-        // so an inbound relayed:true on a link we lead is always forged.
-        // Strip it before it can reach the relay loop or local dispatch (a
-        // sender could otherwise launder its frames into "arrived through the
-        // hub" and defeat relay-tag attribution in the layer above).
-        if (leadsArrivalParty && msg.relayed) delete msg.relayed;
 
         // Reliability: dedup by link sequence, acknowledge what we've seen.
         if (typeof msg.seq === 'number') {
@@ -712,49 +676,15 @@ export class PeerManager extends EventTarget {
             this._sendControl(peerId, { __p2pc: 'ack', upTo: msg.seq });
         }
 
-        // The leader relays APP messages between its party's spokes — each
-        // destination link gets its own reliability sequence, and the relay
-        // marks the frame so receivers know it did NOT originate from their
-        // direct link partner (identity/fingerprint claims must never bind
-        // through a relay). The leader always stamps relayed:true itself, so
-        // a sender cannot launder a relayed frame into looking direct.
+        // Local dispatch, and nothing else (v1.14). There is no fan-out loop
+        // here any more: whatever this frame claims about itself, it reaches
+        // this device's own listeners and is re-emitted on NO other link.
         //
-        // `from` is stamped with the source LINK's peerId — the leader-assigned
-        // identifier of the data channel this frame actually arrived on — NOT
-        // the sender-supplied `msg.from`. A client controls its own `msg.from`,
-        // so relaying it verbatim would let any joiner post a message that the
-        // other peers attribute to a different peer. peerId cannot be forged:
-        // it is the key under which this inbound channel is registered.
-        // (Inbound frames are always from a remote client, never the leader, so
-        // there is no leader-origin frame to exclude here.)
-        //
-        // Frames marked `noRelay` are targeted (v1.11) — the sender aimed
-        // them at this device alone, so the hub must not fan them out.
-        //
-        // A frame is NEVER relayed across parties (v1.13): only links and
-        // stashes of the arrival link's own party receive the fan-out.
-        if (leadsArrivalParty && !msg.noRelay) {
-            const relayFrame = { text: msg.text, from: peerId, relayed: true };
-            this.peers.forEach((destData, destId) => {
-                if (destId === peerId) return;
-                if ((destData.partyId || null) !== arrivalPartyId) return;
-                this._sendAppTo(destId, relayFrame);
-            });
-            // A joiner whose link is terminally dead and mid-rendezvous-adoption
-            // is not in `peers` — mirror broadcast()'s stash handling so the
-            // frames other joiners send during the repair window replay on
-            // adoption, keeping the exactly-once guarantee that direct traffic
-            // has (otherwise these frames live in no outbox and are lost).
-            // Same-party stashes only: a repairing seat of ANOTHER party must
-            // never inherit this party's frames.
-            this.sessionStash.forEach((stash, destId) => {
-                if (destId === peerId) return;
-                if ((stash.partyId || null) !== arrivalPartyId) return;
-                this._stashAppend(stash, relayFrame);
-            });
-        }
-
-        // Destructure only the expected fields to avoid merging arbitrary keys
+        // Destructure only the expected fields to avoid merging arbitrary
+        // keys. `relayed` is reserved-legacy (PROTOCOL §5.1): this node never
+        // stamps it, so a true value can only come from a pre-v1.14 hub — it
+        // is reported verbatim so the layer above can REFUSE such a frame
+        // rather than misattribute it to the hub it arrived from.
         const { text, from, relayed } = msg;
         this.dispatchEvent(new CustomEvent('message', {
             detail: { text, from, relayed: !!relayed, incoming: true, peerId }
@@ -880,10 +810,12 @@ export class PeerManager extends EventTarget {
      */
     // Serializes an app frame for the wire. Whitelist, not passthrough:
     // only the fields every peer understands may travel, so a sender cannot
-    // smuggle arbitrary keys into another peer's message handler.
+    // smuggle arbitrary keys into another peer's message handler. `relayed`
+    // is absent by construction (v1.14 — nothing relays); `noRelay` still
+    // travels on targeted frames so a PRE-v1.14 hub on the other end of the
+    // link keeps its promise not to fan them out.
     _appWire(msg, seq) {
         const frame = { text: msg.text, from: msg.from, seq };
-        if (msg.relayed) frame.relayed = true;
         if (msg.noRelay) frame.noRelay = true;
         return JSON.stringify(frame);
     }
@@ -945,22 +877,24 @@ export class PeerManager extends EventTarget {
         }
     }
 
-    broadcast(message, excludePeerId = null, opts = {}) {
+    /**
+     * Sends one app frame on EVERY link (and every repairing stash). This is
+     * device-level traffic — the identity announce is the only caller left.
+     * Per-game fan-out is NOT this method's job any more (v1.14): the bridge
+     * owns which links a game may reach and sends per link, because "every
+     * link" and "every link where game g is open" are different sets and the
+     * transport knows nothing about games.
+     */
+    broadcast(message, excludePeerId = null) {
         // Accepts {text, from} or a pre-stringified JSON of one.
         let msg = message;
         if (typeof message === 'string') {
             try { msg = JSON.parse(message); } catch(e) { msg = null; }
             if (!msg || typeof msg !== 'object') msg = { text: message, from: this.myId };
         }
-        // opts.partyId scopes the fan-out to one party's links and stashes
-        // (v1.13). Omitted → every link, exactly the pre-party behavior —
-        // right for device-level traffic (identity announce), wrong for
-        // game traffic on a multi-party node, whose layer passes the party.
-        const partyFilter = opts.partyId !== undefined ? (opts.partyId || null) : undefined;
         let sent = false;
         this.peers.forEach((peerData, pId) => {
             if (pId === excludePeerId) return;
-            if (partyFilter !== undefined && (peerData.partyId || null) !== partyFilter) return;
             if (this._sendAppTo(pId, msg)) sent = true;
         });
         // Terminally-dead sessions awaiting adoption (rendezvous repair) keep
@@ -969,7 +903,6 @@ export class PeerManager extends EventTarget {
         // nothing. Bounded by the same outbox cap.
         this.sessionStash.forEach((stash, pId) => {
             if (pId === excludePeerId) return;
-            if (partyFilter !== undefined && (stash.partyId || null) !== partyFilter) return;
             this._stashAppend(stash, msg);
             sent = true;
         });
@@ -978,8 +911,8 @@ export class PeerManager extends EventTarget {
 
     /**
      * Public single-link send (v1.11). Wraps `text` like send() but delivers
-     * to ONE peer, with the frame marked `noRelay` (default) so a receiving
-     * host never fans it out. Rides the same per-link outbox as broadcast —
+     * to ONE peer, with the frame marked `noRelay` (default) so a PRE-v1.14
+     * host on the far end never fans it out. Rides the same per-link outbox as broadcast —
      * queued while 'interrupted', appended to the session stash while a
      * dead link awaits rendezvous adoption — so replay is exactly-once.
      * Returns true when sent or queued, false when the peerId is unknown.
@@ -1165,10 +1098,7 @@ export class PeerManager extends EventTarget {
         if (peerData.everConnected) {
             this.sessionStash.set(peerId, this._sessionSnapshot(peerData));
             while (this.sessionStash.size > 8) {
-                const evictId = this.sessionStash.keys().next().value;
-                const evicted = this.sessionStash.get(evictId);
-                this.sessionStash.delete(evictId);
-                if (evicted && evicted.partyId) this._gcParty(evicted.partyId);
+                this.sessionStash.delete(this.sessionStash.keys().next().value);
             }
         }
         try { peerData.dataChannel?.close(); } catch(_) {}
@@ -1177,9 +1107,6 @@ export class PeerManager extends EventTarget {
             peerData.connection.close();
         } catch(_) {}
         this.peers.delete(peerId);
-        // A stashed session (everConnected above) still references the party,
-        // so this only collects a party whose last trace is truly gone.
-        this._gcParty(peerData.partyId);
         this.dispatchEvent(new CustomEvent('chatState', { detail: { peerId, ready: false } }));
         this.dispatchEvent(new CustomEvent('status', { detail: { peerId, status: finalStatus } }));
     }
@@ -1191,14 +1118,18 @@ export class PeerManager extends EventTarget {
 
     // ==========================================
     // READ MODEL (v1.12) — the supported way for the layers above (launcher
-    // glue, ceremony UI) to observe transport state. `isHost` and the public
-    // methods are API; `peers`, `sessionStash` and `options` are internal —
-    // never reach into them from outside this file.
+    // glue, ceremony UI) to observe transport state. The public methods are
+    // API; `peers`, `sessionStash` and `options` are internal — never reach
+    // into them from outside this file.
     // ==========================================
 
     /**
      * Connection-liveness snapshot for UI, so callers don't reach into the
-     * internal `peers`/`sessionStash`/`isHost` state to derive it themselves.
+     * internal `peers`/`sessionStash` state to derive it themselves. Flat by
+     * design (v1.14): there is no per-party breakdown any more because there
+     * are no parties. Per-GAME reporting is the bridge's job — only it knows
+     * which games are open on which link — and it builds that from
+     * linkStatus()/hasStashedSession() per link, not from a grouping here.
      */
     statusSummary() {
         let connected = 0, interrupted = 0, finalizing = 0, pending = 0;
@@ -1209,89 +1140,10 @@ export class PeerManager extends EventTarget {
             else pending++;
         });
         const stashed = this.sessionStash.size;
-        // Per-party breakdown (v1.13). The aggregate fields above and the
-        // deprecated isHost mirror stay for single-party consumers.
-        const parties = [];
-        this.parties.forEach((party, partyId) => {
-            const ps = { partyId, role: party.role, isDefault: partyId === this.defaultPartyId,
-                connected: 0, interrupted: 0, finalizing: 0, pending: 0, stashed: 0 };
-            this.peers.forEach((p) => {
-                if ((p.partyId || null) !== partyId) return;
-                if (p.status === 'connected') ps.connected++;
-                else if (p.status === 'interrupted') ps.interrupted++;
-                else if (p.status === 'finalizing') ps.finalizing++;
-                else ps.pending++;
-            });
-            this.sessionStash.forEach((s) => { if ((s.partyId || null) === partyId) ps.stashed++; });
-            parties.push(ps);
-        });
         return {
             connected, interrupted, finalizing, pending, stashed,
             established: this.peers.size > 0 || stashed > 0,
-            isHost: this.isHost,
-            parties,
         };
-    }
-
-    /** The partyId a link (live entry first, then stash) belongs to, or null. */
-    partyOf(peerId) {
-        const p = this.peers.get(peerId);
-        if (p) return p.partyId || null;
-        const s = this.sessionStash.get(peerId);
-        return s ? (s.partyId || null) : null;
-    }
-
-    /** 'leader' | 'member' for a known party, null otherwise. */
-    partyRole(partyId) {
-        const party = this.parties.get(partyId);
-        return party ? party.role : null;
-    }
-
-    /**
-     * One party's links: [{peerId, status, live}] — a stashed (repairing/
-     * dead) session reports status 'stashed' with live:false.
-     */
-    partyPeers(partyId) {
-        const out = [];
-        this.peers.forEach((p, peerId) => {
-            if ((p.partyId || null) === partyId) out.push({ peerId, status: p.status, live: true });
-        });
-        this.sessionStash.forEach((s, peerId) => {
-            if ((s.partyId || null) === partyId) out.push({ peerId, status: 'stashed', live: false });
-        });
-        return out;
-    }
-
-    /**
-     * A member party's single hub link id (live first, then stashed during a
-     * repair window). Null for a party this node leads, or an unknown party.
-     */
-    hubLinkId(partyId) {
-        if (this.partyRole(partyId) !== 'member') return null;
-        for (const [pid, p] of this.peers) {
-            if (p.type === 'host' && (p.partyId || null) === partyId) return pid;
-        }
-        for (const [pid, s] of this.sessionStash) {
-            if (s.type === 'host' && (s.partyId || null) === partyId) return pid;
-        }
-        return null;
-    }
-
-    /**
-     * Ends one party locally: drops its live links (terminal status events
-     * fire per link) and forgets its stashed sessions, so nothing lingers to
-     * repair into it. The party record itself is collected with the last
-     * reference. A member "leaves the party"; a leader ends it for everyone
-     * it is directly linked to.
-     */
-    closeParty(partyId) {
-        const liveIds = [];
-        this.peers.forEach((p, id) => { if ((p.partyId || null) === partyId) liveIds.push(id); });
-        liveIds.forEach((id) => this.disconnectPeer(id)); // may stash — swept next
-        const stashIds = [];
-        this.sessionStash.forEach((s, id) => { if ((s.partyId || null) === partyId) stashIds.push(id); });
-        stashIds.forEach((id) => this.sessionStash.delete(id));
-        this._gcParty(partyId);
     }
 
     /** True while this peerId holds a live entry (any status, pre- or post-connect). */
@@ -1317,11 +1169,10 @@ export class PeerManager extends EventTarget {
      * A joiner's single direct link is by definition the host. Prefers the
      * live entry typed 'host'; during a stash-repair window (entry torn down,
      * outbox stashed) the stash preserves the link type, so it is checked
-     * next. Null on a host node (its links are all joiners) or when no host
-     * link exists in either place.
+     * next. Null on a host node (its links are all joiners, so nothing here
+     * is typed 'host') or when no host link exists in either place.
      */
     hostLinkId() {
-        if (this.isHost) return null;
         for (const [pid, p] of this.peers) {
             if (p.type === 'host') return pid;
         }
@@ -1336,12 +1187,10 @@ export class PeerManager extends EventTarget {
      * 'connected'. An 'interrupted' peer is an established session mid-repair,
      * not a failed attempt, so it survives. Routes through disconnectPeer so a
      * terminal 'status' event reaches every listener (a bare peers.delete()
-     * would wedge the layers above). Pass a partyId to abandon only that
-     * party's pending ceremonies (v1.13) — omitted, every party's.
+     * would wedge the layers above).
      */
-    abandonPending(partyId) {
+    abandonPending() {
         this.peers.forEach((p, id) => {
-            if (partyId !== undefined && (p.partyId || null) !== partyId) return;
             if (p.status !== 'connected' && p.status !== 'interrupted') {
                 this.disconnectPeer(id);
             }
@@ -1397,9 +1246,7 @@ export class PeerManager extends EventTarget {
 
     /** Drops one peer's stashed session, if any — a deliberate "start over". */
     forgetSession(peerId) {
-        const stash = this.sessionStash.get(peerId);
         this.sessionStash.delete(peerId);
-        if (stash && stash.partyId) this._gcParty(stash.partyId);
     }
 
     /**
@@ -1420,32 +1267,7 @@ export class PeerManager extends EventTarget {
     adoptConnection(peerId, connection, channel, opts = {}) {
         const prior = this.peers.get(peerId) || this.sessionStash.get(peerId);
         const type = (prior && prior.type) || opts.fallbackType || 'client';
-        // Party continuity (v1.13): a repaired link rejoins the party its
-        // session belonged to. With no prior session (full browser restart),
-        // the layer above may pass opts.partyId (persisted membership);
-        // otherwise derive a party from the link type. Leader-side fallbacks
-        // COALESCE into one adopted leader party — correct for the
-        // single-party world this fallback serves, and what restores hub
-        // relay after a hub restart (pre-v1.13, isHost was never re-derived
-        // on resume, so a restarted hub silently stopped relaying). A
-        // multi-party restart resume must pass opts.partyId explicitly.
-        let partyId = (prior && prior.partyId) || opts.partyId || null;
-        if (!partyId) {
-            if (type === 'host') {
-                partyId = this.generateId();
-                this.parties.set(partyId, { role: 'member' });
-            } else {
-                if (!this._adoptedLeaderPartyId || !this.parties.has(this._adoptedLeaderPartyId)) {
-                    this._adoptedLeaderPartyId = this.createParty();
-                }
-                partyId = this._adoptedLeaderPartyId;
-            }
-            if (!this.defaultPartyId) {
-                this.defaultPartyId = partyId;
-                this.isHost = type !== 'host'; // deprecated single-party mirror
-            }
-        }
-        const peerData = this.initPeer(peerId, type, { preserveSession: true, adoptConnection: connection, partyId });
+        const peerData = this.initPeer(peerId, type, { preserveSession: true, adoptConnection: connection });
         if (channel) this.setupDataChannel(peerId, channel);
         this.dispatchEvent(new CustomEvent('diagnostic', { detail: {
             type: 'sys', msg: `Adopted a reconnected link for ${peerId}${prior ? ' (session resumed)' : ' (fresh session)'}.`
@@ -1485,73 +1307,23 @@ export class PeerManager extends EventTarget {
             try { peerData.connection.close(); } catch(_) {}
         });
         this.peers.clear();
-        this.parties.clear();
-        this.defaultPartyId = null;
     }
 
-    // ---- parties (v1.13) --------------------------------------------------
+    // ---- ceremonies -------------------------------------------------------
+    //
+    // Every ceremony mints ONE standalone link, and that is the whole story
+    // (v1.14). There is no role to flip and no star to corrupt, so neither
+    // entry point has a guard left: a device may invite while joined and join
+    // while inviting, in any order, any number of times. The role-flip
+    // refusals ("Cannot host while joined", "Cannot join while hosting") and
+    // their per-party successors are gone with the object they protected —
+    // the link graph is symmetric and sparse, and whether two devices are
+    // playing anything together is decided per game, one layer up.
 
-    /**
-     * Mints a fresh party this node LEADS. Returns its local partyId — pass
-     * it to createOffer({partyId}) to invite players into it. Party identity
-     * never travels on the wire (PROTOCOL §5.6): a frame's party is always
-     * derived from the link it arrived on.
-     */
-    createParty() {
-        const partyId = this.generateId();
-        this.parties.set(partyId, { role: 'leader' });
-        return partyId;
-    }
-
-    /** True while any live link or stashed session references the party. */
-    _partyEstablished(partyId) {
-        for (const p of this.peers.values()) if ((p.partyId || null) === partyId) return true;
-        for (const s of this.sessionStash.values()) if ((s.partyId || null) === partyId) return true;
-        return false;
-    }
-
-    /**
-     * Collects a party whose last link/stash reference is gone. Deliberately
-     * NOT run against never-used parties (createParty() before its first
-     * ceremony) — those are collected once a link joins and later leaves.
-     */
-    _gcParty(partyId) {
-        if (!partyId || !this.parties.has(partyId)) return;
-        if (this._partyEstablished(partyId)) return;
-        this.parties.delete(partyId);
-        if (this.defaultPartyId === partyId) this.defaultPartyId = null;
-    }
-
-    async createOffer(opts = {}) {
-        // Party resolution replaces the pre-v1.13 node-global role-flip
-        // guard. The invariant is per-party: only a party's LEADER mints
-        // invites for it. Starting a NEW party is always allowed — being a
-        // member elsewhere no longer blocks hosting (the 2026-07-18
-        // field-test limitation).
-        let partyId = opts.partyId;
-        if (partyId !== undefined) {
-            const party = this.parties.get(partyId);
-            if (party && party.role === 'member') {
-                throw new Error('Only the party leader can invite new players — start a new party instead.');
-            }
-            // Unknown (or already-collected) id: revive it as a fresh party,
-            // so a caller retrying an abandoned ceremony keeps its handle.
-            if (!party) this.parties.set(partyId, { role: 'leader' });
-        } else {
-            // Legacy party-less call: v1.12 single-party semantics — operate
-            // on the default party, refuse while it is one we JOINED
-            // (flipping would corrupt that star; see PROTOCOL §5.6).
-            const dflt = this.defaultPartyId ? this.parties.get(this.defaultPartyId) : null;
-            if (dflt && dflt.role === 'member') {
-                throw new Error('Cannot host while joined to another player — start over first.');
-            }
-            if (!dflt) this.defaultPartyId = this.createParty();
-            partyId = this.defaultPartyId;
-            this.isHost = true; // deprecated single-party mirror
-        }
+    async createOffer() {
         await this._ensureCertificate();
         const peerId = this.generateId();
-        const peerData = this.initPeer(peerId, 'client', { partyId });
+        const peerData = this.initPeer(peerId, 'client');
         this.setupDataChannel(peerId, peerData.connection.createDataChannel('data'));
 
         try {
@@ -1587,29 +1359,10 @@ export class PeerManager extends EventTarget {
         }
     }
 
-    async createAnswer(offerPayload, opts = {}) {
-        // Joining always forms a FRESH party (role member, one hub link) —
-        // the inviter leads it on their side. What varies is only the legacy
-        // guard: a party-less call keeps the v1.12 refusal while the default
-        // party is one this node LEADS with links alive or repairing
-        // (dropping the relay would silently orphan its members); an
-        // explicit {newParty:true} call never conflicts with existing
-        // parties, so nothing blocks it.
-        if (!opts.newParty) {
-            const dflt = this.defaultPartyId ? this.parties.get(this.defaultPartyId) : null;
-            if (dflt && dflt.role === 'leader' && this._partyEstablished(this.defaultPartyId)) {
-                throw new Error('Cannot join while hosting — start over first.');
-            }
-        }
-        const partyId = this.generateId();
-        this.parties.set(partyId, { role: 'member' });
-        if (!opts.newParty || !this.defaultPartyId) {
-            this.defaultPartyId = partyId;
-            this.isHost = false; // deprecated single-party mirror
-        }
+    async createAnswer(offerPayload) {
         await this._ensureCertificate();
         const hostPeerId = offerPayload.peerId;
-        const peerData = this.initPeer(hostPeerId, 'host', { partyId });
+        const peerData = this.initPeer(hostPeerId, 'host');
 
         try {
             await peerData.connection.setRemoteDescription(new RTCSessionDescription(offerPayload.sessionDesc));

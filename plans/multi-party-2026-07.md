@@ -1,5 +1,32 @@
 # Multi-party: concurrent independent sessions per game
 
+> **RETIRED (2026-08-16) — superseded by
+> [`tables-2026-08.md`](tables-2026-08.md).** Everything below shipped
+> (P1–P4, 2026-07-18) and then a three-phone field test
+> ([`connection-model-2026-08.md`](connection-model-2026-08.md)) found the
+> party in the way: a device paired through the wrong door held two disjoint
+> parties, and a peer that was linked, healthy and reachable was still
+> structurally invisible to the game. The successor deletes the party as a
+> concept — connections stay, and consent to play a particular game moves to a
+> per-connection, per-game **open-game scope** — and deletes the transport
+> relay with it, because a sweep of every game that names `Arcade.peer` found
+> no consumer for the fan-out. Kept as history: this file is where the party
+> model is written down, and PROTOCOL's v1.13 row and the v1.14 row that
+> removes it are only readable against it.
+>
+> **What survives is the part that was right.** The thin-party principle below
+> (§"Thin-party principle") drew the line — *games own seating; the platform
+> never grows a per-game membership model* — and the successor keeps faith
+> with it by finishing the thought: **forwarding moves into the games too.**
+> This plan reserved relay for the framework on the grounds that games are
+> sandboxed iframes and cannot create links. True, and beside the point: a
+> multi-seat game does not need to create links, it needs to route over the
+> ones its host already holds, which is what the fleet's multi-seat game was
+> doing all along. What the implementation got wrong was not the principle but
+> where it materialized the object — the party became a pre-declared,
+> persisted, user-managed thing one layer above the principle's "named
+> ceremony-star and nothing more".
+
 Field-test driver (2026-07-18): joined to a phone host, Paul could not open a
 connection to his MacBook. "New connection" landed on the ceremony modal's
 connected dead-end ("You're connected. Only the host can add more players")

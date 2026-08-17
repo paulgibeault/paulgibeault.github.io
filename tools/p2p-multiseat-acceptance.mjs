@@ -4,11 +4,14 @@
 // peer surface: capability flags (E0), targeted sends with routing privacy
 // (E1), the per-peer roster (E2), and message metadata (E3).
 //
-// THREE real launcher pages — a host and two joiners — form the star
-// topology every multi-seat game runs on. This is the first automated
-// coverage of the multi-joiner relay path: host fan-out, host-bridge
-// forwarding of joiner→joiner targeted frames, noRelay containment, and
-// per-link interruption/repair while the rest of the table stays live.
+// THREE real launcher pages — a host and two joiners — form the shape every
+// multi-seat game runs on: two joiners adjacent to the host and NOT to each
+// other. Since the relay was removed (plans/tables-2026-08.md) the sharp
+// half of this suite is what the host does NOT do — it forwards nothing, so
+// each joiner's world is exactly its own link — alongside targeted-send
+// privacy and per-link interruption/repair while the rest of the table stays
+// live. Routing between joiners is the GAME's job now, host-authoritatively,
+// which is what every game here was already doing.
 //
 //   node tools/p2p-multiseat-acceptance.mjs
 //
@@ -67,22 +70,32 @@ try {
     const A_dev = await deviceIdOf(A);
     const B_dev = await deviceIdOf(B);
 
-    // 3. Identity knowledge must become SYMMETRIC: the host binds both
-    //    joiners directly; each joiner binds the host directly and learns
-    //    the OTHER joiner through the relay (identity gossip covers the
-    //    late-joiner case: A announced before B existed, so A re-announces
-    //    when it first sights B).
+    // 3. Identity knowledge is PER LINK, and stops there. The host binds
+    //    both joiners directly; each joiner binds only the host. The v1.13
+    //    suite asserted the opposite here — that gossip through the hub made
+    //    A and B know each other — and that knowledge was the problem: it
+    //    named devices a joiner could never actually reach except through a
+    //    forwarding path that no game wanted (and that the flagship game
+    //    rejected as spoofed). It is a NEGATION now.
     await H.waitForFunction((devs) => {
         const links = window.__arcade.p2p._identityLinks();
         return devs.every(d => d in links);
     }, [A_dev, B_dev], { timeout: 15000 });
     check('host: direct identity bindings for both joiners', true);
-    await A.waitForFunction((d) => d in window.__arcade.p2p._indirectPeers(), B_dev, { timeout: 15000 });
-    check('joiner A knows joiner B (relayed identity)', true);
-    await B.waitForFunction((d) => d in window.__arcade.p2p._indirectPeers(), A_dev, { timeout: 15000 });
-    check('joiner B knows joiner A (identity gossip re-announce)', true);
+    await A.waitForFunction((d) => d in window.__arcade.p2p._identityLinks(), H_dev, { timeout: 15000 });
+    await B.waitForFunction((d) => d in window.__arcade.p2p._identityLinks(), H_dev, { timeout: 15000 });
+    check('each joiner bound the host directly', true);
+    await new Promise(r => setTimeout(r, 1500)); // give any (wrong) gossip time to land
+    const aLinks = await A.evaluate(() => Object.keys(window.__arcade.p2p._identityLinks()));
+    const bLinks = await B.evaluate(() => Object.keys(window.__arcade.p2p._identityLinks()));
+    check('joiner A never learns joiner B, and vice versa (no gossip through the host)',
+        aLinks.length === 1 && aLinks[0] === H_dev && bLinks.length === 1 && bLinks[0] === H_dev,
+        JSON.stringify([aLinks, bLinks]));
 
-    // 4. Mount the fixture game in all three launchers.
+    // 4. Mount the fixture game in all three launchers, then OPEN it on both
+    //    of the host's links — one invite per connection, each accepted by
+    //    the joiner. A connection is not permission to play (D4), so this is
+    //    what turns two live links into one three-seat table.
     for (const page of [H, A, B]) {
         await page.evaluate(() => {
             window.__arcade.showGame('p2p-test-game', 'tools/fixtures/p2p-test-game/index.html', 'P2P Test');
@@ -90,18 +103,31 @@ try {
     }
     const fixtureFrame = (page) => harness.fixtureFrame(page, 'p2p-test-game');
     const fH = await fixtureFrame(H), fA = await fixtureFrame(A), fB = await fixtureFrame(B);
+    await fH.waitForFunction(`window.__peerStatus && typeof window.__peers === 'function'`, null, { timeout: 10000 });
+    check("the host's game is 'idle' with two live links and no open scope",
+        (await fH.evaluate(() => window.__peerStatus())) === 'idle');
+    const invited = await H.evaluate(() => window.__arcade.p2p.inviteGame('p2p-test-game'));
+    check('one inviteGame proposed to BOTH live connections', invited === 2, String(invited));
+    for (const J of [A, B]) {
+        await J.evaluate((d) => window.__arcade.p2p.acceptGameInvite(d, 'p2p-test-game'), H_dev);
+    }
     for (const f of [fH, fA, fB]) {
         await f.waitForFunction(`window.__peerStatus && window.__peerStatus() === 'connected'`, null, { timeout: 10000 });
     }
-    check('all three games see peer.status connected', true);
+    check('all three games see peer.status connected once both scopes are open', true);
+    const scopes = await H.evaluate(() => window.__arcade.p2p._gameScopes()['p2p-test-game']);
+    check("the host's scope holds both joiners",
+        scopes.length === 2 && [A_dev, B_dev].every(d => scopes.includes(d)), JSON.stringify(scopes));
 
     // 5. E0 — capability flags via the welcome.
     const caps = await fA.evaluate(() => window.__caps());
     check('E0: caps include peer.sendTo / peer.roster / peer.meta',
         ['peer.sendTo', 'peer.roster', 'peer.meta'].every(c => caps.includes(c)), caps.join(','));
 
-    // 6. E2 — roster scope: the host sees both joiners; each joiner sees
-    //    exactly the host (other joiners are a game-level concern).
+    // 6. E2 — the roster contract: EVERY entry is direct, and there may be
+    //    more than one. The host's two entries are the "more than one" case a
+    //    multi-seat game must be written for; each joiner's single entry is
+    //    the host, which is why a joiner needs no lobby frame to identify it.
     const rosterH = await fH.evaluate(() => window.__peers());
     check('E2: host roster = both joiners, connected, direct',
         rosterH.length === 2
@@ -112,6 +138,8 @@ try {
     check('E2: each joiner roster = host only (direct)',
         rosterA.length === 1 && rosterA[0].deviceId === H_dev && rosterA[0].direct === true
         && rosterB.length === 1 && rosterB[0].deviceId === H_dev);
+    check('E2: every roster entry everywhere is direct:true',
+        [...rosterH, ...rosterA, ...rosterB].every(p => p.direct === true));
 
     // 7. E1 test 1 — host → A targeted: A receives (meta 'me', not relayed),
     //    B never does. The broadcast canary AFTER the secret proves order:
@@ -128,46 +156,56 @@ try {
     const bSecret = await fB.evaluate(() => window.__rx.some(r => r.payload && r.payload.secret === 'for-A-only'));
     check('E1.1: … B never received it', !bSecret);
 
-    // 8. E1 test 2 — A → host targeted (the noRelay assertion): the host
-    //    receives, B does not — even though every ordinary joiner frame is
-    //    relayed to B by the transport hub. The canary rides the normal
-    //    relay path, which also proves relayed-frame ATTRIBUTION (B must
-    //    name A, not the relaying host) and meta.relayed (E3).
+    // 8. E1 test 2 / E3 — a joiner's BROADCAST reaches its one direct link
+    //    and stops there. The v1.13 suite used B as an ordering canary here,
+    //    because a joiner broadcast was fanned out to every other joiner by
+    //    the hub. Nothing is fanned out any more, so B is the assertion
+    //    instead of the clock: the host is the only receiver, and the frame
+    //    arrives marked NOT relayed, which is what a game's spoof check reads.
     await fA.evaluate((to) => window.__sendTo({ secret: 'for-host-only' }, to), H_dev);
     await fA.evaluate(() => window.__send({ canary: 2 }));
-    await fB.waitForFunction(`window.__got.some(p => p && p.canary === 2)`, null, { timeout: 10000 });
+    await fH.waitForFunction(`window.__got.some(p => p && p.canary === 2)`, null, { timeout: 10000 });
     const hSecret = await fH.evaluate(() => window.__rx.filter(r => r.payload && r.payload.secret === 'for-host-only'));
     check('E1.2: A → host targeted — host received exactly once, meta { to: me }',
         hSecret.length === 1 && hSecret[0].fromPeer === A_dev && hSecret[0].meta.to === 'me');
     const bLeak = await fB.evaluate(() => window.__rx.some(r => r.payload && r.payload.secret === 'for-host-only'));
-    check('E1.2: … B never received it (noRelay honored by the hub)', !bLeak);
-    const bCanary = await fB.evaluate(() => window.__rx.find(r => r.payload && r.payload.canary === 2));
-    check('E3: relayed broadcast attributed to its true sender with meta { relayed: true, to: all }',
-        !!bCanary && bCanary.fromPeer === A_dev
-        && bCanary.meta.relayed === true && bCanary.meta.to === 'all');
+    check('E1.2: … B never received it', !bLeak);
+    const hCanary = await fH.evaluate(() => window.__rx.find(r => r.payload && r.payload.canary === 2));
+    check('E3: the broadcast reached the host, attributed to A, meta { relayed: false, to: all }',
+        !!hCanary && hCanary.fromPeer === A_dev
+        && hCanary.meta.relayed === false && hCanary.meta.to === 'all');
+    check("E3: … and never reached B — a joiner's broadcast is not fanned out",
+        !(await fB.evaluate(() => window.__rx.some(r => r.payload && r.payload.canary === 2))));
 
-    // 9. E1 test 3 — A → B targeted (host-bridge forward): B receives
-    //    exactly once, attributed to A, marked relayed (it did NOT come from
-    //    B's direct link partner's own device); the host's GAME never sees it.
+    // 9. E1 test 3 — A → B targeted REFUSES. A holds no link to B and never
+    //    learns of B at all, so there is no way to name it and nothing that
+    //    would carry the frame. This is the D2 dead end, and it is meant to
+    //    surface as copy at the game layer ("ask the host to connect with
+    //    that device"), never as a transport that quietly bridges it.
+    const aToB = await A.evaluate((to) =>
+        window.__arcade.p2p.send('p2p-test-game', { secret: 'A-to-B' }, to), B_dev);
+    check('E1.3: A → B targeted is refused by the bridge (no link, nothing forwards)', aToB === false);
+    // The SDK still answers true — postMessage is one-way, so a game learns
+    // "handed to the launcher", never "delivered". Send it that way too and
+    // prove the launcher drops it rather than fanning it out.
     await fA.evaluate((to) => window.__sendTo({ secret: 'A-to-B' }, to), B_dev);
-    await fB.waitForFunction(`window.__rx.some(r => r.payload && r.payload.secret === 'A-to-B')`, null, { timeout: 10000 });
-    const bDirect = await fB.evaluate(() => window.__rx.filter(r => r.payload && r.payload.secret === 'A-to-B'));
-    check('E1.3: A → B via host forward — B received exactly once',
-        bDirect.length === 1, `${bDirect.length} deliveries`);
-    check('E1.3: … attributed to A (host-stamped), meta { to: me, relayed: true }',
-        bDirect.length === 1 && bDirect[0].fromPeer === A_dev
-        && bDirect[0].meta.to === 'me' && bDirect[0].meta.relayed === true);
-    const hLeak = await fH.evaluate(() => window.__rx.some(r => r.payload && r.payload.secret === 'A-to-B'));
-    check('E1.3: … host game never saw the forwarded frame', !hLeak);
+    await new Promise(r => setTimeout(r, 800));
+    check('E1.3: … and nobody received it — not B, not the host',
+        !(await fB.evaluate(() => window.__rx.some(r => r.payload && r.payload.secret === 'A-to-B')))
+        && !(await fH.evaluate(() => window.__rx.some(r => r.payload && r.payload.secret === 'A-to-B'))));
 
-    // 9b. Symmetry (identity gossip): the LATE joiner can target the early
-    //     one — B joined after A announced, so this only works if gossip
-    //     made B's knowledge of A symmetric.
-    await fB.evaluate((to) => window.__sendTo({ secret: 'B-to-A' }, to), A_dev);
-    await fA.waitForFunction(`window.__rx.some(r => r.payload && r.payload.secret === 'B-to-A')`, null, { timeout: 10000 });
-    const aFromB = await fA.evaluate(() => window.__rx.filter(r => r.payload && r.payload.secret === 'B-to-A'));
-    check('E1.3b: B → A via host forward (late joiner targets early joiner)',
-        aFromB.length === 1 && aFromB[0].fromPeer === B_dev && aFromB[0].meta.to === 'me');
+    // 9b. The host CAN reach both, because it holds both links — which is
+    //     why a multi-seat game is host-authoritative: the host is the only
+    //     device that can route, so routing is its job, in game code.
+    for (const [dev, tag] of [[A_dev, 'to-A'], [B_dev, 'to-B']]) {
+        await fH.evaluate(([to, t]) => window.__sendTo({ relayJob: t }, to), [dev, tag]);
+    }
+    await fA.waitForFunction(`window.__rx.some(r => r.payload && r.payload.relayJob === 'to-A')`, null, { timeout: 10000 });
+    await fB.waitForFunction(`window.__rx.some(r => r.payload && r.payload.relayJob === 'to-B')`, null, { timeout: 10000 });
+    check('E1.3b: the host reaches each seat on its own link (game-layer routing works)', true);
+    check('E1.3b: … and neither joiner saw the other seat\'s frame',
+        !(await fA.evaluate(() => window.__rx.some(r => r.payload && r.payload.relayJob === 'to-B')))
+        && !(await fB.evaluate(() => window.__rx.some(r => r.payload && r.payload.relayJob === 'to-A'))));
 
     // 10. E1 test 4 — unknown target refuses, never broadcasts.
     const unknownResult = await A.evaluate(() =>

@@ -493,11 +493,6 @@
         <button type="button" class="connections-dialog__new" id="connections-dialog-new">
             <span aria-hidden="true">⚇</span> New connection
         </button>
-        <!-- Live parties (v1.13): the leader-first hierarchy IS the topology
-             lesson — no diagrams, no transport vocabulary. Rendered only
-             while the bridge is loaded (no bridge → nothing can be live). -->
-        <div class="launcher-menu__heading connections-dialog__list-heading" id="connections-dialog-parties-heading" hidden>Parties</div>
-        <div class="connections-dialog__list" id="connections-dialog-parties"></div>
         <div class="launcher-menu__heading connections-dialog__list-heading" id="connections-dialog-list-heading" hidden>Linked devices</div>
         <div class="connections-dialog__list" id="connections-dialog-list"></div>
         <!-- Self-hosted infrastructure overrides (see SELF_HOSTING.md). Writes
@@ -715,6 +710,24 @@
                  clicking any other = instant switch. -->
             <div class="game-topbar__tabs" id="game-topbar-tabs" aria-label="Open games"></div>
             <div class="game-topbar__actions">
+                <!-- The host-side invite door (plans/tables-2026-08.md D4). A
+                     scope needs both ends to agree and SOMETHING has to propose
+                     first; before this button the only proposer in the product
+                     was a game calling Arcade.peer.invite(), so a game that
+                     never adopted the cap could not be started at all. It lives
+                     on the running game's chrome because the invite is about
+                     THIS game — the launcher menu would have to ask which one.
+                     Always present, never conditional: with nobody connected it
+                     offers the pairing ceremony rather than greying out, since
+                     "no one to invite" and "invite" are one intention. -->
+                <button type="button" class="topbar-btn" id="game-invite-btn" aria-label="Invite players to this game" title="Invite players to this game">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <circle cx="9" cy="8" r="3.2"/>
+                        <path d="M3.5 19.5c0-3 2.5-5 5.5-5s5.5 2 5.5 5"/>
+                        <line x1="19" y1="9" x2="19" y2="15"/>
+                        <line x1="16" y1="12" x2="22" y2="12"/>
+                    </svg>
+                </button>
                 <button type="button" class="topbar-btn" id="topbar-menu-toggle" data-launcher-menu-toggle aria-haspopup="true" aria-expanded="false" aria-controls="launcher-menu-panel" aria-label="Open menu" title="Menu">
                     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
                         <line x1="4" y1="7" x2="20" y2="7"/>
@@ -1254,12 +1267,12 @@
                 import('./arcade-p2p.js'),
                 import('./arcade-known-peers.js')
             ]).then(([{ ArcadeP2P }, { readKnownPeers }]) => {
-                // Per-game delivery (v1.13 multi-party): each mounted,
-                // handshaken game gets ITS attached party's status and
-                // roster — never another table's — deduped per game (the
-                // SDK dedupes too; this just keeps the postMessage traffic
-                // quiet). With a single party this reduces exactly to the
-                // old broadcast behavior.
+                // Per-game delivery: each mounted, handshaken game gets the
+                // status and roster of ITS OWN open scopes — the devices that
+                // agreed to play that game with us, never anyone else's table
+                // — deduped per game (the SDK dedupes too; this just keeps the
+                // postMessage traffic quiet). A game with no open scope reads
+                // 'idle' with an empty roster, however many links are live.
                 const perGameScopes = new Map(); // gameId → { status, rosterJson }
                 function pushGameScopes() {
                     const fp = framePool();
@@ -1293,9 +1306,113 @@
                     }
                 }
                 ArcadeP2P.onScopeChange(pushGameScopes);
+
+                // A game leaving the frame pool closes its scopes: an open
+                // scope must never outlive the frame it was opened for, or the
+                // peer keeps sending into a game that is no longer there.
+                // Rides the pool's own shape event so quit and LRU eviction
+                // are covered by one path.
+                const fpForScopes = framePool();
+                if (fpForScopes) {
+                    fpForScopes.onPoolChanged(() => {
+                        const mounted = new Set(fpForScopes.mountedGameIds());
+                        for (const gid of ArcadeP2P.openGameIds()) {
+                            if (!mounted.has(gid)) ArcadeP2P.leaveGame(gid);
+                        }
+                    });
+                }
+
+                // Guest-side invite door. One sentence, deliberately (D3):
+                // accepting consents to playing this game with THIS ONE device,
+                // and who else is already playing is the GAME's lobby to
+                // disclose before you sit down — a seat grid drawn by the game
+                // itself says it better than any launcher prompt could, because
+                // only the game knows what a seat is. Declining is silent: the
+                // bridge sends a 'decline' and raises no listener, because a
+                // refusal that notifies is a refusal that pressures.
+                //
+                // The game NAME comes from the catalog, not the frame pool. The
+                // stub this replaces asked the pool, which knows only MOUNTED
+                // games — and the whole point of the prompt is that the invitee
+                // has not opened this one yet, so it read back a raw gameId
+                // every time it mattered. Peer-supplied strings (`name`) reach
+                // the DOM through dialog()'s textContent, never innerHTML.
+
+                // Two ways to honour an accept: the catalog knows the game
+                // (mount it fresh), or it is already warm in the pool (bring it
+                // forward — showGame reuses the entry and promotes it to MRU
+                // rather than reloading). The catalog is re-read HERE, at accept
+                // time rather than at prompt time, so a game list that arrived
+                // between the question and the answer still counts.
+                function mountInvitedGame(gameId, info) {
+                    if (window.__arcade.openCatalogGame && window.__arcade.openCatalogGame(gameId)) return true;
+                    if (info && window.__arcade.showGame) {
+                        window.__arcade.showGame(gameId, info.src, info.name);
+                        return true;
+                    }
+                    return false;
+                }
+                ArcadeP2P.onGameInvite(({ deviceId, name, gameId }) => {
+                    // Resolve BEFORE prompting — agreeing to a game we cannot
+                    // open would leave a live scope the inviter can see and this
+                    // device can never sit at.
+                    //
+                    // But only a catalog we ACTUALLY HAVE may say no. An absent
+                    // window.__arcade.catalog means the list is still in flight
+                    // or its fetch failed, which is not evidence we lack the
+                    // game — declining on it would refuse an invite for a game
+                    // we own, silently to the inviter, and the launcher's own
+                    // boot race would decide who gets to play.
+                    const catalog = window.__arcade.catalog;
+                    const entry = Array.isArray(catalog) ? catalog.find((g) => g.id === gameId) : null;
+                    const fp = framePool();
+                    const info = fp && fp.getGameInfo ? fp.getGameInfo(gameId) : null;
+                    const gameName = (entry && entry.name) || (info && info.name) || gameId;
+                    if (Array.isArray(catalog) && !entry && !info) {
+                        ArcadeP2P.declineGameInvite(deviceId, gameId);
+                        showToast(name + ' invited you to ' + gameName + ', which this arcade doesn\'t have.');
+                        return;
+                    }
+                    window.__arcade.dialog({
+                        message: name + ' wants to play ' + gameName + '.',
+                        okLabel: 'Play', cancelLabel: 'Not now'
+                    }).then((yes) => {
+                        if (!yes) { ArcadeP2P.declineGameInvite(deviceId, gameId); return; }
+                        // MOUNT FIRST, ACCEPT SECOND — and the order is load-
+                        // bearing, not taste. Mounting can evict an LRU frame
+                        // to make room, eviction fires the pool-shape event,
+                        // and the listener above closes the scopes of every
+                        // open game the pool no longer holds. Accept-then-mount
+                        // therefore has a window, exactly one eviction wide, in
+                        // which the game we just agreed to is open but not yet
+                        // mounted — and the sweep would helpfully close it and
+                        // tell the inviter we left, a beat after we said yes.
+                        // Mounting first closes that window: showGame is
+                        // synchronous up to the pool insert (only the frame's
+                        // LOAD is async), so nothing waits and the scope is
+                        // never open on a game the pool doesn't hold. It is
+                        // also the "focus it" half.
+                        if (!mountInvitedGame(gameId, info)) {
+                            // Only reachable through the catalog race above: we
+                            // asked without a game list and it still has not
+                            // arrived. Opening the scope anyway is right — they
+                            // agreed, and the list may yet land — but the blank
+                            // launcher grid needs an explanation.
+                            showToast('Couldn\'t open ' + gameName + " — this arcade's game list hasn't loaded.", { error: true });
+                        }
+                        // The scope opens here, and the presence cascade rides
+                        // it: accepting announces to the inviter, and the
+                        // router's arcade:hello handler announces again when
+                        // this fresh frame's SDK checks in — so onReady fires
+                        // on both ends off the accept alone, which is the "no
+                        // new machinery" the design counted on.
+                        ArcadeP2P.acceptGameInvite(deviceId, gameId);
+                    });
+                });
+
                 let prevPeerStatus = 'idle';
                 ArcadeP2P.onStatus((status) => {
-                    // Games get their own party's view, not this aggregate.
+                    // Games get their own scope's view, not this aggregate.
                     pushGameScopes();
                     const tag = document.getElementById('menu-multiplayer-status');
                     if (tag) {
@@ -1320,8 +1437,11 @@
                             } catch (_) {}
                             showToast(who ? 'Connected to ' + who : 'Multiplayer connected!');
                         }
-                        // Tell the other launcher which handshaken games are
-                        // mounted here, so its games get a ready signal.
+                        // Re-announce presence for the games that already have
+                        // an open scope, so their onReady fires again after a
+                        // repair. A game with no scope announces nothing —
+                        // opening one is an invite, not a side effect of a
+                        // link coming up.
                         const fp = framePool();
                         if (fp) {
                             for (const gid of fp.mountedGameIds()) {
@@ -1335,8 +1455,8 @@
                 });
                 ArcadeP2P.onRosterChange(() => {
                     // Per-peer roster for multi-seat games — re-derived PER
-                    // GAME (each sees only its attached party's seats;
-                    // arcade:welcome.peers seeds it the same way).
+                    // GAME (each sees only the devices its own scope is open
+                    // with; arcade:welcome.peers seeds it the same way).
                     pushGameScopes();
                 });
                 ArcadeP2P.onPresence(({ gameId, deviceId, name, kind }) => {
@@ -1522,6 +1642,57 @@
         // saved connections + "New connection"), wired in that sibling IIFE —
         // it owns the button since it also decides the dialog's live content.
 
+        // ---- host-side invite door (D4) ----
+        // The unaddressed proposal: offer the RUNNING game to every live
+        // connection that doesn't already have it open. No picker sheet — the
+        // pick that matters is which seat you take, and that is the game's own
+        // lobby, after you accept (D3). Declines are silent, so this button can
+        // never report who said no; it reports only how many were asked.
+        //
+        // Sits here rather than in gameViewController (which owns Quit) because
+        // every part of the flow — the bridge, the ceremony fallback, the toast
+        // — is already in this closure. It reads the pool lazily like the rest
+        // of the P2P glue, so the button costs nothing until it is tapped: no
+        // multiplayer bytes are parsed by merely opening a game.
+        function inviteToRunningGame(btn) {
+            const fp = framePool();
+            const gameId = fp && fp.getActiveGameId();
+            if (!gameId) return Promise.resolve();
+            const info = fp.getGameInfo(gameId);
+            // The catalog name, not the app-set title (info.label): what is
+            // being proposed is the game, not the screen it happens to be on.
+            const gameName = (info && info.name) || gameId;
+            btn.disabled = true;
+            return loadP2P().then((b) => {
+                const sent = b.inviteGame(gameId);
+                if (sent > 0) {
+                    showToast(sent === 1
+                        ? 'Asked 1 device to play ' + gameName + '.'
+                        : 'Asked ' + sent + ' devices to play ' + gameName + '.');
+                    return;
+                }
+                // Zero proposals has two completely different causes, and
+                // collapsing them into one message is what makes a button feel
+                // broken. connectedPeers() is exactly inviteGame's target
+                // universe before the already-open filter, so the two cases
+                // separate cleanly.
+                if (b.connectedPeers().length > 0) {
+                    showToast('Everyone connected is already playing ' + gameName + '.');
+                    return;
+                }
+                return window.__arcade.dialog({
+                    message: 'No devices connected yet.\n\nShow an invite code so someone can join you?',
+                    okLabel: 'Show code', cancelLabel: 'Not now'
+                }).then((yes) => {
+                    if (yes) openMultiplayerPanel({ mode: 'host' });
+                });
+            }).catch(() => {}).then(() => { btn.disabled = false; });
+        }
+        const gameInviteBtn = document.getElementById('game-invite-btn');
+        if (gameInviteBtn) {
+            gameInviteBtn.addEventListener('click', () => inviteToRunningGame(gameInviteBtn));
+        }
+
         // Resume-on-launch (rendezvous): if an auto-reconnect session was
         // live recently, boot the transport and let it find the peer — this
         // is how a game survives BOTH browsers being killed. Runs at initial
@@ -1579,63 +1750,6 @@
             if (e.persisted) tryResumeOnLaunch();
         });
 
-        // Game-launch party picker (v1.13): with SEVERAL live parties a
-        // launching game stays unattached (reads 'idle') until someone
-        // decides which table it's for — the bridge deliberately won't
-        // guess. One tap here, named by each party's leader, remembered
-        // while the party lives (ArcadeP2P.attachGame). With zero or one
-        // party the bridge auto-attaches and this never appears.
-        function maybeOfferPartyPicker(gameId, gameName) {
-            if (!p2pBridge) return; // bridge cold → nothing live to pick from
-            let parties;
-            try { parties = p2pBridge.partiesSnapshot(); } catch (_) { return; }
-            if (parties.length < 2) return;
-            if (p2pBridge.gameParty(gameId)) return; // already attached (or decided)
-            document.getElementById('party-picker')?.remove();
-            const overlay = document.createElement('div');
-            overlay.id = 'party-picker';
-            overlay.className = 'party-picker';
-            const sheet = document.createElement('div');
-            sheet.className = 'party-picker__sheet';
-            sheet.setAttribute('role', 'dialog');
-            sheet.setAttribute('aria-label', 'Choose a party');
-            const title = document.createElement('div');
-            title.className = 'party-picker__title';
-            title.textContent = 'Which party is ' + (gameName || 'this game') + ' for?';
-            sheet.appendChild(title);
-            for (const p of parties) {
-                const btn = document.createElement('button');
-                btn.type = 'button';
-                btn.className = 'party-picker__option';
-                // peers counts the REMOTE seats; +1 shows the human total.
-                const label = p.role === 'leader' ? 'Your party' : p.leaderName + "'s party";
-                btn.textContent = '👑 ' + label + ' — ' + (p.peers + 1) + ' players';
-                // Same-named options are real (one device can lead several
-                // parties) — the member names are what tells them apart.
-                const others = (p.members || []).filter((m) => !m.isSelf).map((m) => m.name).join(', ');
-                if (others) {
-                    const who = document.createElement('span');
-                    who.className = 'party-picker__who';
-                    who.textContent = 'with ' + others;
-                    btn.appendChild(who);
-                }
-                btn.addEventListener('click', () => {
-                    p2pBridge.attachGame(gameId, p.id);
-                    overlay.remove();
-                });
-                sheet.appendChild(btn);
-            }
-            const skip = document.createElement('button');
-            skip.type = 'button';
-            skip.className = 'party-picker__skip';
-            skip.textContent = 'Not now — play solo';
-            skip.addEventListener('click', () => overlay.remove());
-            sheet.appendChild(skip);
-            overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
-            overlay.appendChild(sheet);
-            document.body.appendChild(overlay);
-        }
-
         // Event delegation: the grid is fetch-rendered from catalog.json after
         // this classic script runs, so per-button listeners can't be attached
         // at parse time. One listener on the container covers every button,
@@ -1652,7 +1766,6 @@
             // which happens after the POOL + ROUTER block wires showGame —
             // the null-check is belt and braces.
             if (window.__arcade.showGame) window.__arcade.showGame(btn.dataset.gameId, href, name);
-            maybeOfferPartyPicker(btn.dataset.gameId, name);
         });
 
         // ---- postMessage protocol (extracted) ----
@@ -2221,6 +2334,22 @@
         window.__arcade.pendingConfigLink = { app, cfg };
     }
 
+    // Launch a game from a bare CATALOG ID. A game id is all an accepted
+    // open-game invite carries, and resolving one to an iframe src is exactly
+    // the deep-link rule: the id is looked up in the catalog, never trusted as
+    // a URL, so a peer can no more choose what this launcher mounts than a
+    // crafted #app= fragment can. Lives in this block because gameHref is the
+    // catalog module's job — the classic script can't import it, and a
+    // hand-rolled second copy of URL resolution is how the two would drift.
+    // Returns the catalog entry it opened, or null if this arcade has no such
+    // game (a peer running a catalog we don't share).
+    window.__arcade.openCatalogGame = (gameId) => {
+        const game = (window.__arcade.catalog || []).find((g) => g.id === gameId);
+        if (!game || !window.__arcade.showGame) return null;
+        window.__arcade.showGame(game.id, gameHref(game), game.name);
+        return game;
+    };
+
     async function bootCatalog() {
         try {
             const games = await loadCatalog();
@@ -2372,12 +2501,9 @@
         const dialogNew = document.getElementById('connections-dialog-new');
         const listHeading = document.getElementById('connections-dialog-list-heading');
         const list = document.getElementById('connections-dialog-list');
-        const partiesHeading = document.getElementById('connections-dialog-parties-heading');
-        const partiesList = document.getElementById('connections-dialog-parties');
         if (!nameInput || !menuBtn || !dialog || !list) return;
 
         let unsubStatus = null;
-        let unsubScope = null;
         // Linked-device rows are the manage surface: compact by default, tap
         // to open the actions. Remember which are open across the re-renders
         // every live status change triggers.
@@ -2419,6 +2545,26 @@
             return window.__arcade.p2p ? window.__arcade.p2p.connectionState(id)
                 : (peer.paused ? 'paused' : 'idle');
         }
+
+        // The game a knock would propose (D4, joiner side — either end of a
+        // connection may propose, so this is the symmetric twin of the topbar's
+        // invite door). The ACTIVE game when one is on screen, otherwise the
+        // most recently used warm frame: this dialog is normally opened from
+        // the launcher menu, which leaves the game VIEW but not the game, and a
+        // knock that vanished the moment you opened the menu you knock from
+        // would be unreachable. Map order is LRU→MRU, so the last id is MRU.
+        //
+        // The catalog name, never the app-set title (Arcade.ui.setTitle): the
+        // proposal is about the game, not about whatever its current screen
+        // happens to be called.
+        function runningGame() {
+            const pool = window.__arcade.pool;
+            if (!pool) return null;
+            const gid = pool.getActiveGameId() || pool.mountedGameIds().slice(-1)[0];
+            if (!gid) return null;
+            const info = pool.getGameInfo(gid);
+            return { id: gid, name: (info && info.name) || gid };
+        }
         const STATUS_LABEL = {
             connected: ['🟢 Connected', 'live'],
             interrupted: ['🟡 Reconnecting…', 'pending'],
@@ -2426,118 +2572,6 @@
             paused: ['📵 Hung up', 'paused'],
             idle: ['', '']
         };
-
-        // ---- Parties (v1.13) ----
-        // The card's vertical hierarchy — leader first, members indented —
-        // IS the topology lesson; no diagrams, no transport vocabulary.
-        // Health is the existing dots only (🟢 live / 🟡 reconnecting; no
-        // dot when this device can't see that seat's health). Relay paths,
-        // fingerprints and the rest stay in the Connection log.
-        const MEMBER_DOT = { connected: '🟢', interrupted: '🟡' };
-        function buildPartyCard(party) {
-            const bridge = window.__arcade.p2p;
-            const card = document.createElement('div');
-            card.className = 'connections-row party-card';
-
-            for (const m of party.members) {
-                const row = document.createElement('div');
-                row.className = 'party-card__member' + (m.isLeader ? ' party-card__member--leader' : '');
-                const nameEl = document.createElement('span');
-                nameEl.className = 'party-card__member-name';
-                nameEl.textContent = (m.isLeader ? '👑 ' : '') + (m.isSelf ? 'This device' : (m.name || 'Unnamed device'));
-                row.appendChild(nameEl);
-                if (m.isLeader) {
-                    const tag = document.createElement('span');
-                    tag.className = 'party-card__leader-tag';
-                    tag.textContent = 'Party leader';
-                    row.appendChild(tag);
-                }
-                const dot = m.isSelf ? '🟢' : MEMBER_DOT[m.status];
-                if (dot) {
-                    const dotEl = document.createElement('span');
-                    dotEl.className = 'party-card__dot';
-                    dotEl.textContent = dot;
-                    row.appendChild(dotEl);
-                }
-                card.appendChild(row);
-            }
-
-            // Teaching moment: a member whose leader link is repairing
-            // learns WHY the party stalls — it runs through their device.
-            if (party.role === 'member' && party.status === 'interrupted') {
-                const note = document.createElement('div');
-                note.className = 'connections-row__meta';
-                note.textContent = 'Reconnecting to ' + party.leaderName + ' — the party runs through their device.';
-                card.appendChild(note);
-            }
-
-            // "Playing: …" — mounted games attached to THIS party.
-            const pool = window.__arcade.pool;
-            if (pool && bridge) {
-                const names = [];
-                for (const gid of pool.mountedGameIds()) {
-                    const gp = bridge.gameParty(gid);
-                    if (gp && gp.id === party.id) {
-                        const info = pool.getGameInfo(gid);
-                        names.push((info && info.name) || gid);
-                    }
-                }
-                if (names.length) {
-                    const playing = document.createElement('div');
-                    playing.className = 'connections-row__meta';
-                    playing.textContent = 'Playing: ' + names.join(', ');
-                    card.appendChild(playing);
-                }
-            }
-
-            const actions = document.createElement('div');
-            actions.className = 'connections-row__actions';
-            if (party.role === 'leader') {
-                // Only the leader's device can mint invites for this party —
-                // the caption teaches fact #2: new players scan the LEADER's
-                // screen.
-                const invite = document.createElement('button');
-                invite.type = 'button';
-                invite.className = 'connections-row__btn';
-                invite.textContent = '➕ Invite another player';
-                invite.title = 'New players scan your screen';
-                invite.addEventListener('click', () => {
-                    if (window.__arcade.openMultiplayerPanel) {
-                        window.__arcade.openMultiplayerPanel({ mode: 'host', partyId: party.id });
-                    }
-                });
-                actions.appendChild(invite);
-            }
-            const leave = document.createElement('button');
-            leave.type = 'button';
-            leave.className = 'connections-row__btn';
-            leave.textContent = party.role === 'leader' ? 'End party' : 'Leave party';
-            leave.addEventListener('click', async () => {
-                const msg = party.role === 'leader'
-                    ? "You're the party leader — leaving ends the party for everyone. End it?"
-                    : 'Leave the party? The others keep playing.';
-                if (!window.confirm(msg)) return;
-                leave.disabled = true;
-                try {
-                    const b = await window.__arcade.loadP2P();
-                    await b.leaveParty(party.id);
-                    toast(party.role === 'leader' ? 'Party ended.' : 'You left the party.');
-                } catch (e) {} finally { render(); }
-            });
-            actions.appendChild(leave);
-            card.appendChild(actions);
-            return card;
-        }
-
-        function renderParties() {
-            // Bridge not loaded → nothing can be live; the section hides.
-            const bridge = window.__arcade.p2p;
-            const parties = bridge ? bridge.partiesSnapshot() : [];
-            if (partiesHeading) partiesHeading.hidden = parties.length === 0;
-            if (!partiesList) return;
-            partiesList.innerHTML = '';
-            for (const p of parties) partiesList.appendChild(buildPartyCard(p));
-        }
 
         function buildRow(id, peer) {
             const displayName = peer.name || 'Unnamed device';
@@ -2642,6 +2676,9 @@
 
             const actions = document.createElement('div');
             actions.className = 'connections-row__actions';
+            // Set by the knock branch below; appended UNDER the actions row,
+            // which is why it waits (actions itself is appended last).
+            let d2Hint = null;
 
             if (revoked) {
                 // Local-only undo: clearing the latch never emits a wire
@@ -2678,6 +2715,60 @@
                     } catch (e) {} finally { render(); }
                 });
                 actions.appendChild(hangUpBtn);
+
+                // ---- the knock (D4) ----
+                // Ask THIS one device to play the game that is running. The
+                // addressed half of inviteGame; the topbar door is the
+                // unaddressed one. Offered only when the game is not already
+                // open with them, because there it would be a button whose
+                // whole effect is to send nothing (inviteGame skips connections
+                // that already have the game open, and returns 0).
+                const game = runningGame();
+                const p2pNow = window.__arcade.p2p;
+                const seated = game && p2pNow ? p2pNow.rosterForGame(game.id) : [];
+                if (game && !seated.some((e) => e.deviceId === id)) {
+                    const knockBtn = document.createElement('button');
+                    knockBtn.type = 'button';
+                    knockBtn.className = 'connections-row__btn';
+                    knockBtn.textContent = '🎮 Ask to play ' + game.name;
+                    knockBtn.title = 'Ask ' + displayName + ' to play ' + game.name + ' with you — they choose whether to join';
+                    knockBtn.addEventListener('click', async () => {
+                        knockBtn.disabled = true;
+                        try {
+                            const b = await window.__arcade.loadP2P();
+                            const sent = b.inviteGame(game.id, id);
+                            // A decline never comes back (silence is the
+                            // design), so the honest report is that the ask
+                            // went out — not that they joined.
+                            toast(sent
+                                ? 'Asked ' + displayName + ' to play ' + game.name + '.'
+                                : 'Could not reach ' + displayName + ' just now.');
+                        } catch (e) {} finally { render(); }
+                    });
+                    actions.appendChild(knockBtn);
+
+                    // D2's dead end, in copy. Seating never requires players to
+                    // be adjacent to EACH OTHER, but it does require each of
+                    // them to be adjacent to the host — so knocking a device
+                    // that isn't linked to the host opens a scope with us and
+                    // seats them nowhere, which is the "why can't I invite my
+                    // friend's friend" question arriving as a silent failure.
+                    //
+                    // Only when exactly ONE device already has the game open:
+                    // that is the shape where we are the guest and the sentence
+                    // is both true and nameable. With several, we are the device
+                    // everyone is linked to — there is no dead end to warn about
+                    // — and with none, this knock is how the game starts. The
+                    // launcher never learns who the real host is (host/guest is
+                    // the game's own fact), so it names the only device it can
+                    // honestly point at.
+                    if (seated.length === 1) {
+                        d2Hint = document.createElement('div');
+                        d2Hint.className = 'connections-row__hint';
+                        d2Hint.textContent = 'Joining ' + seated[0].name + '’s game needs a link to '
+                            + seated[0].name + ' — ask ' + seated[0].name + ' to connect with ' + displayName + '.';
+                    }
+                }
             } else {
                 // Call used to live here too; it is in the row header now
                 // (see there) so there is exactly one of it per row.
@@ -2841,11 +2932,11 @@
 
             actions.appendChild(icons);
             body.appendChild(actions);
+            if (d2Hint) body.appendChild(d2Hint);
             return row;
         }
 
         function render() {
-            renderParties();
             const known = readKnownPeers();
             const ids = Object.keys(known).sort((a, b) =>
                 Date.parse(known[b].lastConnectedAt || 0) - Date.parse(known[a].lastConnectedAt || 0));
@@ -2876,10 +2967,6 @@
                     if (dialog.hidden) return; // closed before it finished loading
                     render();
                     if (!unsubStatus) unsubStatus = b.onStatus(() => render());
-                    // Parties/attachments shift without an aggregate status
-                    // change (game attach, second party forming) — the scope
-                    // event covers those.
-                    if (!unsubScope) unsubScope = b.onScopeChange(() => render());
                 }).catch(() => {});
             }
             setTimeout(() => {
@@ -2890,7 +2977,6 @@
         function closeDialog() {
             dialog.hidden = true;
             if (unsubStatus) { unsubStatus(); unsubStatus = null; }
-            if (unsubScope) { unsubScope(); unsubScope = null; }
             hideRecoveryReveal(); // never leave the recovery code in the DOM
             closeLogDialog(); // never leave the log overlay orphaned on top
         }

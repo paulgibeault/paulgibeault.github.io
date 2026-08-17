@@ -30,6 +30,44 @@ semver is for humans and URLs, never checked on the wire.
 
 ---
 
+## 3.14.0
+
+Open-game scopes replace parties (`plans/tables-2026-08.md`). The peer
+surface is unchanged in shape; what narrowed is which devices it reflects.
+
+- **New `Arcade.peer.invite()`** (cap `peer.invite`) — asks the launcher to
+  offer THIS game to the connections that don't already have it open.
+  Resolves to the number of proposals sent; `0` means there was nobody to
+  ask, which is the game's cue to tell the player to connect a device first.
+  Without the cap it resolves `0`, and the copy should point at the launcher
+  menu. A game can ask for an invite, never grant one — who gets asked and
+  whether they agree is the launcher's and the other player's business.
+- **`peers()` contract, stated plainly**: every entry is `direct: true` and
+  there may be more than one. A multi-seat game must NAME the peer it treats
+  as host rather than assume the single entry is one.
+- **`status()` / `peers()` / `onReady` are now per-open-game**, not
+  per-device: a game reads `idle` with an empty roster until a device agrees
+  to play *it* with you, however many links the launcher holds. The
+  availability gate games run at mount is undisturbed.
+- **`meta.relayed` is always `false`.** Nothing forwards frames between
+  devices any more; a frame claiming otherwise is refused by the launcher
+  before a game sees it. The field stays in the shape so existing spoof
+  checks keep running as defense in depth.
+- **`Arcade.peer.party()` / `parties()` / `attach(id)` are retired** and now
+  always resolve `null` / `[]` / `null` — the answers they already documented
+  for an unattached game, which is what a world without parties means. Still
+  callable (the `peer.party` cap is still advertised) so no shipped game
+  breaks on a launcher deploy; do not write new code against them.
+- **Your game can now be started by someone else's invite.** No SDK change,
+  but a launcher behavior worth knowing: accepting "⟨name⟩ wants to play
+  ⟨game⟩" mounts that game and focuses it. So a game may find itself mounted
+  with a scope already open — `welcome` can carry a live `peerStatus` and a
+  non-empty roster on the very first frame, and `onReady` can fire before any
+  player has touched your UI. Don't cache `status()` at init and don't assume
+  the first thing that happens is a tap on your menu. The prompt names your
+  game from its **catalog** entry, not from any title your game sets at
+  runtime: what is being proposed is the game, not the screen it is on.
+
 ## 3.13.0
 
 Power saver — a user-facing battery lever, and a platform vocabulary for

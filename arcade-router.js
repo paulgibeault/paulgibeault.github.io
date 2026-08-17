@@ -41,14 +41,18 @@ import { KEY_PREFIX } from './arcade-storage-core.js';
 // the opaque-frame storage bridge (state.write / store.op / files.op /
 // storage.op + welcome.state snapshot). ui.bridge: this launcher services
 // arcade:ui.op (confirm/prompt/setTitle/quitHook/openFile/share — see
-// arcade-ui-bridge.js). peer.party: this launcher services
-// arcade:peer.party.op (the v1.13 multi-party star-selection hook —
-// Arcade.peer.party()/parties()/attach()). Exported so the contract tests
-// (tools/caps-contract-unit.mjs, tools/acceptance.mjs check 11) pin the
-// list — editing it is a contract change: update GAME_INTEGRATION.md §14
+// arcade-ui-bridge.js). peer.invite: this launcher services
+// arcade:peer.invite — a game asks it to run the open-game invite flow
+// (plans/tables-2026-08.md D4). peer.party: RETIRED IN SUBSTANCE but still
+// advertised — arcade:peer.party.op now answers null/[]/null, which are the
+// already-documented "unattached" answers, so every shipped game keeps
+// working unchanged until the reads are retired. Exported so the contract
+// tests (tools/caps-contract-unit.mjs, tools/acceptance.mjs check 11) pin
+// the list — editing it is a contract change: update GAME_INTEGRATION.md §14
 // and the pinned test literal deliberately, never casually.
 export const ARCADE_PEER_CAPS = Object.freeze(
-    ['peer.sendTo', 'peer.roster', 'peer.meta', 'peer.party', 'storage.bridge', 'ui.bridge', 'configs.bridge']);
+    ['peer.sendTo', 'peer.roster', 'peer.meta', 'peer.party', 'peer.invite',
+     'storage.bridge', 'ui.bridge', 'configs.bridge']);
 
 export function initMessageRouter(host) {
     const pool = host.pool;
@@ -187,8 +191,10 @@ export function initMessageRouter(host) {
                 pool.postToIframe(gameId, {
                     type: 'arcade:welcome',
                     caps: ARCADE_PEER_CAPS,
-                    // Per-game views (v1.13): a game sees its ATTACHED
-                    // party's status and seats, not the device aggregate.
+                    // Per-game views: a game sees the status and seats of the
+                    // connections IT is open on, not the device aggregate —
+                    // 'idle' with an empty roster until someone agrees to
+                    // play this particular game with us.
                     peerStatus: p2p ? p2p.statusForGame(gameId) : 'idle',
                     peers: p2p ? p2p.rosterForGame(gameId) : [],
                     settings: host.currentSettings(),
@@ -232,31 +238,33 @@ export function initMessageRouter(host) {
                 break;
             }
             case 'arcade:peer.party.op': {
-                // Star-selection hook (v1.13, cap 'peer.party'): a game
-                // introspects or chooses the party its peer surface binds
-                // to. Rides the generic RPC rail (one arcade:bridge.result
-                // per request, same id). `attach` resolves to the resulting
-                // party (null if refused); the per-game status/roster push
-                // that follows an accepted attach rides the bridge's own
-                // scope-change event. A pre-bridge call is answered honestly
-                // (no parties yet) rather than left to time out.
+                // Parties are gone (plans/tables-2026-08.md). This hook stays
+                // ANSWERED rather than removed, because get/list/attach have
+                // three already-legal answers for a game that is attached to
+                // no party — null, [], null — and those are exactly what a
+                // party-less world means. Every shipped game therefore keeps
+                // running unmodified: the reads resolve, the branches that
+                // depended on a party entry take their unattached path, and
+                // nothing has to feature-detect a cap that vanished
+                // mid-release. WP5/WP6 retire the reads at the game end;
+                // this answer is what makes that unhurried.
+                if (typeof data.id !== 'string' && typeof data.id !== 'number') break;
+                const value = data.op === 'list' ? [] : null;
+                pool.postToIframe(gameId, { type: 'arcade:bridge.result', id: data.id, ok: true, value });
+                break;
+            }
+            case 'arcade:peer.invite': {
+                // Open-game invite door (cap 'peer.invite', D4): the game asks
+                // the launcher to propose playing it to the connections that
+                // don't already have it open. The launcher owns the flow — a
+                // game can ask, never grant, and the proposal it triggers is
+                // for ITS OWN gameId only. Resolves to the number of
+                // proposals sent; 0 means there was nobody to ask, which is
+                // the game's cue to say "connect a device first".
                 if (typeof data.id !== 'string' && typeof data.id !== 'number') break;
                 const p2p = host.getP2P();
-                let result = null;
-                if (p2p) {
-                    if (data.op === 'get') {
-                        result = p2p.gameParty(gameId);
-                    } else if (data.op === 'list') {
-                        result = p2p.partiesSnapshot();
-                    } else if (data.op === 'attach') {
-                        const ok = typeof data.partyId === 'string'
-                            && p2p.attachGame(gameId, data.partyId);
-                        result = ok ? p2p.gameParty(gameId) : null;
-                    }
-                } else if (data.op === 'list') {
-                    result = [];
-                }
-                pool.postToIframe(gameId, { type: 'arcade:bridge.result', id: data.id, ok: true, value: result });
+                const value = p2p ? p2p.inviteGame(gameId) : 0;
+                pool.postToIframe(gameId, { type: 'arcade:bridge.result', id: data.id, ok: true, value });
                 break;
             }
             case 'arcade:configs.op': {

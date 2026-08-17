@@ -214,6 +214,44 @@ function deleteTests() {
     ok(deleteKnownPeer(ID_A) === false, 'double delete → false');
 }
 
+function partyStripTests() {
+    console.log('\nD6 migration — the retired `party` record is stripped on read');
+    store.clear();
+    // Exactly what a device that ran the v1.13 party build has on disk. The
+    // strip must take the party and NOTHING else: the whole point of D6 is
+    // that deleting the party concept costs a user none of their pairings.
+    seed({
+        [ID_A]: entry({
+            party: { key: 'pk-1', role: 'leader' },
+            autoReconnect: true, paused: false, syncEnabled: true, backupTarget: true,
+            fingerprint: 'AA:BB', userPub: 'ed25519-pub', deviceCertIssuedAt: 42,
+            revoked: { revokedAt: 7, sig: 's' }
+        }),
+        [ID_B]: entry({ party: { key: 'pk-2', role: 'member' }, name: 'Bee' })
+    });
+    const read = readKnownPeers();
+    ok(!('party' in read[ID_A]) && !('party' in read[ID_B]),
+        'party is gone from every record');
+    ok(read[ID_A].autoReconnect === true && read[ID_A].paused === false
+        && read[ID_A].syncEnabled === true && read[ID_A].backupTarget === true,
+        'pairing + sync/backup flags survive untouched');
+    ok(read[ID_A].fingerprint === 'AA:BB' && read[ID_A].userPub === 'ed25519-pub'
+        && read[ID_A].deviceCertIssuedAt === 42,
+        'identity pin and user key survive untouched');
+    eq(read[ID_A].revoked, { revokedAt: 7, sig: 's' }, 'the revocation latch survives untouched');
+    ok(read[ID_B].name === 'Bee', 'names survive untouched');
+
+    // A write after a read persists the stripped shape — the field leaves
+    // storage on the first mutation, without a one-shot migration pass.
+    setKnownPeerPaused(ID_A, true);
+    ok(!('party' in JSON.parse(raw())[ID_A]), 'the next write persists the stripped record');
+
+    // Read tolerance: a malformed record must not make the strip throw.
+    seed({ [ID_A]: null, [ID_B]: 'not-an-object' });
+    ok(isDeepStrictEqual(readKnownPeers(), { [ID_A]: null, [ID_B]: 'not-an-object' }),
+        'non-object records pass through the strip untouched');
+}
+
 function forwardCompatTests() {
     console.log('\nunknown-field preservation across a mutation chain');
     store.clear();
@@ -335,6 +373,7 @@ renameTests();
 flagTests();
 revocationTests();
 deleteTests();
+partyStripTests();
 forwardCompatTests();
 writeFailureTests();
 dunderIdTests();

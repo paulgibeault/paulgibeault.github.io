@@ -13,6 +13,9 @@
  *   Gate D — service-worker version/cleanup shape: the APP_VERSION line still
  *            matches what fleet CI's sed rewrites, CACHE_NAME derives from it,
  *            and activate-time cleanup is filtered to this app's own prefix.
+ *   Gate F — pause-state authority: every write to knownPeers `paused` sits
+ *            in a named, enumerated function. Not a list mirroring code — a
+ *            rule about code — but the same failure mode and the same fix.
  *
  * No browser, no network. Run: `node tools/repo-gates-unit.mjs`.
  * (Gate D replaced tools/check-sw-bump.mjs, the diff gate that required a
@@ -277,10 +280,93 @@ function gateE() {
         '(without it the bump commits and then fails to push, after tests pass)');
 }
 
+// ---- Gate F: pause-state authority (D5) ----
+//
+// `knownPeers[dev].paused` means "the user hung up on this connection and
+// does not want it auto-healed". It is the one flag that can quietly stop a
+// pair from ever reconnecting, and the only thing that may set it is an
+// explicit Hang Up.
+//
+// This gate exists because a docstring was not enough. `leaveParty` carried
+// the sentence "a party is not a relationship — pairings (secrets, names,
+// sync/backup flags) all survive" and, four lines below it, called
+// setKnownPeerPaused(dev, true) on every link in the party. Ending a game
+// silently disabled reconnection for everyone at it. The party is gone and so
+// is that call, but the shape of the mistake is generic — any future "leave"
+// or "close" reaching for the same helper — so the promise is enforced here
+// instead of narrated in a comment.
+//
+// The check is deliberately about WHO, not about intent: a write from a
+// function nobody listed is a failure even if it looks right, because the
+// point is that adding one has to be a decision somebody made on purpose.
+const PAUSE_SET_BY = new Set([
+    // The user tapped Hang Up. The only thing in the system that may say
+    // "stop healing this connection".
+    'hangUpKnownPeer',
+]);
+const PAUSE_CLEAR_BY = new Set([
+    // The user tapped Call — the literal inverse of Hang Up.
+    'callKnownPeer',
+    // Start Over wipes the connection back to blank, pause included.
+    'startOverKnownPeer',
+    // A link reaching 'connected' (the status listener inside ensureAddon),
+    // and a completed identity bind on a fresh ceremony
+    // (finishIdentityBranch). Both are the user visibly doing the opposite of
+    // hanging up, and the flag would otherwise survive a reconnection it
+    // contradicts.
+    'ensureAddon',
+    'finishIdentityBranch',
+]);
+
+function gateF() {
+    console.log('\nGate F — only Hang Up writes pause state');
+    let src;
+    try { src = readFileSync(join(ROOT, 'arcade-p2p.js'), 'utf8'); }
+    catch { ok(false, 'arcade-p2p.js is readable'); return; }
+
+    // Nearest preceding declaration wins: a `function name(` at any depth, or
+    // an object method at the ArcadeP2P surface's 4-space indent. Nested
+    // arrows report their enclosing named function, which is what the
+    // allowlist names.
+    const FN_DECL = /(?:^|\s)(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/;
+    const METHOD_DECL = /^ {4}(?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{\s*$/;
+    // A write is the helper, or a direct assignment to the field. Anything
+    // that is not provably a CLEAR counts as a set — the strict direction is
+    // the one that can strand a pair, so ambiguity fails closed.
+    const HELPER = /setKnownPeerPaused\s*\(/;
+    const CLEAR_CALL = /setKnownPeerPaused\s*\([^,]+,\s*false\s*\)/;
+    const DIRECT = /\.paused\s*=\s*([^=].*)$/;
+
+    let fn = '(module top level)';
+    const offenders = [];
+    let sets = 0, clears = 0;
+    src.split('\n').forEach((line, i) => {
+        const m = METHOD_DECL.exec(line) || FN_DECL.exec(line);
+        if (m) fn = m[1];
+        const helper = HELPER.test(line) && !/^import\b/.test(line.trim());
+        const direct = DIRECT.exec(line);
+        if (!helper && !direct) return;
+        const isClear = (helper && CLEAR_CALL.test(line))
+            || (!helper && /^\s*false\s*;?\s*$/.test(direct[1]));
+        const isSet = !isClear;
+        const allowed = isSet ? PAUSE_SET_BY : PAUSE_CLEAR_BY;
+        if (isSet) sets++; else clears++;
+        if (!allowed.has(fn)) {
+            offenders.push(`arcade-p2p.js:${i + 1} — ${isSet ? 'SETS' : 'clears'} pause in ${fn}(): ${line.trim()}`);
+        }
+    });
+
+    ok(sets > 0 && clears > 0,
+        `the gate found real writes to check (${sets} set, ${clears} clear) — a rename that made it match nothing would pass vacuously`);
+    ok(offenders.length === 0,
+        `every pause write sits in an enumerated function${offenders.length ? ':\n      ' + offenders.join('\n      ') : ''}`);
+}
+
 console.log('Repo drift gates — catalog schema + SW shape (no browser)');
 gateB();
 gateC();
 gateD();
 gateE();
+gateF();
 console.log(`\n${fail ? `${fail} check(s) FAILED.` : `All ${pass} repo-gate checks passed.`}`);
 process.exit(fail ? 1 : 0);

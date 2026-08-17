@@ -38,13 +38,13 @@ const negotiates = (file) =>
 // this file used to carry: that was a drifting cache of a detectable property;
 // this is a decision, and the reason is the entry. An entry with a fixed
 // underlying cause gets deleted, not kept.
-const MANUAL_ONLY = new Map([
-  ["p2p-multiparty-acceptance.mjs",
-    "M8's relayed-identity-gossip wait times out on CI runners: device A sees " +
-    "indirect={} after 20s, 3/3 attempts (four Chromium instances on a 2-core " +
-    "runner), while the suite passes locally in ~11s. Until the gossip-under-" +
-    "load behavior is investigated, run it by hand: npm run p2p-multiparty"],
-]);
+// (Empty today. The one entry it carried — p2p-multiparty-acceptance.mjs,
+// excluded because its M8 check waited on relayed identity gossip that never
+// converged on a 2-core runner with four Chromium instances — is gone because
+// its cause is: that suite is the scope-acceptance suite now, there is no
+// gossip left to wait on, and it runs three launchers instead of four. Fixed
+// cause, deleted entry, exactly as the rule above says.)
+const MANUAL_ONLY = new Map([]);
 
 // Suites that need arguments rather than a bare invocation.
 const WITH_ARGS = {
