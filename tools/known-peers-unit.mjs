@@ -44,7 +44,9 @@ import {
     setKnownPeerBackupTarget,
     markKnownPeerRevoked,
     clearKnownPeerRevoked,
-    deleteKnownPeer
+    deleteKnownPeer,
+    resumePlan,
+    RESUME_WINDOW_MS
 } from '../arcade-known-peers.js';
 
 let pass = 0, fail = 0;
@@ -282,6 +284,48 @@ function dunderIdTests() {
         'the persisted store never gains an own __proto__ entry (JSON.stringify drops it)');
 }
 
+// The predicate index.html's boot gate and arcade-p2p.js's resumeRendezvous()
+// now share. They used to hold one each, and disagreed: the boot gate booted
+// the bridge for any callable peer while the bridge only ACTIVELY resumed
+// inside the 6h window — so the launch log promised a reconnect nobody was
+// going to attempt (plans/connection-model-2026-08.md). These checks pin the
+// branch each caller must take.
+function resumePlanTests() {
+    console.log('\nresumePlan — the shared reconnect-on-launch branch');
+    const NOW = 1_700_000_000_000;
+    const CALLABLE = { name: 'Phone', autoReconnect: true };
+
+    store.clear();
+    ok(resumePlan(0, NOW).mode === 'cold', 'no stored peers and no live session → cold');
+    ok(resumePlan(NOW - 60000, NOW).mode === 'resume',
+        'a live session inside the window resumes even with nothing callable (a pair may still be armed)');
+
+    seed({ [ID_A]: CALLABLE });
+    ok(resumePlan(NOW - 60000, NOW).mode === 'resume', 'a session a minute old → active resume');
+    ok(resumePlan(NOW - RESUME_WINDOW_MS, NOW).mode === 'resume', 'the window boundary is inclusive');
+
+    // The field case: 1911 minutes since the last live session, peers callable.
+    const field = resumePlan(NOW - 1911 * 60000, NOW);
+    ok(field.mode === 'standby' && field.callable === 1,
+        'the 2026-08-16 launch (1911m, one callable peer) → standby, not resume');
+    ok(/1911m ago/.test(field.why) && /outside the 6h/.test(field.why) && /1 callable/.test(field.why),
+        'the reason names the age, the window it missed, and the callable count');
+
+    seed({ [ID_A]: { ...CALLABLE, paused: true } });
+    ok(resumePlan(NOW - 1911 * 60000, NOW).mode === 'cold',
+        'a hung-up peer is not callable — nothing to boot the bridge for');
+    seed({ [ID_A]: { name: 'Phone' } });
+    ok(resumePlan(NOW - 1911 * 60000, NOW).mode === 'cold',
+        'a peer without auto-reconnect is not callable either');
+
+    seed({ [ID_A]: CALLABLE, [ID_B]: CALLABLE });
+    const two = resumePlan(0, NOW);
+    ok(two.mode === 'standby' && two.callable === 2 && two.ageMs === null && /no live session on record/.test(two.why),
+        'never-connected launch with callable peers → standby, and the reason says so');
+
+    store.clear();
+}
+
 console.log('Known-peers unit tests — arcade.v1._meta.knownPeers CRUD (no browser)');
 keyContractTests();
 readToleranceTests();
@@ -294,6 +338,7 @@ deleteTests();
 forwardCompatTests();
 writeFailureTests();
 dunderIdTests();
+resumePlanTests();
 console.log('');
 if (fail) { console.log(fail + ' check(s) FAILED.'); process.exit(1); }
 console.log('All ' + pass + ' known-peers unit checks passed.');

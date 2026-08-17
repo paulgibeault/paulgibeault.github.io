@@ -17,6 +17,12 @@
  * doesn't want this link auto-healed. The actual teardown and the
  * rendezvous pause live in arcade-p2p.js's hangUpKnownPeer/callKnownPeer.
  *
+ * It also owns resumePlan() — the reconnect-on-launch policy. That is not
+ * CRUD, but it is a pure function of this map (plus a timestamp the caller
+ * passes in), and it has to be read identically by the boot gate in
+ * index.html and by the bridge's resumeRendezvous(). Two copies of that rule
+ * is precisely the drift this module exists to end.
+ *
  * `userPub`/`deviceCertIssuedAt`/`revoked` are the user-identity layer
  * (#32): userPub is the peer's user-level Ed25519 public key, pinned
  * TOFU-style on the first VERIFIED device cert (arcade-p2p.js owns the
@@ -26,6 +32,54 @@
  */
 
 export const KNOWN_PEERS_KEY = 'arcade.v1._meta.knownPeers';
+
+/**
+ * How recent a live session must be for a launch to ACTIVELY resume its
+ * pairs (rdv.resumeAll) instead of merely arming standby. Lives here so the
+ * boot gate and the bridge cannot disagree about it — they used to hold two
+ * copies of the number and, worse, two different rules around it.
+ */
+export const RESUME_WINDOW_MS = 6 * 3600 * 1000;
+
+/**
+ * The ONE resume-on-launch policy, shared by the two gates that decide it.
+ *
+ * They used to be separate predicates and quietly disagreed: index.html
+ * booted the bridge on `recentLive || callable`, while resumeRendezvous()
+ * only reached resumeAll() when `fresh` — so a launch with a callable peer
+ * and a stale session logged "callable auto-reconnect peer: yes → booting
+ * multiplayer bridge", which reads as a promise of a reconnect, and then
+ * armed standby. On 2026-08-16 three phones did exactly that at once: every
+ * device standby, every device silent, nobody reconnecting (see
+ * plans/connection-model-2026-08.md). Standby initiates now — but the two
+ * gates must still say the same thing, so both call this.
+ *
+ * The knownPeers read happens here (single-owner rule); `lastLiveAt` is the
+ * caller's — it lives under a different key each caller already reads.
+ *
+ * @param {number} lastLiveAt - epoch ms of the last live session, 0/NaN if none
+ * @param {number} [now]
+ * @returns {{mode: 'resume'|'standby'|'cold', recentLive: boolean,
+ *            callable: number, ageMs: number|null, why: string}}
+ *          `mode` is the branch; `why` is the log-ready reason for it.
+ */
+export function resumePlan(lastLiveAt, now = Date.now()) {
+    const ts = Number(lastLiveAt) || 0;
+    const ageMs = ts ? now - ts : null;
+    const recentLive = ageMs !== null && ageMs <= RESUME_WINDOW_MS;
+    const callable = Object.values(readKnownPeers())
+        .filter((p) => p && p.autoReconnect && !p.paused).length;
+    const age = ageMs === null ? 'no live session on record'
+        : `last live session ${Math.round(ageMs / 60000)}m ago`;
+    const peers = `${callable} callable auto-reconnect peer(s)`;
+    if (recentLive) {
+        return { mode: 'resume', recentLive, callable, ageMs, why: `${age} (inside the ${RESUME_WINDOW_MS / 3600000}h active-resume window)` };
+    }
+    if (callable) {
+        return { mode: 'standby', recentLive, callable, ageMs, why: `${age} (outside the ${RESUME_WINDOW_MS / 3600000}h active-resume window), ${peers}` };
+    }
+    return { mode: 'cold', recentLive, callable, ageMs, why: `${age}, ${peers}` };
+}
 
 // Every lookup below goes through an OWN-property check: a bare `map[id]`
 // resolves through the prototype chain, so an id like '__proto__' or

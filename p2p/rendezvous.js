@@ -46,13 +46,22 @@
  *               republish going (bounded by `resumeWindowMs` since the pair
  *               was last seen). A device with the app open therefore stays
  *               REACHABLE — the other side's ring or offer lands hours later.
- *   STANDBY     standbyAll() (or a received 'bye') arms subscribe-only
- *               episodes: nothing is initiated, but a ring provokes the
- *               caller role to arm and publish an offer, and an offer gets
- *               answered. This is what lets one side "call" a peer whose app
- *               is merely open. Privacy trade, documented in §7.5/§9: an
- *               enabled, disconnected pair keeps a standing (pseudonymous,
- *               daily-rotating) subscription on the carrier.
+ *   STANDBY     standbyAll() (or a received 'bye') arms quiet episodes, one
+ *               of which speaks: the LISTENER role publishes its ring on a
+ *               slow cadence (standbyScheduleMs), the CALLER role initiates
+ *               nothing and waits to be rung. A ring provokes the caller to
+ *               arm and publish an offer; an offer gets answered. This is
+ *               what lets one side "call" a peer whose app is merely open —
+ *               AND what lets two devices that both launched cold find each
+ *               other with nobody tapping anything (before the ring, both
+ *               sides sat subscribed and mutually silent forever; three
+ *               phones proved it on 2026-08-16). A standby that came from a
+ *               received 'bye' rings in NEITHER role: the peer hung up on
+ *               purpose and paused the pair, so it isn't listening. Privacy
+ *               trade, documented in §7.5/§9: an enabled, disconnected pair
+ *               keeps a standing (pseudonymous, daily-rotating) subscription
+ *               on the carrier, and on the listener side a handful of sealed
+ *               writes a day to the topic it already subscribes to.
  *   NUDGE       nudgeAll() — the app's "the world may have changed" kick
  *               (page became visible, network came back, a suspend was
  *               detected). Every live episode verifies its carrier socket
@@ -107,7 +116,7 @@ import { initialMachine, transition, canPublish, tryKinds, takeDecryptToken } fr
 // this at boot: the FIRST question a connection log must answer is "which
 // build produced this?" — field sessions have been burned diagnosing bugs
 // that were already fixed but not actually loaded (stale caches).
-export const RDV_BUILD = 'v2.5 episode-machine';
+export const RDV_BUILD = 'v2.6 standby-ring';
 
 const DB_NAME = 'qrp2p-rendezvous';
 const DB_STORE = 'pairs';
@@ -263,11 +272,18 @@ export class RendezvousManager extends EventTarget {
      * @param {number} [options.callerDelayMs=30000]    - interrupted → caller episode
      * @param {number} [options.episodeTimeoutMs=600000] - active phase → quiet demotion
      * @param {number[]} [options.retryScheduleMs]      - publish backoff; last entry repeats
+     * @param {number[]} [options.standbyScheduleMs]    - the standby listener's ring cadence;
+     *                                                    same shape, deliberately far slower
      * @param {number} [options.resumeWindowMs=21600000] - resumeAll() freshness window (6h);
-     *                                                     also bounds quiet-phase republishing
+     *                                                     also bounds SPECULATIVE republishing
      * @param {number} [options.answerStallMs=30000]    - retire an exchange that never connects
      * @param {number} [options.rearmDelayMs=60000]     - retry delay after a hard episode error
-     * @param {number} [options.standbyMaxAgeMs]        - standbyAll() skips pairs unseen this long (30d)
+     * @param {number} [options.standbyMaxAgeMs]        - standbyAll() skips pairs unseen this long
+     *                                                    (30d); also bounds standby/provoked
+     *                                                    republishing (see canPublish)
+     * @param {() => Set<string>|null} [options.knownPairIds] - the pairIds the app still
+     *        recognizes. Consulted by resumeAll()/standbyAll() to retire stored pairs the
+     *        app can no longer reach; omitted or empty means "don't know", never "none".
      * @param {(pairId: string) => string|null} [options.adoptPartyId] - resolves
      *        the partyId a reconnected pair's link should be adopted into when
      *        NO prior session exists (v1.13 multi-party restart resume). With a
@@ -281,10 +297,16 @@ export class RendezvousManager extends EventTarget {
         this.options = {
             carrierFactory: options.carrierFactory || null,
             adoptPartyId: typeof options.adoptPartyId === 'function' ? options.adoptPartyId : null,
+            knownPairIds: typeof options.knownPairIds === 'function' ? options.knownPairIds : null,
             listenerDelayMs: options.listenerDelayMs ?? 15000,
             callerDelayMs: options.callerDelayMs ?? 30000,
             episodeTimeoutMs: options.episodeTimeoutMs ?? 600000,
             retryScheduleMs: options.retryScheduleMs || [0, 5000, 30000, 120000, 300000],
+            // One ring the instant the episode is up (the case that matters:
+            // two devices whose users opened the arcade within a minute of
+            // each other), a second shortly after in case the peer was still
+            // dialing its broker, then a quarter-hour beat for the long tail.
+            standbyScheduleMs: options.standbyScheduleMs || [0, 30000, 300000, 900000],
             resumeWindowMs: options.resumeWindowMs ?? 6 * 3600 * 1000,
             answerStallMs: options.answerStallMs ?? 30000,
             rearmDelayMs: options.rearmDelayMs ?? 60000,
@@ -614,9 +636,10 @@ export class RendezvousManager extends EventTarget {
      * WebSocket that LOOKS open for another 30–90s while the broker has
      * long dropped the session, and its earlier publishes died inside the
      * frozen socket (QoS 0: nobody retries them but us). Per-episode
-     * rate-limited so visibility flapping can't spam the relay. Standby
-     * episodes only get the socket check — they must stay reachable, but
-     * still initiate nothing.
+     * rate-limited so visibility flapping can't spam the relay. A standby
+     * CALLER gets only the socket check — it initiates nothing; a standby
+     * listener republishes its ring, which is the frame most likely to have
+     * died in the frozen socket.
      */
     nudgeAll(why = 'nudge') {
         for (const [pairId, m] of this.machines) {
@@ -1056,7 +1079,7 @@ export class RendezvousManager extends EventTarget {
                 }
                 case 'schedulePublishes': {
                     const ep = this.episodes.get(pairId);
-                    if (ep && !ep.settled) this._schedulePublishes(pairId, ep);
+                    if (ep && !ep.settled) this._schedulePublishes(pairId, ep, !!eff.standby);
                     break;
                 }
                 case 'publishNow': {
@@ -1236,7 +1259,8 @@ export class RendezvousManager extends EventTarget {
             carrier: null, shadow: null, timers: [], unsubs: [], topicSubs: new Map(),
             phase: m.phase, standbyOnly: m.standbyOnly,
             offerNonce: null, sealedOffer: null, ringNonce: null, sealedRing: null,
-            lastShadowAt: 0, publishOnce: null, publishScheduled: false,
+            lastShadowAt: 0, publishOnce: null,
+            publishMode: null, publishTimers: [], // 'standby'|'active'; replaceable cadence
             ownBlobs: new Set()
         };
         this.episodes.set(pairId, ep);
@@ -1328,6 +1352,38 @@ export class RendezvousManager extends EventTarget {
     }
 
     /**
+     * Retires stored pairs the app no longer recognizes, at the two startup
+     * moments that already read the whole store. An orphan is a record whose
+     * pairId is not in `knownPairIds()` — either the app forgot the device
+     * (its row was deleted while the secret survived) or a later ceremony
+     * gave the same physical device a new id and the old record was left
+     * behind. Both are unreachable state: nothing can name it, call it, or
+     * show it, while it still claims an episode slot and three day-topic
+     * subscriptions on every broker. The 2026-08-16 field log carried 8
+     * stored pairs, 7 armed episodes and 4 linked devices.
+     *
+     * An EMPTY known set means "the app could not tell us", never "the app
+     * knows of no devices" — knownPeers reads return {} on a parse failure
+     * too, and the cost of being wrong here is every pairing secret on the
+     * device. So an empty set skips the sweep entirely.
+     */
+    async _gcOrphanPairs(entries, why) {
+        if (!this.options.knownPairIds) return entries;
+        let known = null;
+        try { known = this.options.knownPairIds(); } catch (e) { known = null; }
+        if (!known || !known.size) return entries;
+        const orphans = entries.filter(([pairId]) => !known.has(pairId));
+        if (!orphans.length) return entries;
+        this._diag(`${why}: retiring ${orphans.length} stored pair(s) no linked device claims any more`);
+        for (const [pairId] of orphans) {
+            await this.disablePair(pairId).catch((e) => {
+                this._diag(`pair ${pairId}: could not retire the orphaned record (${e && e.message})`, 'warn');
+            });
+        }
+        return entries.filter(([pairId]) => known.has(pairId));
+    }
+
+    /**
      * Call once at app startup: resumes ACTIVE repair for any enabled pair
      * seen recently — this is what reconnects two devices whose browsers
      * were both killed and reopened, with zero human involvement.
@@ -1338,6 +1394,7 @@ export class RendezvousManager extends EventTarget {
             this._diag(`resumeAll: could not read pair store (${e && e.message}) — nothing to resume`, 'warn');
             return;
         }
+        entries = await this._gcOrphanPairs(entries, 'resumeAll');
         this._diag(`resumeAll: ${entries.length} stored pair(s)`);
         for (const [pairId, rec] of entries) {
             if (!rec || !rec.enabled || !rec.lastPeerId) {
@@ -1356,9 +1413,17 @@ export class RendezvousManager extends EventTarget {
 
     /**
      * Call at app startup when resumeAll()'s freshness window has lapsed:
-     * arms subscribe-only STANDBY for every enabled pair, so this device can
-     * be "called" (resumePair() on the other side) for as long as the app
-     * stays open — without initiating anything itself.
+     * arms STANDBY for every enabled pair. The caller role initiates nothing
+     * and waits to be rung; the listener role rings on the slow standby
+     * cadence. That asymmetry is what lets two devices that BOTH launched
+     * cold find each other again — before it existed, both sat subscribed to
+     * the right topics and mutually silent, which is how three phones spent
+     * a day and a half unable to reconnect on 2026-08-16.
+     *
+     * The age filter below is the only one an episode needs: a pair unseen
+     * for longer than standbyMaxAgeMs is never armed, so the ring it would
+     * have published is never scheduled. (canPublish uses the same bound for
+     * the pairs that ARE armed, so the two agree by construction.)
      */
     async standbyAll() {
         let entries = [];
@@ -1366,6 +1431,7 @@ export class RendezvousManager extends EventTarget {
             this._diag(`standbyAll: could not read pair store (${e && e.message})`, 'warn');
             return;
         }
+        entries = await this._gcOrphanPairs(entries, 'standbyAll');
         this._diag(`standbyAll: ${entries.length} stored pair(s)`);
         for (const [pairId, rec] of entries) {
             if (!rec || !rec.enabled || !rec.lastPeerId) continue;
@@ -1377,13 +1443,21 @@ export class RendezvousManager extends EventTarget {
 
     // ---- episodes ----------------------------------------------------------
 
+    // Both return the clear function they registered, so a caller that may
+    // need to retire its own timers early (the publish cadence, which is
+    // replaced when a standby episode is provoked) can hold onto them. The
+    // episode-wide list still owns them for cleanup; clearing twice is free.
     _after(ep, ms, fn) {
         const id = setTimeout(fn, ms);
-        ep.timers.push(() => clearTimeout(id));
+        const clear = () => clearTimeout(id);
+        ep.timers.push(clear);
+        return clear;
     }
     _every(ep, ms, fn) {
         const id = setInterval(fn, ms);
-        ep.timers.push(() => clearInterval(id));
+        const clear = () => clearInterval(id);
+        ep.timers.push(clear);
+        return clear;
     }
 
     async _topics(ep) {
@@ -1437,8 +1511,9 @@ export class RendezvousManager extends EventTarget {
     // ('reconnecting' emitted); quiet — after episodeTimeoutMs: 'gave-up'
     // emitted but the subscription stays and the slow republish continues
     // while the pair was seen within resumeWindowMs. standbyOnly episodes
-    // start quiet and initiate nothing until a ring (caller role) or an
-    // offer (listener role) provokes them. A received bye forces standbyOnly.
+    // start quiet; the listener role rings on the standby cadence, the
+    // caller role initiates nothing until a ring provokes it (and a listener
+    // is likewise provoked by an offer). A received bye forces standbyOnly.
 
     /**
      * (Re)builds the caller's shadow connection and sealed offer. Offers
@@ -1501,15 +1576,31 @@ export class RendezvousManager extends EventTarget {
     }
 
     /**
-     * Installs the publish cadence: the retry schedule once, then its last
+     * Installs the publish cadence: the chosen schedule once, then its last
      * interval repeating. The blob is read per-publish so a re-armed
      * offer/ring is picked up. Publishing stops — leaving the episode
-     * subscribe-only — once the pair hasn't been seen within
-     * resumeWindowMs: reachability stays, standing spam doesn't.
+     * subscribe-only — once the pair falls outside canPublish's bound:
+     * reachability stays, standing spam doesn't.
+     *
+     * TWO cadences. `standby` (the machine's flag, riding the effect) is the
+     * listener's background ring: it must reach a peer that opens its arcade
+     * hours later, not repair a link that just dropped, so it runs on
+     * standbyScheduleMs — one ring at once, then minutes apart. Every ring is
+     * a write a passive broker observer can count, and this is what keeps
+     * that count to a handful a day per pair.
+     *
+     * Re-entrant on purpose: a standby episode that gets provoked (a ring
+     * lands, or the user taps Call) drops the machine's publishScheduled
+     * latch, which re-issues this effect with standby:false. The slow
+     * cadence's timers are replaced, not merely joined — a Call must not
+     * leave the pair ringing on a 15-minute clock.
      */
-    _schedulePublishes(pairId, ep) {
-        if (ep.publishScheduled) return;
-        ep.publishScheduled = true;
+    _schedulePublishes(pairId, ep, standby) {
+        const mode = standby ? 'standby' : 'active';
+        if (ep.publishMode === mode) return;
+        const upgrading = ep.publishMode !== null;
+        for (const clear of ep.publishTimers.splice(0)) clear();
+        ep.publishMode = mode;
         const kind = ep.rec.role === 'caller' ? 'offer' : 'ring';
         const currentBlob = ep.rec.role === 'caller' ? () => ep.sealedOffer : () => ep.sealedRing;
         const publishOnce = async () => {
@@ -1520,7 +1611,12 @@ export class RendezvousManager extends EventTarget {
             const gate = canPublish(this._machine(pairId), ep.rec.lastSeenAt, Date.now(), this.options);
             if (!gate.ok) {
                 if (gate.logStop) {
-                    this._diag(`pair ${pairId}: ${kind} republishing stopped — pair last seen over ${Math.round(this.options.resumeWindowMs / 3600000)}h ago (staying subscribe-only)`, 'warn');
+                    // The bound is 6h or 30d depending on why this episode
+                    // was publishing, so name it in a unit a reader can hold.
+                    const bound = gate.boundMs >= 48 * 3600000
+                        ? `${Math.round(gate.boundMs / 86400000)}d`
+                        : `${Math.round(gate.boundMs / 3600000)}h`;
+                    this._diag(`pair ${pairId}: ${kind} republishing stopped — pair last seen over ${bound} ago (staying subscribe-only)`, 'warn');
                 }
                 return;
             }
@@ -1533,9 +1629,10 @@ export class RendezvousManager extends EventTarget {
             }
         };
         ep.publishOnce = publishOnce;
-        const schedule = this.options.retryScheduleMs;
-        schedule.forEach(ms => this._after(ep, ms, publishOnce));
-        this._every(ep, schedule[schedule.length - 1] || 300000, publishOnce);
+        if (upgrading) this._diag(`pair ${pairId}: ${kind} cadence now ${mode} (was standby)`);
+        const schedule = standby ? this.options.standbyScheduleMs : this.options.retryScheduleMs;
+        schedule.forEach(ms => ep.publishTimers.push(this._after(ep, ms, publishOnce)));
+        ep.publishTimers.push(this._every(ep, schedule[schedule.length - 1] || 300000, publishOnce));
     }
 
     /**

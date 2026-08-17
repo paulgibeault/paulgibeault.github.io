@@ -105,6 +105,37 @@ async function freshTriple(tag) {
     return { ctxH, ctxA, ctxB, H, A, B };
 }
 
+// Makes a device look like it last talked to its peers `ms` ago, on BOTH
+// clocks that decide reconnect behaviour: the launcher's lastLiveSession
+// (which picks active-resume vs standby at boot) and every stored pair
+// record's lastSeenAt (which the publish gate reads). Aging only the first
+// produces a device that arms standby and then publishes freely — a state no
+// real launch is ever in, and one that would hide a broken publish gate.
+async function ageProfile(page, ms) {
+    await page.evaluate(async (age) => {
+        const then = Date.now() - age;
+        localStorage.setItem('arcade.v1._meta.lastLiveSession', String(then));
+        await new Promise((resolve) => {
+            const req = indexedDB.open('qrp2p-rendezvous', 1);
+            req.onerror = () => resolve();
+            req.onsuccess = () => {
+                const db = req.result;
+                const tx = db.transaction('pairs', 'readwrite');
+                tx.objectStore('pairs').openCursor().onsuccess = (e) => {
+                    const cur = e.target.result;
+                    if (!cur) return;
+                    const rec = cur.value;
+                    rec.lastSeenAt = then;
+                    cur.update(rec);
+                    cur.continue();
+                };
+                tx.oncomplete = () => { db.close(); resolve(); };
+                tx.onerror = () => { db.close(); resolve(); };
+            };
+        });
+    }, ms);
+}
+
 const connectedAgain = (page) =>
     page.waitForFunction(`window.__arcade.p2p.status() === 'connected'`, null, { timeout: 60000 })
         .then(() => true).catch(() => false);
@@ -615,6 +646,126 @@ try {
         }, null, { timeout: 60000 }).then(() => true).catch(() => false);
         check('host re-holds BOTH healed links concurrently (per-pair isolation)', hostHealed);
         await s.ctxH.close(); await s.ctxA.close(); await s.ctxB.close();
+    }
+
+    // 14. MUTUAL STANDBY — the 2026-08-16 field failure, reproduced.
+    //     Three phones, all online, all with the launcher open, and none of
+    //     them reconnected for a day and a half. Nothing had failed: every
+    //     device had launched outside its 6h resume window, so every device
+    //     armed standby, and standby initiated nothing in either role. All
+    //     of them sat correctly subscribed to the right day-topics, mutually
+    //     silent, waiting for an inbound frame that only a human tapping
+    //     Call could produce (plans/connection-model-2026-08.md).
+    //
+    //     Both profiles here are aged past the window on BOTH clocks — the
+    //     launcher's lastLiveSession AND the rendezvous record's lastSeenAt.
+    //     The second one is what makes this a real reproduction rather than
+    //     a rehearsal: with a fresh lastSeenAt the publish gate would have
+    //     let a ring through even before the standby bound existed.
+    //
+    //     The measured thing is the absence of a user: after the two pages
+    //     are reopened, nothing in this block touches either of them until
+    //     it asks whether they are connected.
+    {
+        console.log('\n  [mutual standby: both devices cold-launched hours later, nobody taps anything]');
+        const s = await freshPair('P');
+        const FIELD_AGE = 1911 * 60000; // the field log's exact 31.9h
+
+        // Age both clocks while the link is still up: no CONNECTED event
+        // fires while a link merely stays connected, so nothing rewrites
+        // lastSeenAt underneath us.
+        for (const page of [s.H, s.J]) await ageProfile(page, FIELD_AGE);
+
+        // Close both pages at once — "everyone put their phone away". Doing
+        // it one at a time would let the survivor see the drop and burn a
+        // normal repair episode, which is not the state under test.
+        await Promise.all([s.H.close(), s.J.close()]);
+
+        // Reopen both in the SAME device contexts: same localStorage, same
+        // IndexedDB, same pairing secret. This is the cold launch.
+        const H = await launcherPage('P:host', s.ctxH);
+        const J = await launcherPage('P:joiner', s.ctxJ);
+        for (const page of [H, J]) {
+            const booted = await page.waitForFunction(
+                '!!window.__arcade.p2p && !!window.__arcade.p2p._addon()', null, { timeout: 20000 }
+            ).then(() => true).catch(() => false);
+            check('cold-launched arcade booted the bridge on its own', booted);
+        }
+        const branch = await H.evaluate(() =>
+            (window.__arcadeDiag.entries().find((e) => e.tag === 'boot') || {}).msg || '');
+        check('the launch took the standby branch, and the log says why',
+            /outside the 6h active-resume window/.test(branch) && /standby/.test(branch), branch);
+
+        // Zero interaction from here. One side rings; the ring provokes the
+        // other; the ordinary sealed exchange runs.
+        check('mutual standby reconnected with no user interaction: host', await connectedAgain(H));
+        check('mutual standby reconnected with no user interaction: joiner', await connectedAgain(J));
+
+        const rang = await Promise.all([H, J].map((p) => p.evaluate(() =>
+            window.__arcadeDiag.entries().some((e) => /listener ring armed/.test(e.msg)))));
+        check('a standby listener is what broke the silence (ring armed, not a Call)',
+            rang.some(Boolean), JSON.stringify(rang));
+        await s.ctxH.close(); await s.ctxJ.close();
+    }
+
+    // 15. PAIR-STORE GC. The same field log carried 8 stored pairs, 7 armed
+    //     episodes and 4 linked devices: records for devices the launcher no
+    //     longer knows, each still claiming an episode slot and three
+    //     day-topic subscriptions on every broker. This deletes pairing
+    //     secrets, so it is worth proving in both directions — the orphan
+    //     goes, the live pair stays, and an unreadable known-peers map (the
+    //     shape a storage failure produces) deletes nothing at all.
+    {
+        console.log('\n  [pair-store GC: orphaned records retired, real ones untouched]');
+        const s = await freshPair('Q');
+        const dev = await peerDev(s.H);
+        // No public enumerator for the pair store; read it the way
+        // standbyAll's own dbEntries() does.
+        const pairIds = () => s.H.evaluate(async () => {
+            return new Promise((resolve) => {
+                const req = indexedDB.open('qrp2p-rendezvous', 1);
+                req.onerror = () => resolve([]);
+                req.onsuccess = () => {
+                    const db = req.result;
+                    const keys = db.transaction('pairs', 'readonly').objectStore('pairs').getAllKeys();
+                    keys.onsuccess = () => { db.close(); resolve(Array.from(keys.result)); };
+                    keys.onerror = () => { db.close(); resolve([]); };
+                };
+            });
+        });
+
+        // Plant an orphan: a plausible record for a device with no row.
+        await s.H.evaluate(async () => {
+            const rdv = window.__arcade.p2p._rdv();
+            await rdv._updateRec('ghost-device-0001', () => ({
+                base: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+                role: 'caller', epoch: 0, enabled: true,
+                lastPeerId: 'peer-ghost', lastSeenAt: Date.now(), seenNonces: []
+            }));
+        });
+        const planted = await pairIds();
+        check('orphan record planted alongside the real pair',
+            planted.includes('ghost-device-0001') && planted.includes(dev), JSON.stringify(planted));
+
+        // An unreadable/empty knownPeers must be treated as "don't know".
+        await s.H.evaluate(async () => {
+            const rdv = window.__arcade.p2p._rdv();
+            const real = rdv.options.knownPairIds;
+            rdv.options.knownPairIds = () => new Set();
+            await rdv.standbyAll();
+            rdv.options.knownPairIds = real;
+        });
+        const afterEmpty = await pairIds();
+        check('an empty known-peers set deletes nothing (a read failure is not a mandate)',
+            afterEmpty.length === planted.length, JSON.stringify(afterEmpty));
+
+        await s.H.evaluate(() => window.__arcade.p2p._rdv().standbyAll());
+        const afterGc = await pairIds();
+        check('the orphan is retired', !afterGc.includes('ghost-device-0001'), JSON.stringify(afterGc));
+        check('the real pairing survives untouched', afterGc.includes(dev), JSON.stringify(afterGc));
+        check('the live link was never disturbed by the sweep',
+            await s.H.evaluate(() => window.__arcade.p2p.status()) === 'connected');
+        await s.ctxH.close(); await s.ctxJ.close();
     }
 } catch (e) {
     console.error('\nFATAL:', e.message);

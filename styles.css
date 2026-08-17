@@ -817,7 +817,20 @@ body.app-in-game .launcher-menu__panel {
 
 /* Manage-on-row: the header is the toggle, the actions live in a body that
    opens on tap. Chips (💾/🔄/🔁) surface a pairing's purpose on the closed
-   row. */
+   row, and 📞 Call sits beside the toggle rather than inside it — the field
+   test found a stuck reconnect with no visible escape, and a button hidden
+   behind a tap is not an escape. */
+.connections-row__head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.connections-row__head .connections-row__toggle { min-width: 0; }
+.connections-row__call {
+    flex-shrink: 0;
+    padding: 4px 8px;
+    font-size: 0.68rem;
+}
 .connections-row__toggle {
     width: 100%;
     background: transparent;

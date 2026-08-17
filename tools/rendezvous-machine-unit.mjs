@@ -26,6 +26,7 @@ function ok(cond, label) {
 const CFG = {
     listenerDelayMs: 15000, callerDelayMs: 30000, episodeTimeoutMs: 600000,
     answerStallMs: 30000, rearmDelayMs: 60000, resumeWindowMs: 6 * 3600 * 1000,
+    standbyMaxAgeMs: 30 * 24 * 3600 * 1000,
 };
 
 let NOW = 1_000_000;
@@ -365,9 +366,91 @@ function presenceTests() {
     r = drive(n, { type: 'NUDGE' });
     ok(types(r).includes('publishNow'), 'the rate limit lifts after 5s');
 
-    const s = toLive('listener', { standby: true });
+    const s = toLive('caller', { standby: true });
     r = drive(s, { type: 'NUDGE' });
-    ok(types(r).join(',') === 'ensureAlive', 'a standby nudge only checks the socket (initiates nothing)');
+    ok(types(r).join(',') === 'ensureAlive', 'a standby CALLER nudge only checks the socket (initiates nothing)');
+}
+
+// The 2026-08-16 field failure, at the level where it was decided: three
+// phones, all online, all armed standby, all silent. Every check here is a
+// step of the loop that now closes — and the last two are the gate that
+// would have thrown the ring away even once it was armed.
+function standbyRingTests() {
+    console.log('\nstandby ring — the mutual-standby deadlock (field 2026-08-16)');
+
+    // Listener: rings, on the slow cadence.
+    const l = initialMachine();
+    drive(l, { type: 'STANDBY', peerId: 'P1' });
+    drive(l, { type: 'SETUP_READ', gen: l.gen, rec: { enabled: true, role: 'listener' }, connectedNow: false });
+    let r = drive(l, { type: 'SETUP_DONE', gen: l.gen });
+    ok(types(r).join(',') === 'armRing,schedulePublishes' && effOf(r, 'schedulePublishes').standby === true,
+        'a standby LISTENER arms a ring and schedules it on the standby cadence');
+    ok(stateName(l) === 'live(standby/none)', '…while staying a standby episode (nothing is announced)');
+
+    // Caller: still perfectly silent — an offer is only worth minting for
+    // someone who asked.
+    const c = initialMachine();
+    drive(c, { type: 'STANDBY', peerId: 'P1' });
+    drive(c, { type: 'SETUP_READ', gen: c.gen, rec: { enabled: true, role: 'caller' }, connectedNow: false });
+    r = drive(c, { type: 'SETUP_DONE', gen: c.gen });
+    ok(r.effects.length === 0, 'a standby CALLER arms nothing and publishes nothing');
+
+    // The ring lands on the standby caller: that is the whole fix.
+    r = drive(c, { type: 'RING_OPENED', parseOk: true, peerIdMatch: true, n: 'R1', liveConnected: false });
+    ok(!c.standbyOnly && c.provoked && types(r).includes('armOffer')
+        && effOf(r, 'schedulePublishes').standby === false && types(r).includes('publishNow'),
+        'the ring provokes the standby caller: arm an offer, take the ACTIVE cadence, publish now');
+
+    // Nudge: a standby listener republishes its ring (the frame most likely
+    // to have died in a frozen socket), still under the 5s cap.
+    r = drive(l, { type: 'NUDGE' });
+    ok(types(r).join(',') === 'ensureAlive,publishNow', 'a standby listener nudge republishes the ring');
+    r = drive(l, { type: 'NUDGE' });
+    ok(types(r).join(',') === 'ensureAlive', '…and the 5s nudge cap still applies to it');
+    NOW += 6000;
+    r = drive(l, { type: 'NUDGE' });
+    ok(types(r).includes('publishNow'), '…lifting after 5s like any other episode');
+
+    // A bye is the one standby that stays silent in BOTH roles: the peer
+    // hung up on purpose and has stopped listening for us.
+    const b = initialMachine();
+    drive(b, { type: 'TERMINAL', peerId: 'P1' });
+    drive(b, { type: 'SETUP_READ', gen: b.gen, rec: { enabled: true, role: 'listener', byedRecently: true }, connectedNow: false });
+    r = drive(b, { type: 'SETUP_DONE', gen: b.gen });
+    ok(r.effects.length === 0 && b.byed,
+        'a listener whose peer sent a BYE stays silent — a goodbye is not answered with a doorbell');
+    r = drive(b, { type: 'PROMOTE' });
+    ok(types(r).includes('armRing') && types(r).includes('publishNow'),
+        '…until someone Calls, which is what revives a hung-up pair');
+
+    // A Call on a standby listener must not leave it ringing on the slow
+    // clock: the cadence is re-issued, not merely kept.
+    const p = initialMachine();
+    drive(p, { type: 'STANDBY', peerId: 'P1' });
+    drive(p, { type: 'SETUP_READ', gen: p.gen, rec: { enabled: true, role: 'listener' }, connectedNow: false });
+    drive(p, { type: 'SETUP_DONE', gen: p.gen });
+    r = drive(p, { type: 'PROMOTE' });
+    ok(effOf(r, 'schedulePublishes')?.standby === false && types(r).includes('publishNow'),
+        'a Call upgrades the standby listener from the slow ring cadence to the active one');
+
+    // The publish gate. lastSeenAt is the field value: 1911 minutes.
+    const FIELD_AGE = 1911 * 60000;
+    const speculative = toLive('listener');
+    ok(canPublish(speculative, NOW - FIELD_AGE, NOW, CFG).ok === false,
+        'a speculative episode still stops publishing 6h after last contact');
+    const standby = toLive('listener', { standby: true });
+    ok(canPublish(standby, NOW - FIELD_AGE, NOW, CFG).ok === true,
+        'the standby ring publishes at 31.9h — the bound is standbyMaxAgeMs, as standbyAll intends');
+    ok(canPublish(standby, NOW - CFG.standbyMaxAgeMs - 1, NOW, CFG).ok === false,
+        'past standbyMaxAgeMs even the standby ring goes quiet (one horizon, not two)');
+    const provoked = toLive('caller', { standby: true });
+    drive(provoked, { type: 'RING_OPENED', parseOk: true, peerIdMatch: true, n: 'R9', liveConnected: false });
+    ok(canPublish(provoked, NOW - FIELD_AGE, NOW, CFG).ok === true,
+        'a ring-provoked caller may answer at 31.9h (a doorbell is not speculation)');
+    const called = toLive('caller');
+    drive(called, { type: 'PROMOTE' });
+    ok(canPublish(called, NOW - FIELD_AGE, NOW, CFG).ok === true,
+        "a user's Call publishes at 31.9h — the gate no longer mutes the escape hatch");
 }
 
 function helperTests() {
@@ -414,6 +497,7 @@ function helperTests() {
     callerExchangeTests();
     listenerExchangeTests();
     presenceTests();
+    standbyRingTests();
     helperTests();
     console.log('');
     if (fail) { console.log(fail + ' check(s) FAILED.'); process.exit(1); }

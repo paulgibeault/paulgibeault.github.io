@@ -127,7 +127,7 @@
 import { RendezvousManager, RDV_BUILD } from './p2p/rendezvous.js';
 import { DEFAULT_ICE_SERVERS } from './p2p/p2p-core.js';
 import { MqttCarrier, MultiCarrier, CarrierPool } from './p2p/rendezvous-carriers.js';
-import { readKnownPeers, writeKnownPeers, setKnownPeerPaused, markKnownPeerRevoked } from './arcade-known-peers.js';
+import { readKnownPeers, writeKnownPeers, setKnownPeerPaused, markKnownPeerRevoked, resumePlan, RESUME_WINDOW_MS } from './arcade-known-peers.js';
 import { ArcadeDiag } from './arcade-diag.js';
 import { isDeviceId, validatePeerEnvelope, validateRevocationEntry } from './arcade-envelope.js';
 import {
@@ -293,7 +293,6 @@ const DEVICE_ID_KEY = META_PREFIX + 'deviceId';
 const DEVICE_NAME_KEY = META_PREFIX + 'deviceName';
 const LAST_LIVE_SESSION_KEY = META_PREFIX + 'lastLiveSession';
 const DEFAULT_DEVICE_NAME = 'My device';
-const RESUME_WINDOW_MS = 6 * 3600 * 1000; // resumeRendezvous freshness window
 
 function randomDeviceId() {
     if (window.crypto && typeof window.crypto.randomUUID === 'function') {
@@ -1569,6 +1568,15 @@ async function ensureAddon() {
         // 'reconnected' with no fresh 'reconnecting' in between is normal.
         rdv = new RendezvousManager(mp.peerNode, {
             carrierFactory: rdvCarrierFactory,
+            // The same window the launch gate uses to choose active resume
+            // over standby, so "inside the resume window" means one thing.
+            resumeWindowMs: RESUME_WINDOW_MS,
+            // Pair-store GC (see _gcOrphanPairs): pairIds ARE deviceIds on
+            // this bridge, so a stored pair whose id is not a known peer can
+            // never be called, named or shown — it is unreachable state that
+            // still costs a carrier subscription per day-topic. The field log
+            // of 2026-08-16 carried 8 stored pairs for 4 linked devices.
+            knownPairIds: () => new Set(Object.keys(readKnownPeers())),
             // Restart-resume party continuity (v1.13): pairIds ARE deviceIds
             // on this bridge, so the persisted knownPeers party record can
             // re-group a re-adopted link into its pre-restart party.
@@ -2421,26 +2429,32 @@ export const ArcadeP2P = {
      * Call at launcher startup: if a paired session was live recently, boot
      * the transport and let the rendezvous layer actively reconnect it —
      * this is what resumes a game after the browser was killed on both
-     * ends. Outside that window, any auto-reconnect peer still gets a quiet
-     * STANDBY (subscribe-only): this device initiates nothing, but a Call
-     * from the other side reaches it for as long as the arcade is open.
+     * ends. Outside that window, any auto-reconnect peer still gets STANDBY:
+     * the caller role stays silent, the listener role rings slowly, and
+     * either side's ring is enough to reconnect a pair whose two devices
+     * both launched cold (the 2026-08-16 field failure — before the standby
+     * ring, two standby devices sat subscribed to the right topics and
+     * mutually silent forever).
+     *
+     * The branch is resumePlan()'s, shared with index.html's boot gate: the
+     * gate that decides whether to load this module and the gate that
+     * decides what to do once loaded must never be able to disagree.
      */
     async resumeRendezvous() {
         let ts = 0;
         try { ts = parseInt(localStorage.getItem(LAST_LIVE_SESSION_KEY) || '0', 10); } catch (e) {}
-        const fresh = ts && Date.now() - ts <= RESUME_WINDOW_MS;
-        if (!fresh) {
-            const known = readKnownPeers();
-            if (!Object.values(known).some((p) => p && p.autoReconnect && !p.paused)) {
-                ArcadeDiag.log('bridge', 'resume-on-launch: no recent session and no callable auto-reconnect peer — staying cold');
-                return false;
-            }
-            ArcadeDiag.log('bridge', `resume-on-launch: last live session ${ts ? Math.round((Date.now() - ts) / 60000) + 'm ago' : 'never'} (outside ${RESUME_WINDOW_MS / 3600000}h window) — arming quiet standby only`);
+        const plan = resumePlan(ts);
+        if (plan.mode === 'cold') {
+            ArcadeDiag.log('bridge', `resume-on-launch: ${plan.why} — staying cold`);
+            return false;
+        }
+        if (plan.mode === 'standby') {
+            ArcadeDiag.log('bridge', `resume-on-launch: ${plan.why} — arming standby (listener-role pairs ring on the slow cadence)`);
             await ensureAddon();
             await rdv.standbyAll();
             return true;
         }
-        ArcadeDiag.log('bridge', `resume-on-launch: last live session ${Math.round((Date.now() - ts) / 60000)}m ago — actively resuming paired sessions`);
+        ArcadeDiag.log('bridge', `resume-on-launch: ${plan.why} — actively resuming paired sessions`);
         await ensureAddon();
         await rdv.resumeAll();
         return true;
