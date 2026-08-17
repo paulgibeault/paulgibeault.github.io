@@ -893,10 +893,14 @@ Arcade.peer.invite();              // → Promise<number of proposals sent>. 0 m
                                    // nobody to ask — tell the player to connect a device first.
                                    // Without the cap it resolves 0: say "invite from the
                                    // launcher menu" instead of inventing a fallback protocol.
+                                   // Takes no target: a game may propose ITSELF to the
+                                   // device's connections, never choose between them.
 
 // RETIRED — parties no longer exist. These stay callable so nothing breaks
 // on a launcher deploy, and always resolve their documented unattached
-// answers. Don't write new code against them.
+// answers. Don't write new code against them; use peers() for who is here,
+// status()/onStatus for whether anyone is, invite() to open a scope, and
+// your own lobby frames for seating.
 Arcade.peer.party();               // → null
 Arcade.peer.parties();             // → []
 Arcade.peer.attach(id);            // → null
@@ -920,6 +924,23 @@ Rules of the road:
       a frame for your game reaches you only over a link where your game is
       open, so naming a `gameId` can never reach a game its owner never
       opened to you.
+- [ ] **`invite()` asks; it does not choose, and it does not grant.**
+      `Arcade.peer.invite()` (cap `peer.invite`) hands the launcher one
+      request — *offer this game to the connections that don't already have
+      it open* — and resolves with how many proposals went out. It takes no
+      target on purpose. There IS an addressed form of the proposal, and it
+      belongs to the launcher, not to you: while your game is running, every
+      live connection row in the Multiplayer dialog that doesn't already have
+      it open grows an "Ask to play ⟨game⟩" button, and that one proposes to
+      that one device. So the unaddressed door is the game's ("I want more
+      players") and the addressed one is the player's ("I want *her*") —
+      which keeps a game from enumerating or singling out devices it was
+      never told about. Either way the other end sees a
+      launcher prompt and can silently decline; a decline never comes back,
+      so report what you know ("asked"), never what you don't ("joined").
+      `0` proposals means there was nobody to ask — that is the moment to
+      say "connect a device first", not to retry. Without the cap it also
+      resolves `0`, and the right copy is "invite from the launcher menu".
 - [ ] Both devices run the same game for a session. Messages are routed by
       `gameId` within an open scope — a message sent while the other device
       has a different game mounted is dropped silently. You no longer need a
@@ -985,17 +1006,37 @@ Multi-seat rules (host holding several standalone connections):
       broadcast: the SDK returns `false` when the launcher lacks the
       `peer.sendTo` cap or `to` is malformed, and the launcher *silently
       drops* (never fans out) a frame whose target is unknown, just departed,
-      or whose session host is too old to route it. `true` therefore means
-      "handed to the launcher", not "delivered" — a game that needs delivery
-      guarantees acknowledges at the game layer.
+      or hasn't opened this game with you. That last one is deliberate, and
+      it is the dead end worth designing for: there is no third device to
+      route through, so an addressee who isn't adjacent to you is simply not
+      sendable-to, and the game says so in copy rather than the transport
+      papering over it.
+      `true` therefore means "handed to the launcher", not "delivered" — a
+      game that needs delivery guarantees acknowledges at the game layer.
 - [ ] **Every roster entry is `direct: true`, and there may be more than
       one.** That is the whole shape now: `peers()` lists the devices this
       game is open with, each on a link that terminates at your device. Do
       NOT assume a single entry means "that's the host" — **name your host**
-      (the caller that joined a table knows which device it joined) and treat
-      `peers().length === 1` as a convenience, not a definition. A game
-      written for one-direct-peer will look like it works right up to the
-      first player who is connected to two people at once.
+      and treat `peers().length === 1` as a convenience, not a definition.
+      The second device to open YOUR game with you is all it takes: you
+      joined one player's table and another knocks, or you host one table
+      and sit at another. Now "the direct peer" is a question with two
+      answers, and a `direct.length === 1` host-finder returns null for both.
+      Cardstock hit exactly this, and its comments are the worked example.
+      `discoverHost` (`../cardstock/src/match/client.js:61-84`) records the
+      failure — "at which point this returned null and every frame from
+      either of them was dropped as spoofed, which is a client that silently
+      does not work rather than one that says why" — and the fix, which is
+      not a cleverer heuristic: "So the CALLER names the table it joined
+      … and this is the fallback for the single-table case." The security
+      property survives the change intact, because it never depended on the
+      count: the sighting guard
+      (`../cardstock/src/ui/tableSightings.js:357-368`) keeps the rule that
+      "the sender must be direct and the frame must not be relayed", having
+      only dropped the "and there is exactly one of them" it had quietly
+      folded in. Authority is pinned to a device id that came from the
+      transport, never from a payload claiming to be the host — that is the
+      part to copy.
 - [ ] **Routing between players is your job.** The framework moves frames
       over direct links and nothing else: there is no relay, and a frame is
       never forwarded from one device to another. A multi-seat game is
@@ -1018,10 +1059,40 @@ Multi-seat rules (host holding several standalone connections):
       changes again. Targeted frames arrive with `meta.to === 'me'`;
       broadcasts with `'all'`.
 
+**Don't reinvent the seating layer — copy the one that works.** Everything
+above describes a job (host authority, per-seat routing, naming your host,
+liveness from the roster) that has exactly one correct shape, and the fleet
+already has it written down and under test: **`../cardstock/src/match/`** is
+the sanctioned pattern for host-authoritative multi-seat games. `host.js`
+holds the authority and sends per seat, `client.js` speaks to exactly one
+device, `peerPort.js` gates the three caps it needs (`peer.sendTo`,
+`peer.roster`, `peer.meta`) with no fallback protocol, and `protocol.js`
+stamps every frame with the table it belongs to. Read
+`../cardstock/src/ui/tableSightings.js` beside it — it is the game's UI
+layer rather than the kit, but it is where the rule for what a frame from a
+stranger is allowed to mean is written down.
+
+The kit's structure needed no change when the relay was deleted — the only
+thing that moved was two
+cosmetic frame kinds (an emote, and a joiner's goodbye) that had been
+reaching fellow players through the hub, and routing them through the host
+instead made the authority model *more* consistent, not less. A design that
+gets *more* coherent when the transport takes a capability away was the right
+shape to begin with.
+
+Be clear-eyed about what that means today: **it is a pattern to read and port,
+not a module to import.** The kit lives inside cardstock and is coupled to it;
+extracting it as game-agnostic code is cardstock's own deferred T5
+(`../cardstock/TABLES_PLAN.md`) and the launcher-side `arcade-table` module is
+parked, not built (`plans/tables-2026-08.md`, "Out of scope"). Until one of
+those happens, the honest advice is the cheap one: read those files before you
+design a lobby, and lift the structure.
+
 Try it: mount `tools/fixtures/p2p-test-game/` on two devices via the launcher
 and watch the message log; `node tools/p2p-acceptance.mjs` runs the automated
-two-launcher version headlessly, and `node tools/p2p-multiseat-acceptance.mjs`
-the host + two joiners version (targeted sends, roster, meta).
+two-launcher version headlessly, `node tools/p2p-multiseat-acceptance.mjs` the
+host + two joiners version (targeted sends, roster, meta), and
+`node tools/p2p-invite-ux-acceptance.mjs` the invite doors end to end.
 
 ---
 
