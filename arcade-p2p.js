@@ -523,6 +523,32 @@ function applyGameStatuses() {
     }
 }
 
+/**
+ * Who a proposal for `gameId` may go to — [[deviceId, peerId], …].
+ *
+ * The three rules, in one place so the door and the nudge that points at it
+ * cannot disagree: the link has to be usable and identity-bound
+ * (seatReachable), the game must not already be open on it (proposing what is
+ * already agreed sends a frame to no effect), and invites must not be muted for
+ * that connection (setKnownPeerInvitesOff — the user's standing answer, which
+ * the far end has been told to silently refuse anyway).
+ *
+ * `to` narrows it to one deviceId: the joiner-side knock. It filters rather
+ * than bypasses — an addressed knock at a muted connection is still a proposal
+ * the user has already declined on that connection's behalf.
+ */
+function inviteTargets(gameId, to) {
+    const known = readKnownPeers();
+    const targets = [];
+    for (const [deviceId, peerId] of deviceIndex) {
+        if (to !== undefined && deviceId !== to) continue;
+        if (!seatReachable(peerId) || scopeOpen(gameId, peerId)) continue;
+        if (known[deviceId] && known[deviceId].invitesOff) continue;
+        targets.push([deviceId, peerId]);
+    }
+    return targets;
+}
+
 /** Sends one scope-negotiation frame on a single link. */
 function sendScopeOp(peerId, op, gameId) {
     if (!addon) return false;
@@ -566,8 +592,17 @@ function handleScopeOp(peerId, deviceId, op, gameId) {
     }
     // op === 'invite'
     if (scopeOpen(gameId, peerId)) return;
-    ArcadeDiag.log('bridge', `invite for ${gameId} from ${deviceId}`);
     const known = readKnownPeers();
+    // Invites muted for this connection: decline exactly as a tapped decline
+    // does, and prompt nobody. The mute has to bite HERE rather than in the UI,
+    // because the prompt is the thing being muted — a listener that fires and a
+    // dialog that then declines to show is one refactor away from showing.
+    if (known[deviceId] && known[deviceId].invitesOff) {
+        ArcadeDiag.log('bridge', `invite for ${gameId} from ${deviceId} auto-declined: invites muted for this connection`);
+        sendScopeOp(peerId, 'decline', gameId);
+        return;
+    }
+    ArcadeDiag.log('bridge', `invite for ${gameId} from ${deviceId}`);
     const name = (known[deviceId] && known[deviceId].name) || 'Unnamed device';
     for (const fn of gameInviteListeners) {
         try { fn({ deviceId, name, gameId }); } catch (e) {}
@@ -1761,23 +1796,36 @@ export const ArcadeP2P = {
      *
      * Returns how many proposals went out. Zero means there was nobody to ask
      * — the caller offers the pairing ceremony instead.
+     *
+     * Connections with invites muted (`invitesOff`) are not targets, for the
+     * addressed form as much as the unaddressed one: the mute is the user's
+     * standing answer for that connection, and a knock aimed at it would be a
+     * proposal the far end has already been told to silently refuse.
      */
     inviteGame(gameId, to) {
         if (!addon || typeof gameId !== 'string' || !gameId) return 0;
-        const targets = [];
-        for (const [deviceId, peerId] of deviceIndex) {
-            if (to !== undefined && deviceId !== to) continue;
-            if (!seatReachable(peerId) || scopeOpen(gameId, peerId)) continue;
-            targets.push([deviceId, peerId]);
-        }
         let sent = 0;
-        for (const [deviceId, peerId] of targets) {
+        for (const [deviceId, peerId] of inviteTargets(gameId, to)) {
             if (sendScopeOp(peerId, 'invite', gameId)) {
                 sent++;
                 ArcadeDiag.log('bridge', `invited ${deviceId} to play ${gameId}`);
             }
         }
         return sent;
+    },
+
+    /**
+     * How many proposals `inviteGame(gameId)` would send right now, sending
+     * nothing. The launcher's "connected, but nobody is playing this" nudge is
+     * the caller: it needs to know whether the door has anybody behind it.
+     *
+     * ONE OWNER OF THE TARGET RULE. Reachable, not already open, not muted —
+     * a nudge that re-derived that list would drift from the button it points
+     * at, and would eventually promise an ask that proposes to nobody.
+     */
+    invitableCount(gameId) {
+        if (!addon || typeof gameId !== 'string' || !gameId) return 0;
+        return inviteTargets(gameId).length;
     },
 
     /**
