@@ -22,7 +22,10 @@
  *                     and same-device tabs.
  *   MqttCarrier     — minimal dependency-free MQTT 3.1.1 client over WSS,
  *                     for free public brokers (QoS 0 only; retries live in
- *                     the rendezvous episode layer, which republishes).
+ *                     the rendezvous episode layer, which republishes). A
+ *                     broker that never once connects this session is given
+ *                     up on after a few dials — the other legs carry the
+ *                     rendezvous and the log stays readable.
  *   MultiCarrier    — fans one carrier interface out across several legs
  *                     (one per broker): publish to every live leg,
  *                     subscribe on all, drop duplicate deliveries. The
@@ -80,6 +83,45 @@ export function makeDialBrake({ windowMs = 60000, max = 20 } = {}) {
     };
 }
 const dialBrake = makeDialBrake();
+
+// How many consecutive failed dials a broker that has NEVER connected this
+// session gets before the carrier stops redialing it. Sized past the whole
+// backoff ladder (1+2+5+15+30s ≈ 53s of waiting plus six dial attempts), so
+// only a broker that is genuinely unreachable from this network reaches it.
+const DEAD_BROKER_DIALS = 6;
+
+/**
+ * Per-carrier, per-session redial budget. A broker that has come up even
+ * once is never given up on — losing a session is normal (free brokers
+ * restart, phones suspend) and the redial ladder is exactly right for it.
+ * A broker that has NEVER come up is a different animal: on 2026-08-16
+ * test.mosquitto.org failed all nine dial attempts, each in under a second,
+ * and produced roughly half the volume of a connection log that was being
+ * read to diagnose an unrelated bug. Two working brokers carried the
+ * session; the third only made the evidence harder to read.
+ *
+ * Deliberately NOT a hard stop: MqttCarrier's ensureAlive() dials directly,
+ * so an explicit "the world may have changed" kick (page visible, network
+ * back) still gets one attempt, and that attempt's failure re-spends the
+ * budget. What the budget kills is the unattended ladder.
+ *
+ * Pure and exported for hermetic tests, like redialDelay and makeDialBrake.
+ */
+export function makeFailureBudget({ max = DEAD_BROKER_DIALS } = {}) {
+    let failures = 0, everUp = false, announced = false;
+    return {
+        noteUp() { everUp = true; failures = 0; },
+        /** Records a failed dial; true on the one that exhausts the budget. */
+        noteFail() {
+            failures++;
+            if (everUp || failures < max || announced) return false;
+            announced = true;
+            return true;
+        },
+        /** Has this carrier stopped redialing on its own for the session? */
+        get spent() { return !everUp && failures >= max; }
+    };
+}
 
 export class LoopbackCarrier {
     constructor(name = 'qrp2p-rdv-loopback') {
@@ -481,6 +523,9 @@ export class MqttCarrier {
      * @param {(msg: string) => void} [opts.onLog] - Socket-lifecycle
      *   diagnostics (dial/up/lost/redial). Never called for per-message
      *   traffic; never load-bearing.
+     * @param {number} [opts.failureBudget] - consecutive failed dials before
+     *   a broker that has NEVER connected this session stops being redialed
+     *   unattended (see makeFailureBudget).
      */
     constructor(opts = {}) {
         this.url = opts.url || 'wss://test.mosquitto.org:8081/mqtt';
@@ -498,6 +543,8 @@ export class MqttCarrier {
         this._awaitingPong = false;
         this._firstUp = null;       // resolves the connect() promise
         this._connectPromise = null;
+        this._budget = makeFailureBudget(
+            opts.failureBudget ? { max: opts.failureBudget } : undefined);
         this.onSessionUp = null;    // optional: fired on each (re)established session
     }
 
@@ -545,6 +592,7 @@ export class MqttCarrier {
         } catch (e) {
             this._log(`WebSocket constructor failed (${e && e.message})`);
             this._dialing = false;
+            this._noteDialFailed();
             this._scheduleRedial();
             return;
         }
@@ -558,6 +606,7 @@ export class MqttCarrier {
             this._log(`dial failed after ${Date.now() - dialedAt}ms (socket error/closed/timeout)`);
             try { ws.close(); } catch (e) {}
             this._dialing = false;
+            this._noteDialFailed();
             this._scheduleRedial();
         };
         const guard = setTimeout(abort, 15000);
@@ -576,12 +625,14 @@ export class MqttCarrier {
                     this._log('broker refused the MQTT session (CONNACK != 0)');
                     try { ws.close(); } catch (err) {}
                     this._dialing = false;
+                    this._noteDialFailed();
                     this._scheduleRedial();
                     return;
                 }
                 this._log(`broker session up in ${Date.now() - dialedAt}ms (${this.subs.size} subscription(s) re-issued)`);
                 this._dialing = false;
                 this._backoffIdx = 0;
+                this._budget.noteUp();
                 this.ws = ws;
                 ws.onmessage = (ev) => this._onFrame(new Uint8Array(ev.data));
                 ws.onerror = null;
@@ -626,8 +677,19 @@ export class MqttCarrier {
         this._scheduleRedial();
     }
 
+    _noteDialFailed() {
+        if (this._budget.noteFail()) {
+            this._log(`${DEAD_BROKER_DIALS} dials, never a session — giving this broker up for now (the other legs carry the rendezvous; a foreground/network kick still retries it)`);
+        }
+    }
+
     _scheduleRedial() {
         if (this.closed || this._redialTimer || this.ws || this._dialing) return;
+        // A broker that has never once answered this session gets no more
+        // unattended dials: it is not coming back on its own, and its dial
+        // log drowns out the layers a reader actually needs (see
+        // makeFailureBudget). ensureAlive() still dials past this.
+        if (this._budget.spent) return;
         this._redialTimer = setTimeout(() => {
             this._redialTimer = null;
             this._dial();
@@ -652,6 +714,11 @@ export class MqttCarrier {
      * (a suspended redial timer would otherwise wait out its full backoff);
      * with one, ping and give the broker 5s to answer before declaring the
      * socket dead and redialing.
+     *
+     * This is also the one path that dials a broker the failure budget has
+     * given up on. A dead broker is usually dead because of where the device
+     * is standing, and this call is the signal that that may have changed;
+     * one attempt is cheap, and its failure simply re-spends the budget.
      */
     ensureAlive() {
         if (this.closed) return;

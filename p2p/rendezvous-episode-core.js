@@ -53,9 +53,10 @@
  *
  * ── What deliberately stays in the shell ────────────────────────────────
  *   - Publish cadence timers (retrySchedule/_every): pure plumbing around
- *     `publishOnce`; the DECISION (may this pair still republish?) is the
- *     exported canPublish(). Modeling each tick would add table rows with
- *     no decisions in them.
+ *     `publishOnce`; the DECISIONS — may this pair still republish?
+ *     (canPublish) and which cadence, active or standby? (the
+ *     schedulePublishes effect's `standby` flag) — are the core's. Modeling
+ *     each tick would add table rows with no decisions in them.
  *   - Day-topic refresh + carrier onSessionUp republish: carrier plumbing
  *     guarded by liveness the shell already knows.
  *   - ownBlobs echo-drop: blob-string identity bookkeeping.
@@ -71,7 +72,7 @@
  *                                              SETUP_DONE | SETUP_FAILED
  *   emit{event,payload}                      — RendezvousManager events
  *   armOffer{gen} armRing{gen}               — → OFFER_ARMED | RING_ARMED
- *   schedulePublishes{} publishNow{}
+ *   schedulePublishes{standby} publishNow{} — standby picks the slow cadence
  *   adoptShadow{} acceptAnswer{payload}      — caller adoption pair
  *   buildAnswer{gen,payload}                 — → ANSWER_BUILD_READY|FAILED
  *   commitAnswer{} discardAnswer{}           — adopt+publish vs close pc
@@ -117,9 +118,18 @@ export function initialMachine() {
         role: null,
         phase: null,         // 'active' | 'quiet'
         standbyOnly: false,
+        // This standby exists because the PEER said goodbye, not because we
+        // launched cold. Both look identical from standbyOnly alone, and
+        // they want opposite things from the listener's ring (see SETUP_DONE).
+        byed: false,
         announced: false,
         exchanged: false,
         answering: false,
+        // Something concrete asked this episode to initiate: a sealed frame
+        // from the peer landed, or the user tapped Call. It is the difference
+        // between shouting into the void and answering a doorbell, and it is
+        // what canPublish() uses to pick a bound (see there).
+        provoked: false,
         publishScheduled: false,
         offerArmed: false,   // legacy: !!ep.sealedOffer
         ringArmed: false,    // legacy: !!ep.sealedRing
@@ -182,15 +192,33 @@ export function tryKinds(m) {
 
 /**
  * May this pair still republish its offer/ring? (Legacy publishOnce gate,
- * rendezvous.js:1238-1247.) Publishing stops — subscribe-only — once the
- * pair hasn't been seen within resumeWindowMs. Returns {ok, logStop}:
- * logStop is true exactly once, when the window first closes.
+ * rendezvous.js:1238-1247.) Returns {ok, logStop, boundMs}: logStop is true
+ * exactly once, when the applicable bound first closes.
+ *
+ * TWO bounds, because there are two kinds of publishing and they were being
+ * held to one rule:
+ *
+ *   SPECULATIVE — an episode armed by a link drop or resumeAll, shouting on
+ *     the chance the peer shows up. Bounded by resumeWindowMs: after six
+ *     hours of no contact, stay subscribed (reachable) but stop the noise.
+ *   STANDBY or PROVOKED — the standby listener's slow ring, and any episode
+ *     that has just heard a sealed frame from its peer or been told to Call.
+ *     Bounded by standbyMaxAgeMs, the same horizon standbyAll() uses to
+ *     decide the pair is worth arming at all.
+ *
+ * One bound for both is what made the field failure of 2026-08-16 survivable
+ * only by re-ceremony: with the pair last seen 31.9h earlier, EVERY publish
+ * was refused — a ring-provoked offer, and a user's Call, along with the
+ * speculative traffic the rule was written for. Fixing the standby ring
+ * without fixing this would have changed nothing: the ring would have been
+ * armed, scheduled, and then silently dropped at this gate.
  */
 export function canPublish(m, lastSeenAt, now, cfg) {
-    if (now - (lastSeenAt || 0) <= cfg.resumeWindowMs) return { ok: true, logStop: false };
+    const boundMs = (m.standbyOnly || m.provoked) ? cfg.standbyMaxAgeMs : cfg.resumeWindowMs;
+    if (now - (lastSeenAt || 0) <= boundMs) return { ok: true, logStop: false, boundMs };
     const logStop = !m.republishWindowLogged;
     m.republishWindowLogged = true;
-    return { ok: false, logStop };
+    return { ok: false, logStop, boundMs };
 }
 
 // ── transition ──────────────────────────────────────────────────────────
@@ -251,9 +279,11 @@ function resetToIdle(m) {
     m.role = null;
     m.phase = null;
     m.standbyOnly = false;
+    m.byed = false;
     m.announced = false;
     m.exchanged = false;
     m.answering = false;
+    m.provoked = false;
     m.publishScheduled = false;
     m.offerArmed = false;
     m.ringArmed = false;
@@ -313,12 +343,38 @@ function offerIsStale(m, now) {
     return !m.offerArmed || now - m.lastShadowAt > 30000;
 }
 
-/** Append schedulePublishes once (legacy _schedulePublishes idempotence). */
+/**
+ * Append schedulePublishes once (legacy _schedulePublishes idempotence).
+ * The effect carries the cadence the shell should install: a standby ring
+ * goes out on the slow one — it is a background presence beacon, not a
+ * repair in progress, and every publish is a write a passive broker observer
+ * can count (§7.5/§9).
+ */
 function pushSchedule(m, effects) {
     if (!m.publishScheduled) {
         m.publishScheduled = true;
-        effects.push({ t: 'schedulePublishes' });
+        effects.push({ t: 'schedulePublishes', standby: !!m.standbyOnly });
     }
+}
+
+/**
+ * This standby episode now has a reason to initiate. Two things follow:
+ * canPublish() moves to the standby bound (it just heard from the peer, or
+ * its user asked), and the slow ring cadence has to be replaced by the
+ * active one — so the publishScheduled latch is dropped and the pushSchedule
+ * that always follows this call re-issues the effect. `standbyOnly` only
+ * ever goes true→false, so the cadence can only ever be upgraded.
+ *
+ * Callers that do NOT follow with a pushSchedule must not use this: clearing
+ * the latch without re-scheduling would make NUDGE's `!publishScheduled`
+ * guard mute the episode.
+ */
+function provoke(m) {
+    m.provoked = true;
+    m.republishWindowLogged = false; // the bound changed; a later stop is news again
+    if (!m.standbyOnly) return;
+    m.standbyOnly = false;
+    m.publishScheduled = false;
 }
 
 // ---- the table ---------------------------------------------------------
@@ -417,6 +473,7 @@ const HANDLERS = {
             m.setupPending = true;
             m.role = ev.rec.role;
             m.standbyOnly = standbyOnly;
+            m.byed = !!ev.rec.byedRecently;
             m.phase = quiet ? 'quiet' : 'active';
             m.seenNonceSet = new Set(Array.isArray(ev.rec.seenNonces) ? ev.rec.seenNonces : []);
             const effects = [{ t: 'buildEpisode', gen: m.gen }];
@@ -430,10 +487,33 @@ const HANDLERS = {
     },
 
     // Carrier up + subscribed (legacy 1145-1174 tail of _startEpisode).
+    //
+    // Standby used to arm nothing at all, in either role. That made a pair
+    // whose two devices both launched outside their resume window a mutual
+    // deadlock: both sides correctly subscribed to the same day-topics, both
+    // waiting for an inbound frame, neither ever sending one. Three phones
+    // sat in it for a day and a half on 2026-08-16, and only a manual Call
+    // could break it (plans/connection-model-2026-08.md).
+    //
+    // The LISTENER now rings while in standby — a ring is a doorbell, not an
+    // offer: it carries no SDP, mints no shadow connection, and asks the
+    // caller role for the offer. It publishes on a topic this device is
+    // already subscribed to, so the marginal exposure is going from silent
+    // reader to occasional writer on a channel already claimed (the §7.5/§9
+    // trade, taken deliberately). The CALLER stays completely silent: it has
+    // the expensive half of the exchange, and an inbound ring provokes it
+    // (RING_OPENED) at the moment there is someone to answer.
+    //
+    // A standby that exists because the peer sent a BYE stays silent in both
+    // roles. A bye is a person saying "I am closing this on purpose"; the
+    // hanging-up side pauses the pair and stops listening, so a ring there
+    // would be publishes nobody hears, and answering a goodbye with a
+    // doorbell is not what the frame means. Their Call, or ours, revives it
+    // (PROMOTE clears the standby; resumePair clears rec.byeAt).
     SETUP_DONE: {
         live: (m) => {
             m.setupPending = false;
-            if (m.standbyOnly) return ok([]);
+            if (m.standbyOnly && (m.role === 'caller' || m.byed)) return ok([]);
             const effects = [m.role === 'caller'
                 ? { t: 'armOffer', gen: m.gen }
                 : { t: 'armRing', gen: m.gen }];
@@ -468,7 +548,7 @@ const HANDLERS = {
     // Escalate to fully-active on a user Call (legacy _promoteEpisode).
     PROMOTE: {
         live: (m, ev, cfg, now) => {
-            m.standbyOnly = false;
+            provoke(m); // a Call also lifts the publish bound and the slow cadence
             const effects = [];
             if (m.phase !== 'active') {
                 m.phase = 'active';
@@ -491,10 +571,17 @@ const HANDLERS = {
     },
 
     // Foreground/network kick (legacy _nudgeEpisode).
+    //
+    // `publishScheduled` is the whole standby distinction here: a standby
+    // LISTENER has a ring on a cadence and republishes it (a device thawing
+    // from a background freeze published its last ring into a socket the
+    // broker had already dropped, and nobody but us retries QoS 0), while a
+    // standby CALLER never scheduled anything and so still gets only the
+    // socket check. The 5s cap keeps visibility flapping off the relay.
     NUDGE: {
         live: (m, ev, cfg, now) => {
             const effects = [{ t: 'ensureAlive' }];
-            if (m.standbyOnly || m.exchanged || !m.publishScheduled) return ok(effects);
+            if (m.exchanged || !m.publishScheduled) return ok(effects);
             if (now - m.lastNudgeAt < 5000) return ok(effects);
             m.lastNudgeAt = now;
             if (m.role === 'caller' && offerIsStale(m, now)) {
@@ -565,7 +652,7 @@ const HANDLERS = {
                 effects.push({ t: 'rememberNonce', n: ev.n });
             }
             if (ev.liveConnected) return ok(effects);
-            m.standbyOnly = false; // provoked: this standby now initiates (1383)
+            provoke(m); // this standby now initiates (1383) — the doorbell rang
             if (offerIsStale(m, now)) effects.push({ t: 'armOffer', gen: m.gen });
             pushSchedule(m, effects);
             effects.push({ t: 'publishNow' });
@@ -585,7 +672,12 @@ const HANDLERS = {
             // (a DIFFERENT nonce while exchanged supersedes the stale attempt)
             m.answering = true;
             m.exchanged = true;
+            // Provoked, but deliberately NOT through provoke(): answering
+            // publishes on its own schedule (commitAnswer), so there is no
+            // pushSchedule here to re-issue the cadence with.
             m.standbyOnly = false;
+            m.provoked = true;
+            m.republishWindowLogged = false;
             m.answeredNonce = ev.n || null;
             m.peerId = ev.peerId;
             if (ev.n) m.seenNonceSet.add(ev.n);
