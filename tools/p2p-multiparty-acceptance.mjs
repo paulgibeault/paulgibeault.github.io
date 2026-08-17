@@ -233,8 +233,13 @@ try {
     // open on neither, so it proposes to both.
     check('S5: re-inviting an already-open game proposes to nobody',
         (await A.evaluate((g) => window.__arcade.p2p.inviteGame(g), GAME)) === 0);
+    // The addressed form — the knock, and the host-side "invite this one
+    // device" — reaches exactly that connection. C is asked and never
+    // answers, which must leave the scope closed on both ends.
+    check('S5: an addressed invite proposes to exactly that connection',
+        (await A.evaluate(([g, d]) => window.__arcade.p2p.inviteGame(g, d), [GAME2, C_dev])) === 1);
     const sent2 = await A.evaluate((g) => window.__arcade.p2p.inviteGame(g), GAME2);
-    check('S5: … while a game open on neither connection proposes to both', sent2 === 2, String(sent2));
+    check('S5: … while an unaddressed one reaches both connections', sent2 === 2, String(sent2));
     await B.waitForFunction(([d, g]) => (window.__invites2 || []).some(i => i.deviceId === d && i.gameId === g),
         [A_dev, GAME2], { timeout: 15000 });
     await B.evaluate(([d, g]) => window.__arcade.p2p.acceptGameInvite(d, g), [A_dev, GAME2]);

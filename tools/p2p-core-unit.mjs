@@ -409,11 +409,12 @@ function lifecycleTests() {
     ok(!('parties' in sum) && !('isHost' in sum),
         'statusSummary carries no party breakdown and no isHost mirror (both deleted)');
 
-    // allPeers is what the bridge intersects with a game's scope.
-    const all = pm3.allPeers();
-    ok(all.length === 4 && all.filter((p) => p.live).length === 3
-        && all.find((p) => p.peerId === 'a3').status === 'stashed',
-        'allPeers lists every live link and every stashed session');
+    // Per-link reads are how the bridge folds a game's scope into a status:
+    // a live link answers linkStatus, a repairing one answers only through
+    // the stash, and the two together are the whole picture.
+    ok(pm3.linkStatus('a2') === 'interrupted' && pm3.linkStatus('a3') === null
+        && pm3.hasStashedSession('a3') === true,
+        'linkStatus + hasStashedSession cover both halves of a scope link');
 
     // abandonPending drops every unfinished ceremony, node-wide.
     const pm4 = new PeerManager();

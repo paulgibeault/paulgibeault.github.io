@@ -191,8 +191,10 @@ export function initMessageRouter(host) {
                 pool.postToIframe(gameId, {
                     type: 'arcade:welcome',
                     caps: ARCADE_PEER_CAPS,
-                    // Per-game views (v1.13): a game sees its ATTACHED
-                    // party's status and seats, not the device aggregate.
+                    // Per-game views: a game sees the status and seats of the
+                    // connections IT is open on, not the device aggregate —
+                    // 'idle' with an empty roster until someone agrees to
+                    // play this particular game with us.
                     peerStatus: p2p ? p2p.statusForGame(gameId) : 'idle',
                     peers: p2p ? p2p.rosterForGame(gameId) : [],
                     settings: host.currentSettings(),

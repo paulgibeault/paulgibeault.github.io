@@ -1127,8 +1127,9 @@ export class PeerManager extends EventTarget {
      * Connection-liveness snapshot for UI, so callers don't reach into the
      * internal `peers`/`sessionStash` state to derive it themselves. Flat by
      * design (v1.14): there is no per-party breakdown any more because there
-     * are no parties — per-GAME reporting is the bridge's, since only the
-     * bridge knows which games are open on which link.
+     * are no parties. Per-GAME reporting is the bridge's job — only it knows
+     * which games are open on which link — and it builds that from
+     * linkStatus()/hasStashedSession() per link, not from a grouping here.
      */
     statusSummary() {
         let connected = 0, interrupted = 0, finalizing = 0, pending = 0;
@@ -1143,19 +1144,6 @@ export class PeerManager extends EventTarget {
             connected, interrupted, finalizing, pending, stashed,
             established: this.peers.size > 0 || stashed > 0,
         };
-    }
-
-    /**
-     * Every link this node holds: [{peerId, status, live}] — a stashed
-     * (repairing/dead) session reports status 'stashed' with live:false.
-     * The bridge folds this into per-game status by intersecting it with the
-     * links a game's scope is open on.
-     */
-    allPeers() {
-        const out = [];
-        this.peers.forEach((p, peerId) => out.push({ peerId, status: p.status, live: true }));
-        this.sessionStash.forEach((s, peerId) => out.push({ peerId, status: 'stashed', live: false }));
-        return out;
     }
 
     /** True while this peerId holds a live entry (any status, pre- or post-connect). */
