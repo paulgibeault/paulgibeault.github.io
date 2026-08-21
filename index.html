@@ -2774,7 +2774,34 @@
                         toast(tried
                             ? 'Calling ' + displayName + '…'
                             : 'No saved pairing to call ' + displayName + ' — use "New invite code" to reconnect.');
-                    } catch (e) {} finally { render(); }
+                        // A ring nobody answers looked EXACTLY like a dead
+                        // button: the tap disabled it, a toast flashed, and
+                        // then nothing ever happened again. Say so, and point
+                        // at the one action that actually recovers a pair
+                        // whose saved key no longer matches the other side's.
+                        if (tried) {
+                            setTimeout(() => {
+                                // Deliberately NOT conditioned on this button
+                                // still being in the DOM: the render() below
+                                // replaces the row immediately, and the user
+                                // may well have closed the dialog. This is the
+                                // answer to something they did — it should
+                                // reach them wherever they are.
+                                if (connState(id, peer) !== 'idle') return;
+                                toast('No answer from ' + displayName + ' yet — they may be offline. '
+                                    + 'If calls never connect, use "New invite code" on both devices.');
+                            }, 45000);
+                        }
+                    } catch (e) {
+                        // Was an empty catch: a failure here (the bridge module
+                        // failing to load, most plausibly a stale cache) left
+                        // the user with a button that visibly did nothing at
+                        // all and a connection log with no record of the tap.
+                        toast('Could not start the call — ' + ((e && e.message) || 'unknown error'));
+                        import('./arcade-diag.js').then(({ ArcadeDiag }) => {
+                            ArcadeDiag.log('bridge', 'Call ' + id + ' failed before it rang: ' + ((e && e.message) || e));
+                        }).catch(() => {});
+                    } finally { render(); }
                 });
                 head.appendChild(callBtn);
             }

@@ -104,13 +104,21 @@ function transcriptTests() {
     console.log('\ntranscript()');
     const lines = ArcadeDiag.transcript().split('\n');
     const snap = ArcadeDiag.entries();
-    ok(lines.length === snap.length + 2, 'transcript is a 2-line header plus one line per entry');
+    ok(lines.length === snap.length + 4, 'transcript is a 3-line header, one line per entry, and a trailer');
     ok(lines[0].startsWith('# Arcade connection log '), 'header line 1 names the log');
     ok(!Number.isNaN(Date.parse(lines[0].slice('# Arcade connection log '.length))),
         'header line 1 ends in a parseable timestamp');
-    ok(lines[1] === '# UA: ' + navigator.userAgent, 'header line 2 is the UA (bug-report context)');
-    ok(snap.every((e, i) => lines[i + 2] === ArcadeDiag.format(e)),
+    // Correlating two devices' logs needs BOTH ids, and every pair line in a
+    // log names only the remote one.
+    ok(lines[1] === '# device: unknown',
+        'header line 2 names this device (unknown with no localStorage — import-safety over side effects)');
+    ok(lines[2] === '# UA: ' + navigator.userAgent, 'header line 3 is the UA (bug-report context)');
+    ok(snap.every((e, i) => lines[i + 3] === ArcadeDiag.format(e)),
         'body lines are format() of each entry, oldest first');
+    // A transcript that was cut in transit (the clipboard, a chat client) must
+    // be recognizable as cut rather than read as a device that stopped logging.
+    ok(lines.at(-1) === '# end of log — ' + snap.length + ' entries',
+        'trailer states the entry count, so a truncated copy is obvious');
 }
 
 function capacityTests() {
@@ -138,8 +146,11 @@ function capacityTests() {
     ok(tailed === 'cap#tail' && ArcadeDiag.entries().length === MAX_ENTRIES,
         'live tail fires on every log even at capacity');
     // The transcript stays bounded with the buffer.
-    ok(ArcadeDiag.transcript().split('\n').length === MAX_ENTRIES + 2,
-        'transcript at capacity is exactly cap + 2 header lines');
+    const full = ArcadeDiag.transcript().split('\n');
+    ok(full.length === MAX_ENTRIES + 4,
+        'transcript at capacity is exactly cap + 3 header lines + 1 trailer');
+    ok(full.at(-1).includes('buffer full; older lines dropped'),
+        'a full buffer says so in the trailer — the log does NOT start at boot any more');
 }
 
 console.log('ArcadeDiag unit tests — connection-log ring buffer (no browser)');

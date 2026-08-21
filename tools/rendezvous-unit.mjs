@@ -8,6 +8,7 @@
  */
 import { RendezvousCrypto as RC } from '../p2p/rendezvous-crypto.js';
 import { mqttCodec } from '../p2p/rendezvous-carriers.js';
+import { RendezvousManager } from '../p2p/rendezvous.js';
 
 let pass = 0, fail = 0;
 function ok(cond, label) {
@@ -82,6 +83,36 @@ async function cryptoTests() {
     const tkCD = await RC.deriveTopicKey(baseCD);
     ok((await RC.topicForDay(tkCD, day)) !== t1, 'topics differ across pairs on the same day');
 
+    // --- the frozen room (PROTOCOL.md §7.6) ---
+    // THE interop pin for this feature. Freezing a room persists the exact
+    // bytes deriveTopicKey has always imported, so a pair that freezes for
+    // the first time keeps meeting on precisely the topics it already used
+    // and a peer on an older build notices nothing. If this fails, upgrading
+    // one device of a pair strands it on topics the other never subscribes to.
+    const bits = await RC.topicBits(baseAB);
+    ok(bits instanceof Uint8Array && bits.length === 32, 'topicBits is 32 raw bytes');
+    const fromBits = await RC.topicKeyFromBits(bits);
+    ok((await RC.topicForDay(fromBits, day)) === t1,
+        'wire pin: topicKeyFromBits(topicBits(base)) yields the SAME topics as deriveTopicKey(base)');
+
+    // A frozen room outlives the base: that is the entire point.
+    const reBase = await RC.derivePairBase(RC.randBytes(32), RC.randBytes(32));
+    ok((await RC.topicForDay(await RC.topicKeyFromBits(bits), day)) === t1,
+        'a frozen room keeps its topics no matter what the base becomes');
+    ok((await RC.topicForDay(await RC.deriveTopicKey(reBase), day)) !== t1,
+        'and a re-keyed base WOULD have moved the room, if the room still followed it');
+
+    // Room ids: stable, short, and a hash rather than a prefix of the key
+    // material (a log must never leak topic-computing bytes).
+    const rid = await RC.roomId(bits);
+    ok(/^[0-9a-f]{8}$/.test(rid), 'roomId is 8 hex chars');
+    ok((await RC.roomId(bits)) === rid, 'roomId is deterministic');
+    ok((await RC.roomId(await RC.topicBits(baseCD))) !== rid, 'roomId differs across rooms');
+    ok(!bytesToB64url(bits).includes(rid) && !Buffer.from(bits).toString('hex').startsWith(rid),
+        'roomId is a hash, not a prefix of the room key material');
+    ok((await RC.roomId(RC.randBytes(31))) === 'none', 'roomId of malformed material is "none", not a throw');
+    ok(await throwsAsync(() => RC.topicKeyFromBits(RC.randBytes(16))), 'topicKeyFromBits rejects short material');
+
     // confirmMac role asymmetry (reflection resistance).
     const cCaller = await RC.confirmMac(baseAB, 'caller');
     const cListener = await RC.confirmMac(baseAB, 'listener');
@@ -104,6 +135,35 @@ async function cryptoTests() {
     // The AAD an old client feeds AES-GCM for an epoch-1 offer, byte for byte.
     ok(Buffer.from(RC.aad('o', WIRE_EPOCH)).equals(Buffer.from('qrp2p/rdv/v1|o|1', 'utf8')),
         'wire pin: AAD bytes for ("o", 1) are exactly utf8("qrp2p/rdv/v1|o|1")');
+}
+
+function roomPolicyTests() {
+    console.log('\nroom decision (ceremony: keep the frozen room, or reset it)');
+    const decide = RendezvousManager._decideRoom;
+    const R1 = 'aaaaaaaa', R2 = 'bbbbbbbb';
+
+    ok(decide(R1, R1, 3) === 'keep', 'both sides announce the same room → keep it frozen');
+    ok(decide(R1, R2, 3) === 'reset', 'two DIFFERENT rooms → reset (a ceremony is the moment to heal a split)');
+    ok(decide(null, null, 3) === 'reset', 'neither side has a room → freeze this ceremony’s');
+    ok(decide(R1, null, 3) === 'reset', 'peer lost its record → reset to a room BOTH can compute');
+    ok(decide(null, R1, 3) === 'reset', 'we lost ours → same, and symmetrically so');
+
+    // Interop: a v2 peer announces no room and derives topics from the base.
+    // Keeping a frozen room against it is the one way this feature could
+    // strand a mixed-version pair, so the version alone must force a reset.
+    ok(decide(R1, R1, 2) === 'reset', 'a pairing-v2 peer forces a reset even if the ids happen to match');
+    ok(decide(R1, R1, 1) === 'reset', 'same for v1');
+
+    // SYMMETRY is the load-bearing property: each side sees (mine, theirs)
+    // swapped and must reach the same verdict with no round trip. If this
+    // ever fails, one device keeps a room the other abandons — which is the
+    // exact bug the whole change exists to prevent.
+    for (const [a, b] of [[R1, R1], [R1, R2], [null, R1], [R1, null], [null, null]]) {
+        for (const v of [1, 2, 3]) {
+            ok(decide(a, b, v) === decide(b, a, v),
+                `symmetric for (${a || 'none'}, ${b || 'none'}, v${v}) — both sides decide alike`);
+        }
+    }
 }
 
 function codecTests() {
@@ -165,8 +225,9 @@ function codecTests() {
 }
 
 (async () => {
-    console.log('Rendezvous unit tests — crypto + MQTT codec');
+    console.log('Rendezvous unit tests — crypto + room policy + MQTT codec');
     await cryptoTests();
+    roomPolicyTests();
     codecTests();
     console.log('');
     if (fail) { console.log(fail + ' check(s) FAILED.'); process.exit(1); }
