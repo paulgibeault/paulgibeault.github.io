@@ -471,12 +471,24 @@ export class RendezvousManager extends EventTarget {
      * explicitly, see _decideRoom).
      */
     async _roomTopicKey(pairId, rec) {
-        if (rec.roomBits instanceof Uint8Array && rec.roomBits.length === 32) {
-            return RC.topicKeyFromBits(rec.roomBits);
-        }
-        const bits = await RC.topicBits(rec.base);
+        const bits = await this._ensureRoomBits(pairId, rec);
+        if (!bits) throw new Error('no room material and no base to derive it from');
+        return RC.topicKeyFromBits(bits);
+    }
+
+    /**
+     * This pair's frozen room material, freezing it now if it has none.
+     * Idempotent, and the persist is AWAITED — the ceremony path announces
+     * what this returns and is then judged on what storage holds, so those
+     * two must never be able to disagree (see _myRoomId).
+     */
+    async _ensureRoomBits(pairId, rec) {
+        if (rec.roomBits instanceof Uint8Array && rec.roomBits.length === 32) return rec.roomBits;
+        if (!rec.base) return null;
+        let bits;
+        try { bits = await RC.topicBits(rec.base); } catch (e) { return null; }
         rec.roomBits = bits;
-        this._updateRec(pairId, (r) => {
+        await this._updateRec(pairId, (r) => {
             if (!r) return null;
             // Never overwrite a room another path (a ceremony) froze in the
             // meantime — this migration only ever fills an EMPTY room.
@@ -485,14 +497,27 @@ export class RendezvousManager extends EventTarget {
             return r;
         }).catch(() => {});
         this._diag(`pair ${pairId}: room frozen at the current key (room ${await RC.roomId(bits)}) — later re-keys can no longer move it`);
-        return RC.topicKeyFromBits(bits);
+        return bits;
     }
 
-    /** The room id a ceremony announces, or null when none is frozen yet. */
+    /**
+     * The room id a ceremony announces — freezing one first if this pair has
+     * never been in an episode.
+     *
+     * The freeze has to happen HERE, before the announcement goes out, not
+     * merely whenever an episode next runs. Both sides judge the room from
+     * the pair (mine, theirs) of announced ids, so an id that changes between
+     * being announced and being judged breaks the symmetry the whole decision
+     * rests on: a device that announced "no room" and then froze one a moment
+     * later would judge itself into `keep` while its peer, seeing the empty
+     * announcement, judged `reset` — and they would walk away into different
+     * rooms, which is the precise failure this is all here to prevent.
+     */
     async _myRoomId(pairId) {
         const rec = await dbGet(pairId).catch(() => null);
-        if (!rec || !(rec.roomBits instanceof Uint8Array) || rec.roomBits.length !== 32) return null;
-        return RC.roomId(rec.roomBits);
+        if (!rec) return null;
+        const bits = await this._ensureRoomBits(pairId, rec);
+        return bits ? RC.roomId(bits) : null;
     }
 
     /**
