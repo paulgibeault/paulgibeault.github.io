@@ -147,6 +147,23 @@
         "tags": ["WebRTC", "P2P", "Arcade SDK"],
         "codeUrl": "https://github.com/paulgibeault/p2p-chat"
       }
+    },
+    {
+      "id": "grav-well",
+      "name": "Gravity Well",
+      "subtitle": "Falling Blocks",
+      "icon": "/grav-well/icon.png",
+      "url": "/grav-well/",
+      "inDevelopment": true,
+      "profile": {
+        "subtitle": "A Faithful Falling-Block Stacker",
+        "alt": "Gravity Well — glowing tetromino blocks sinking into a starlit stone well",
+        "descLead": "The well is deep. Keep it clear.",
+        "descBody": "A faithful modern stacker: 7-bag randomizer, SRS wall kicks, hold, ghost piece, T-spins, back-to-back and combo scoring. Drag to slide a piece cell-for-cell, tap to rotate, flick down to drop — or play it on the keyboard; both are always live. Marathon, Sprint 40, Ultra, Zen, and a shared Daily Well dig on the same seed for everyone.",
+        "kicker": "All's well that lands well.",
+        "tags": ["HTML5 Canvas", "JS", "ES Modules", "PWA", "Arcade SDK"],
+        "codeUrl": "https://github.com/paulgibeault/grav-well"
+      }
     }
   ]
 }
