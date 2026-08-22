@@ -152,7 +152,8 @@ source of truth):
 | Storage bridge / store / UI bridge | `bridge-acceptance`, `store-acceptance`, `ui-acceptance` |
 | P2P transport | `p2p-acceptance`, `p2p-multiseat`, `p2p-multiparty` (open-game scopes — the name is historical), `p2p-invite-ux`, `p2p-reconnect`, `p2p-crosssign` |
 | Identity | `user-identity-acceptance` (+ `-unit`) |
-| Catalog / configs / SDK | `catalog-acceptance`, `configs-acceptance`, `configs-p2p-acceptance`, `sdk-helpers` |
+| Catalog / configs / SDK | `catalog-acceptance` (grid render, deep links, MRU sort), `configs-acceptance`, `configs-p2p-acceptance`, `sdk-helpers` |
+| Launcher MRU sort | `recents-unit` |
 | Audio graph | `node tools/audio-graph-acceptance.mjs` (real WebAudio, no server) |
 
 Suites bind fixed ports, so run them **one at a time** (the runner already

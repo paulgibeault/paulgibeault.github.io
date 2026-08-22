@@ -603,6 +603,16 @@ An actual live *snapshot* on the tile is deliberately not attempted: game frames
 
 **Why this matters:** WebGL contexts are a limited resource per page (browsers may drop the oldest if too many are alive); hidden iframes that haven't implemented `onSuspend` correctly keep burning CPU/battery. The cap bounds both costs regardless of catalog size and protects against misbehaving games.
 
+### Launcher sort order — persisted MRU
+
+The pool's LRU map answers *what is warm*; the launcher grid needs *what this player plays*, which has to outlive the tab. [arcade-recents.js](arcade-recents.js) owns that second stack: game ids, most-recent first, capped at 32, stored at `arcade.v1._meta.recentGames`. Behavior contract: `tools/recents-unit.mjs` plus the `mru:` checks in `tools/catalog-acceptance.mjs`.
+
+- **Sort:** most-recently-played games lead, in MRU order; everything never played follows **in catalog order**. A device with no history therefore renders exactly the catalog's own order, spotlight entry included — the sort only ever asserts itself once the player has played something.
+- **Recorded** by the pool-change listener in [index.html](index.html), on every change of the *active* game. That is the one funnel every launch path goes through (grid click, deep link, topbar tab, accepted invite), so `arcade-pool.js` never has to know persisted recents exist. A warm tab switch counts — "used" is what MRU means, not "loaded".
+- **Applied** only on the way *out* of a game (active id → null). The launcher is on screen the whole time it is not in a game, and tiles that rearrange under a hand already reaching for one are worse than a stale order. The re-sort is a re-render, so it renders without the entrance stagger (`renderLauncherGrid(..., { stagger: false })`) — a 0.1s-per-tile cascade on every quit reads as a page load rather than a return — and repaints the LIVE badges, since the nodes are new.
+- **The key is `_meta.*`, not `global.*`.** `global.*` is shared storage any game can write through the bridge (`bridgeKeyWritable` in [arcade-storage-core.js](arcade-storage-core.js)); reordering the launcher's tiles is not a capability worth handing to a game frame.
+- **It is a hint, never authority.** An unreadable, malformed, or hand-edited value degrades to "no recents" — i.e. plain catalog order — and an id the catalog no longer carries sorts nothing. `window.__arcade.catalog` itself stays in catalog order; only the grid's presentation is sorted, so deep links, invites and tab icons read the same table they always did.
+
 ---
 
 ## Save / load to file — fault-tolerant by construction

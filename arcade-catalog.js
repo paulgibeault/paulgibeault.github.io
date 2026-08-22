@@ -66,13 +66,20 @@ function markInDevelopment(wrap) {
  * markup the static grid used: the CSS entrance stagger rides the inline
  * animation-delay, and the click wiring / pool code read data-game-id,
  * href, and .launcher-btn__name.
+ *
+ * `opts.stagger: false` renders the same tiles with every delay at 0. That is
+ * for the MRU re-sort (arcade-recents.js): a re-render replays the entrance
+ * animation, and a 0.1s-per-tile cascade every single time the player quits a
+ * game reads as a page load rather than a return. One short uniform fade
+ * covers the reorder instead.
  */
-export function renderLauncherGrid(container, games) {
+export function renderLauncherGrid(container, games, opts) {
+    const stagger = !opts || opts.stagger !== false;
     const nodes = games.map((g, i) => {
         const a = el('a', 'launcher-btn' + (g.spotlight ? ' spotlight-card' : ''));
         a.href = gameHref(g);
         a.dataset.gameId = g.id;
-        a.style.animationDelay = (i * 0.1).toFixed(1) + 's';
+        a.style.animationDelay = (stagger ? i * 0.1 : 0).toFixed(1) + 's';
         const wrap = el('div', 'launcher-btn__image-wrap');
         const img = el('img', 'launcher-btn__image');
         img.src = g.icon || 'images/icon-192.png';

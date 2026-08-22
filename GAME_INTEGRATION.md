@@ -36,6 +36,13 @@ render from it.
 Nothing to bump: fleet CI stamps `sw.js`'s `APP_VERSION` on every launcher
 deploy, so installed launchers pick up the new catalog automatically.
 
+**Where your entry lands in the grid.** Catalog order is the order a player
+sees *until they play something*. After that the launcher leads with their
+most recently played games and keeps catalog order for the rest (the MRU
+stack in [`arcade-recents.js`](arcade-recents.js)) — so position in
+`catalog.json`, `spotlight` included, decides first impressions, not the
+lineup a returning player sees.
+
 **Shipping before it's finished.** Set `"inDevelopment": true` on the entry and
 both surfaces stamp a diagonal *In Development* ribbon across the card image —
 the game is listed and playable, but nobody mistakes a work in progress for a

@@ -2261,6 +2261,7 @@
     // ==========================================
     import { initIframePool } from './arcade-pool.js';
     import { initMessageRouter } from './arcade-router.js';
+    import { noteGamePlayed } from './arcade-recents.js';
 
     const pool = initIframePool(window.__arcade.poolHost);
     window.__arcade.pool = pool;
@@ -2344,7 +2345,29 @@
             }
         }
     }
-    pool.onPoolChanged(() => { renderTopbarTabs(); refreshLiveTiles(); });
+    // ---- MRU stack — the launcher's sort order (arcade-recents.js) ----
+    // The pool's active game is the one funnel every launch path goes
+    // through (grid click, deep link, topbar tab, accepted invite), so
+    // watching it here records them all without arcade-pool.js having to
+    // know that persisted recents exist. A switch back to an already-warm
+    // game counts: "used" is what MRU means, not "loaded".
+    //
+    // The grid is re-sorted on the way OUT of a game, not the way in — the
+    // launcher is on screen the whole time it is not in a game, and tiles
+    // that rearrange under a reaching hand are worse than a stale order.
+    let notedGameId = null;
+    function trackRecents() {
+        const active = pool.getActiveGameId();
+        if (active && active !== notedGameId) {
+            notedGameId = active;
+            noteGamePlayed(active);
+        } else if (!active && notedGameId) {
+            // Back on the launcher: promote the game just left to the front.
+            notedGameId = null;
+            if (window.__arcade.resortLauncherGrid) window.__arcade.resortLauncherGrid();
+        }
+    }
+    pool.onPoolChanged(() => { renderTopbarTabs(); refreshLiveTiles(); trackRecents(); });
     // The grid renders async from catalog.json — the CATALOG block calls this
     // after render so a deep-linked boot's badge isn't lost to timing.
     window.__arcade.refreshLiveTiles = refreshLiveTiles;
@@ -2403,8 +2426,27 @@
     // ==========================================
     import { loadCatalog, renderLauncherGrid, renderCatalogError, gameHref } from './arcade-catalog.js';
     import { parseAppFragment } from './arcade-configs-core.js';
+    import { sortByRecents } from './arcade-recents.js';
 
     const gridContainer = document.getElementById('launcher-grid-container');
+
+    // MRU sort: most-recently-played first, everything else in catalog order
+    // (so a first-time visitor still gets the catalog's own order, spotlight
+    // included). The stack itself is recorded by the POOL block's pool-change
+    // listener — this only reads it.
+    //
+    // Re-sorting is a RE-RENDER, and re-rendering the grid under a hand that
+    // is reaching for a tile would be hostile, so resortLauncherGrid is called
+    // only when the player has just left a game (view-game hidden, active id
+    // null). Live badges are repainted after, because the nodes are new.
+    function renderGrid(games, opts) {
+        renderLauncherGrid(gridContainer, sortByRecents(games), opts);
+        if (window.__arcade.refreshLiveTiles) window.__arcade.refreshLiveTiles();
+    }
+    window.__arcade.resortLauncherGrid = () => {
+        const games = window.__arcade.catalog;
+        if (Array.isArray(games) && games.length) renderGrid(games, { stagger: false });
+    };
 
     // Deep links (#36): `#app=<id>` boots straight into a game, and an optional
     // `&cfg=<code>` carries a game-config share (#config-exchange). Resolved
@@ -2465,13 +2507,13 @@
     async function bootCatalog() {
         try {
             const games = await loadCatalog();
-            renderLauncherGrid(gridContainer, games);
-            if (window.__arcade.setGameCount) window.__arcade.setGameCount(games.length);
+            // window.__arcade.catalog stays in CATALOG order — it is the
+            // lookup table for deep links, invites and tab icons, and only
+            // the grid's presentation is MRU-sorted.
             window.__arcade.catalog = games;
+            renderGrid(games);
+            if (window.__arcade.setGameCount) window.__arcade.setGameCount(games.length);
             openDeepLink(games);
-            // Grid nodes are fresh — repaint live badges for any game the
-            // pool already mounted (deep-link boot, catalog retry).
-            if (window.__arcade.refreshLiveTiles) window.__arcade.refreshLiveTiles();
         } catch (e) {
             console.error('[arcade] catalog load failed', e);
             renderCatalogError(gridContainer, bootCatalog);
