@@ -767,6 +767,177 @@ try {
             await s.H.evaluate(() => window.__arcade.p2p.status()) === 'connected');
         await s.ctxH.close(); await s.ctxJ.close();
     }
+    // 16. THE FROZEN ROOM, and repair of a divergent key.
+    //
+    //     The 2026-08-21 field failure: two phones that had ceremonied and
+    //     played, days later ringing each other into total silence. Their logs
+    //     showed no overlapping key checks at all — and because the topics
+    //     were derived from the key, they were not merely unable to talk, they
+    //     were unable to OBSERVE each other failing. No decrypt errors, no
+    //     diagnostics, nothing to distinguish it from a peer that was simply
+    //     offline. Permanently.
+    //
+    //     Three properties, in the order they matter:
+    //       a) a re-key does not move the room;
+    //       b) a base that diverges anyway leaves both devices in the SAME
+    //          room, which is what makes the failure visible at all;
+    //       c) a live link repairs it, without a new invite code.
+    {
+        console.log('\n  [frozen room: survives a re-key, survives a desync, and repairs]');
+        const s = await freshPair('R');
+        const devOnH = await peerDev(s.H);
+        const devOnJ = await peerDev(s.J);
+        const status = (page, dev) => page.evaluate(
+            (d) => window.__arcade.p2p._rdv().pairStatus(d), dev);
+        const peerIdOn = async (page, dev) =>
+            (await page.evaluate(() => window.__arcade.p2p._identityLinks()))[dev];
+        // Both sides commit independently, so every assertion below polls for
+        // the pair of records to settle rather than waiting on one event.
+        async function bothWhen(pred, ms = 20000) {
+            const deadline = Date.now() + ms;
+            let h = null, j = null;
+            do {
+                h = await status(s.H, devOnH);
+                j = await status(s.J, devOnJ);
+                if (pred(h, j)) break;
+                await new Promise((r) => setTimeout(r, 400));
+            } while (Date.now() < deadline);
+            return [h, j];
+        }
+
+        const h0 = await status(s.H, devOnH);
+        const j0 = await status(s.J, devOnJ);
+        check('a fresh pair agrees on the key', h0.check && h0.check === j0.check,
+            `${h0.check} vs ${j0.check}`);
+        check('a fresh pair agrees on the room', h0.room && h0.room === j0.room,
+            `${h0.room} vs ${j0.room}`);
+
+        // (a) Re-key both sides deliberately. The KEY must change (that is what
+        //     a re-key is); the ROOM must not (that is the whole feature).
+        for (const [page, dev] of [[s.H, devOnH], [s.J, devOnJ]]) {
+            await page.evaluate(([p, d]) => window.__arcade.p2p._rdv().enablePair(p, d),
+                [await peerIdOn(page, dev), dev]);
+        }
+        await s.H.waitForFunction(
+            `window.__rdvEv.filter(e => e === 'pair-established').length >= 2`, null, { timeout: 15000 }
+        ).catch(() => {});
+        const h1 = await status(s.H, devOnH);
+        const j1 = await status(s.J, devOnJ);
+        check('a re-key changed the key on both sides', h1.check !== h0.check && h1.check === j1.check,
+            `${h0.check} → ${h1.check} / ${j1.check}`);
+        check('a re-key did NOT move the room', h1.room === h0.room && j1.room === h0.room,
+            `${h0.room} → ${h1.room} / ${j1.room}`);
+
+        // (b) Now force exactly the field failure: one side's base diverges
+        //     (a half-committed re-key, in one write). Nothing else changes.
+        await s.J.evaluate(async (pairId) => {
+            const raw = crypto.getRandomValues(new Uint8Array(32));
+            const base = await crypto.subtle.importKey('raw', raw, 'HKDF', false, ['deriveBits', 'deriveKey']);
+            await window.__arcade.p2p._rdv()._updateRec(pairId, (r) => { r.base = base; return r; });
+        }, devOnJ);
+        const h2 = await status(s.H, devOnH);
+        const j2 = await status(s.J, devOnJ);
+        check('the two sides now hold DIFFERENT keys (the field failure, reproduced)',
+            h2.check !== j2.check, `${h2.check} vs ${j2.check}`);
+        check('...and yet they are still in the SAME room — the failure is observable now',
+            h2.room === j2.room && !!h2.room, `${h2.room} vs ${j2.room}`);
+
+        // (c) Repair over the live link. Both sides announce their key check;
+        //     both notice the disagreement; the crossed randoms converge.
+        for (const [page, dev] of [[s.H, devOnH], [s.J, devOnJ]]) {
+            await page.evaluate(([p, d]) => window.__arcade.p2p._rdv().ensurePair(p, d),
+                [await peerIdOn(page, dev), dev]);
+        }
+        // EITHER side noticing is the contract, and deliberately so: the one
+        // that gets there first starts re-keying, which suppresses its own
+        // outbound key check (announcing a value that is already being
+        // replaced would only invite a second repair). So this asserts the
+        // pair noticed, not that both did.
+        const noticed = await Promise.all([s.H, s.J].map((p) => p.waitForFunction(
+            `window.__rdvDiag.some(m => /key check MISMATCH/.test(m))`, null, { timeout: 15000 }
+        ).then(() => true).catch(() => false)));
+        check('the mismatch was NOTICED and said out loud', noticed.some(Boolean),
+            `H=${noticed[0]} J=${noticed[1]}`);
+
+        // Poll both records rather than waiting on one side's event: the
+        // repair completes independently on each device.
+        let h3 = null, j3 = null;
+        for (let i = 0; i < 30; i++) {
+            h3 = await status(s.H, devOnH);
+            j3 = await status(s.J, devOnJ);
+            if (h3.check && h3.check === j3.check) break;
+            await new Promise((r) => setTimeout(r, 500));
+        }
+        check('the pair re-keyed itself back into agreement, with no new invite code',
+            h3.check === j3.check, `${h3.check} vs ${j3.check}`);
+        check('and the repair still did not move the room',
+            h3.room === h0.room && j3.room === h0.room, `${h3.room} / ${j3.room} vs ${h0.room}`);
+        await s.ctxH.close(); await s.ctxJ.close();
+    }
+
+    // 17. A RECONNECT MUST NOT RE-MINT. Re-keying on every session is what
+    //     made a lost confirmation frame able to split a pair at all (the
+    //     commit is two-phase over control frames that ride no outbox). A
+    //     reconnect should VERIFY and, finding nothing wrong, change nothing.
+    {
+        console.log('\n  [a plain reconnect verifies the key instead of re-minting it]');
+        const s = await freshPair('S');
+        const devOnJ = await peerDev(s.J);
+        const before = await s.J.evaluate((d) => window.__arcade.p2p._rdv().pairStatus(d), devOnJ);
+
+        await s.J.reload();
+        await s.J.waitForFunction('!!window.__arcade && !!window.__arcade.showGame');
+        await s.J.waitForFunction('!!window.__arcade.p2p && !!window.__arcade.p2p._addon()',
+            null, { timeout: 20000 }).catch(() => {});
+        await s.J.evaluate(FAST_RDV);
+        check('reconnected after the reload', await connectedAgain(s.J));
+
+        // Whichever side's announcement lands first is the one that evaluates
+        // it; the verification is one-directional per link and that is enough
+        // (a mismatch found on either side triggers the same repair).
+        const agreed = await Promise.all([s.H, s.J].map((p) => p.waitForFunction(
+            `window.__arcadeDiag.entries().some(e => /key check agrees with the peer/.test(e.msg))`,
+            null, { timeout: 20000 }
+        ).then(() => true).catch(() => false)));
+        check('the reconnect CHECKED the key and found it healthy', agreed.some(Boolean),
+            `H=${agreed[0]} J=${agreed[1]}`);
+
+        const after = await s.J.evaluate((d) => window.__arcade.p2p._rdv().pairStatus(d), devOnJ);
+        check('the reconnect left the key exactly as it was (no gratuitous re-mint)',
+            after.check === before.check, `${before.check} → ${after.check}`);
+        check('and left the room alone too', after.room === before.room,
+            `${before.room} → ${after.room}`);
+        await s.ctxH.close(); await s.ctxJ.close();
+    }
+
+    // 18. SILENT SKIPS. A launch that counts four callable peers and arms
+    //     three episodes must say which pair it dropped and why — the one
+    //     question the field log could not answer.
+    {
+        console.log('\n  [standbyAll says why a pair was not armed]');
+        const s = await freshPair('T');
+        await s.H.evaluate(async () => {
+            const rdv = window.__arcade.p2p._rdv();
+            await rdv._updateRec('ghost-disabled-01', () => ({
+                base: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+                role: 'caller', epoch: 0, enabled: false,
+                lastPeerId: 'peer-ghost', lastSeenAt: Date.now(), seenNonces: []
+            }));
+            // knownPairIds must claim it, or the GC retires it before the
+            // standby loop ever gets to explain itself.
+            const real = rdv.options.knownPairIds;
+            rdv.options.knownPairIds = () => new Set([...real(), 'ghost-disabled-01']);
+            window.__rdvDiag.length = 0;
+            await rdv.standbyAll();
+            rdv.options.knownPairIds = real;
+        });
+        const said = await s.H.evaluate(() =>
+            window.__rdvDiag.filter((m) => /not armed for standby/.test(m)));
+        check('the skipped pair is named, with its reason',
+            said.some((m) => /ghost-disabled-01/.test(m) && /disabled\/paused/.test(m)),
+            JSON.stringify(said));
+        await s.ctxH.close(); await s.ctxJ.close();
+    }
 } catch (e) {
     console.error('\nFATAL:', e.message);
     check('run completed', false, e.message);

@@ -1107,6 +1107,33 @@ window.addEventListener('pageshow', (e) => {
     }
 });
 
+/**
+ * Cross-check the two stores that decide whether a peer is reachable, and say
+ * so when they disagree.
+ *
+ * The boot gate counts CALLABLE peers out of knownPeers (localStorage); the
+ * rendezvous arms episodes out of its own pair records (IndexedDB). Those
+ * flags are maintained independently, and a launch that announced four
+ * callable peers while arming three episodes was, from the connection log
+ * alone, simply unexplainable — the one pair that mattered was the silent one
+ * (field incident 2026-08-21). standbyAll now logs its own skips; this covers
+ * the other direction, a peer the UI offers a 📞 Call for with no secret
+ * behind it, where the Call can only ever be a no-op.
+ */
+async function reconcileCallablePeers() {
+    if (!rdv) return;
+    const known = readKnownPeers();
+    const callable = Object.keys(known).filter((id) => known[id] && known[id].autoReconnect && !known[id].paused);
+    const orphans = [];
+    for (const id of callable) {
+        const status = await rdv.pairStatus(id).catch(() => null);
+        if (!status || !status.exists) orphans.push(id);
+    }
+    if (!orphans.length) return;
+    ArcadeDiag.log('bridge', `${orphans.length} of ${callable.length} callable peer(s) have NO stored pairing secret — `
+        + `Call will not ring them until they are re-paired with a new invite code: ${orphans.join(', ')}`);
+}
+
 async function ensureAddon() {
     if (addon) return addon;
     if (addonPromise) return addonPromise;
@@ -1414,20 +1441,31 @@ async function ensureAddon() {
                 // same rotation — the pending pin was already promoted inside
                 // recordPeerIdentity's write.
                 if (detail.fingerprintAutoPromoted) fingerprintSuspects.delete(env.deviceId);
-                // A manual ceremony with an auto-reconnect peer is a fresh
-                // trust event: re-establish the pairing secret every time —
-                // UNLESS this link's fingerprint mismatches the pinned one.
-                // A changed fingerprint on a known deviceId is exactly what a
-                // peer claiming another device's id looks like, so the rebind
-                // waits for an explicit user decision (the launcher confirms
-                // via onPeerIdentity's fingerprintChanged flag).
+                // Keep this pair's reconnect path healthy — establish a secret
+                // if there is none, otherwise just CHECK that ours still
+                // agrees with theirs (rdv.ensurePair). This used to re-run the
+                // whole pairing exchange on every connection, on the theory
+                // that a session is a fresh trust event. It is, but the pair
+                // secret was already established over this same authenticated
+                // channel by these same two devices, so re-minting bought no
+                // security — while its two-phase commit rides control frames
+                // with no outbox, so a confirmation lost in a link that was
+                // already going down left the two sides on different bases.
+                // That is the 2026-08-21 field failure, and every single
+                // session was rolling the dice for it (see rdv.ensurePair).
+                //
+                // Guarded as before on the pinned fingerprint: a changed
+                // fingerprint on a known deviceId is what a peer claiming
+                // another device's id looks like, so the rebind waits for an
+                // explicit user decision (the launcher confirms via
+                // onPeerIdentity's fingerprintChanged flag).
                 const known = readKnownPeers();
                 const seat = getSeat(d.peerId);
                 if (known[env.deviceId] && known[env.deviceId].autoReconnect && rdv
                         && !isFingerprintSuspect(env.deviceId, known)
                         && !seat.minted) {
                     seat.minted = true;
-                    rdv.enablePair(d.peerId, env.deviceId).catch(() => {});
+                    rdv.ensurePair(d.peerId, env.deviceId).catch(() => {});
                     stampLiveSession();
                 }
             }
@@ -2297,11 +2335,13 @@ export const ArcadeP2P = {
             ArcadeDiag.log('bridge', `resume-on-launch: ${plan.why} — arming standby (listener-role pairs ring on the slow cadence)`);
             await ensureAddon();
             await rdv.standbyAll();
+            await reconcileCallablePeers();
             return true;
         }
         ArcadeDiag.log('bridge', `resume-on-launch: ${plan.why} — actively resuming paired sessions`);
         await ensureAddon();
         await rdv.resumeAll();
+        await reconcileCallablePeers();
         return true;
     },
 

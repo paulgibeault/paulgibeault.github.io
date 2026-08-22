@@ -41,12 +41,32 @@ export const ArcadeDiag = {
     /** One display line: "[HH:MM:SS] tag: msg". */
     format(entry) { return '[' + stamp(entry.t) + '] ' + entry.tag + ': ' + entry.msg; },
 
-    /** Full copyable transcript with a UA header (for bug reports). */
+    /**
+     * Full copyable transcript with a header (for bug reports).
+     *
+     * The header names THIS device. Every pair line in the log is keyed by the
+     * REMOTE device's id, so without our own id two transcripts cannot be
+     * correlated at all: reading a pair of field logs from the 2026-08-21
+     * incident, there was no way to tell which of phone A's four pairs was the
+     * one phone B was calling. Read, never minted — importing this module must
+     * stay free of side effects, so a device that has not paired yet simply
+     * reports 'unknown'.
+     *
+     * The trailer states the entry count. The first copy of that same incident
+     * arrived truncated mid-word (a clipboard failure, not a logger one) and
+     * read as a device that had hung two lines into boot — a wrong and very
+     * expensive first diagnosis. A cut transcript is now obvious on sight.
+     */
     transcript() {
+        let me = 'unknown';
+        try { me = localStorage.getItem('arcade.v1._meta.deviceId') || 'unknown'; } catch (e) {}
         return [
             '# Arcade connection log ' + new Date().toISOString(),
+            '# device: ' + me,
             '# UA: ' + navigator.userAgent,
-            ...entries.map((e) => ArcadeDiag.format(e))
+            ...entries.map((e) => ArcadeDiag.format(e)),
+            '# end of log — ' + entries.length + ' entr' + (entries.length === 1 ? 'y' : 'ies')
+                + (entries.length >= MAX_ENTRIES ? ' (buffer full; older lines dropped)' : '')
         ].join('\n');
     }
 };

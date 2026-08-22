@@ -10,7 +10,10 @@
  *                                            bytewise-sorted → order-independent)
  *   pairBase     = HKDF(ikm, salt=0^32, info="qrp2p/rdv/v1/base")           [fixed for the pair's
  *                                                                            life — no ratchet]
- *   topicKey     = HKDF(pairBase, salt=0^32, info="qrp2p/rdv/v1/topic")     [HMAC-SHA256]
+ *   topicBits    = HKDF(pairBase, salt=0^32, info="qrp2p/rdv/v1/topic")     [raw 32 bytes]
+ *   topicKey     = HMAC-SHA256 key imported from topicBits
+ *                  (deriveTopicKey(base) === topicKeyFromBits(topicBits(base)),
+ *                   byte for byte — see the FROZEN ROOM note below)
  *   aeadKey      = HKDF(pairBase, salt=0^32, info="qrp2p/rdv/v1/aead")      [AES-256-GCM]
  *   topic(day)   = hex( HMAC(topicKey, "topic/" + day)[0..15] )             [day = UTC YYYY-MM-DD]
  *   confirmMac   = hex( HKDF(pairBase, salt=0^32, info="qrp2p/rdv/v1/confirm|" + role)[0..15] )
@@ -33,6 +36,28 @@
  *
  * open() returns null on ANY failure — decrypt-then-parse: unauthenticated
  * bytes never reach a parser.
+ *
+ * ── FROZEN ROOM (v3, PROTOCOL.md §7.3) ─────────────────────────────────────
+ * The topic key used to be derived from the base at every episode, so the
+ * ROOM two devices meet in moved whenever the base moved. A pairing that
+ * half-committed — one side persisted the new base, the other kept the old —
+ * therefore split the pair onto disjoint topics, where neither can even
+ * OBSERVE the other: no decrypt failures, no diagnostics, nothing but
+ * silence, forever (field incident 2026-08-21).
+ *
+ * The room is frozen instead: `topicBits(base)` is computed ONCE and
+ * persisted on the pair record, and every later episode imports that same
+ * material. A base that later diverges leaves both devices in the SAME room
+ * failing to decrypt each other, which is a loud, recoverable, self-healing
+ * condition instead of a silent permanent one.
+ *
+ * `topicBits` is deliberately RAW, EXTRACTABLE bytes — the one exception to
+ * the non-extractable rule above. It has to be persisted verbatim so a later
+ * ceremony cannot re-derive it into a different room, and it is not a
+ * confidentiality secret: it computes topic strings and nothing else. It
+ * cannot decrypt a single byte of any sealed blob (that is aeadKey's job,
+ * still non-extractable, still base-derived). Its only power is linkability,
+ * the same power the day-topics already grant anyone who observes them.
  */
 
 const INFO_BASE = 'qrp2p/rdv/v1/base';
@@ -107,10 +132,48 @@ export class RendezvousCrypto {
         return importHkdfBase(baseBits);
     }
 
+    /**
+     * The RAW topic key material for a base — the frozen room's seed.
+     *
+     * Extractable by design (see the FROZEN ROOM note in the header): this is
+     * what gets persisted on the pair record so the room survives every later
+     * change of base. Byte-identical to what deriveTopicKey() has always fed
+     * importKey, which is the whole interop story: a pair freezing its room
+     * for the first time keeps meeting on exactly the topics it already used,
+     * so a peer still running an older build is unaffected.
+     */
+    static async topicBits(pairBase) {
+        return hkdfBits(pairBase, new Uint8Array(32), INFO_TOPIC, 256);
+    }
+
+    /** HMAC topic key from frozen room material. */
+    static async topicKeyFromBits(bits) {
+        if (!(bits instanceof Uint8Array) || bits.length !== 32) {
+            throw new Error('room topic bits must be a 32-byte Uint8Array');
+        }
+        return crypto.subtle.importKey('raw', bits, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    }
+
     /** HMAC key for topic derivation (kept alongside the base in memory). */
     static async deriveTopicKey(pairBase) {
-        const bits = await hkdfBits(pairBase, new Uint8Array(32), INFO_TOPIC, 256);
-        return crypto.subtle.importKey('raw', bits, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+        return RendezvousCrypto.topicKeyFromBits(await RendezvousCrypto.topicBits(pairBase));
+    }
+
+    /**
+     * Short NON-SECRET name for a room, for connection logs and for the one
+     * comparison a ceremony makes about rooms (PROTOCOL.md §7.3): two devices
+     * showing the same room id meet on the same topics. Published only on the
+     * DTLS-authenticated control channel and in local logs — never on a
+     * carrier, where it would link the room to itself across days.
+     *
+     * A hash, not a truncation: the room bits are the topic HMAC key, so
+     * exposing any prefix of them in a log would hand an observer real
+     * topic-computing material.
+     */
+    static async roomId(bits) {
+        if (!(bits instanceof Uint8Array) || bits.length !== 32) return 'none';
+        const d = new Uint8Array(await crypto.subtle.digest('SHA-256', bits));
+        return bytesToHex(d.slice(0, 4));
     }
 
     /** AES-256-GCM key for sealing signaling payloads. */

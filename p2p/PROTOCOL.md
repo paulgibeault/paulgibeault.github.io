@@ -310,8 +310,11 @@ While a manually-ceremonied link is connected, each side that opts in sends
 one extension frame over the DTLS-authenticated control channel:
 
 ```json
-{ "__p2pc": "ext", "ns": "rdv", "data": { "t": "pair", "v": 1, "rand": "<b64 32 bytes>" } }
+{ "__p2pc": "ext", "ns": "rdv", "data": { "t": "pair", "v": 3, "rand": "<b64 32 bytes>", "room": "<8 hex, optional>" } }
 ```
+
+`room` (v3) is the id of the room this side currently has frozen, omitted
+when it has none. It is compared and never adopted as material — see §7.3.
 
 Correlation is by link (`peerId`), not by label — each side stores the pair
 under its own local `pairId` (applications typically use the remote
@@ -322,12 +325,35 @@ device's id). When both randoms have crossed, each side derives:
   lowercase hex) is the **caller**; the other is the **listener**. Roles
   are fixed for the life of the pair.
 
-A record `{base, role, epoch: 0, enabled, lastPeerId, lastSeenAt, byeAt?}`
-persists in IndexedDB (`qrp2p-rendezvous`), with `base` as a non-extractable
-`CryptoKey`. The `epoch` field is vestigial — always written as 0 and read
-tolerantly (ratchet removed, §7.2); it stays in the record so old and new
-builds load each other's records. Re-pairing on a later manual ceremony REPLACES the record —
-every physical meeting is a fresh trust event.
+A record `{base, role, epoch: 0, enabled, roomBits, lastPeerId, lastSeenAt,
+byeAt?}` persists in IndexedDB (`qrp2p-rendezvous`), with `base` as a
+non-extractable `CryptoKey` and `roomBits` as raw bytes (§7.3). The `epoch`
+field is vestigial — always written as 0 and read tolerantly (ratchet
+removed, §7.2); it stays in the record so old and new builds load each
+other's records. Re-pairing on a later manual ceremony REPLACES the base —
+every physical meeting is a fresh trust event — but NOT necessarily the room
+(§7.3).
+
+A pairing MUST NOT be re-minted merely because a link came up. Implementations
+SHOULD verify instead, with a third frame:
+
+```json
+{ "__p2pc": "ext", "ns": "rdv", "data": { "t": "pair-verify", "v": 3, "check": "<8 hex>", "room": "<8 hex, optional>" } }
+```
+
+`check` is the §7.2 key check of the sender's stored base. A receiver holding
+the same check does nothing; one holding a different check (or no record at
+all) initiates a normal §7.1 exchange. Both sides send it and both evaluate
+it, so a mismatch is repaired without either side being designated first, and
+the crossed randoms converge exactly as in a first ceremony.
+
+The rule matters because the commit in §7.1 is two-phase over control frames,
+which ride no outbox: a confirmation lost in a link that is already going
+down leaves one side committed to a new base and the other on the old one.
+An implementation that re-mints on every connection therefore takes that risk
+once per session, in exchange for no security — the base was already
+established over the same authenticated channel by the same two devices.
+Re-keying is a repair, and SHOULD be triggered only by evidence of damage.
 
 `enabled` is the local suspend switch: `pausePair()` clears it (episodes and
 standby stop; the device is deliberately unreachable for this pair) and
@@ -349,11 +375,16 @@ ring chases a device that just hung up, but the receiver remains callable.
 ### 7.2 Key schedule
 
 ```
-ikm      = sort32(randA, randB)[0] || sort32(randA, randB)[1]
-pairBase = HKDF-SHA256(ikm,      salt=0^32, info="qrp2p/rdv/v1/base")
-topicKey = HKDF-SHA256(pairBase, salt=0^32, info="qrp2p/rdv/v1/topic")   → HMAC-SHA256 key
-aeadKey  = HKDF-SHA256(pairBase, salt=0^32, info="qrp2p/rdv/v1/aead")    → AES-256-GCM key
+ikm       = sort32(randA, randB)[0] || sort32(randA, randB)[1]
+pairBase  = HKDF-SHA256(ikm,      salt=0^32, info="qrp2p/rdv/v1/base")
+topicBits = HKDF-SHA256(pairBase, salt=0^32, info="qrp2p/rdv/v1/topic")  → 32 raw bytes
+topicKey  = HMAC-SHA256 key imported from the pair's FROZEN roomBits (§7.3)
+aeadKey   = HKDF-SHA256(pairBase, salt=0^32, info="qrp2p/rdv/v1/aead")   → AES-256-GCM key
 ```
+
+`topicBits` is what `roomBits` is first frozen to, so a pair freezing its
+room derives byte-identical topics to one that has not (§7.3). Only `aeadKey`
+follows the base thereafter.
 
 `pairBase` is fixed for the pair's life; only a fresh manual ceremony
 replaces it. **Ratchet removed:** an earlier revision specified a
@@ -381,6 +412,46 @@ topic(d) = lowercase_hex( HMAC-SHA256(topicKey, "topic/" || d)[0..15] )
 Participants SHOULD subscribe to `topic(d-1)`, `topic(d)`, `topic(d+1)` for
 clock skew and publish to `topic(today)`. Topics are unlinkable across days
 and across pairs; no device identifier ever reaches a relay.
+
+**The frozen room.** `topicKey` is imported from `roomBits`, which is stored
+on the pair record and does NOT follow the base. A pair with no `roomBits`
+yet MUST freeze them to `topicBits(base)` — the value `topicKey` would have
+had anyway — so freezing is unobservable on the wire and a peer running an
+older build is unaffected. The set of topics a `roomBits` implies is that
+pair's **room**; its public name is
+
+```
+roomId = lowercase_hex( SHA-256(roomBits)[0..3] )
+```
+
+A hash rather than a prefix, because `roomBits` IS the topic HMAC key: any
+prefix of it published in a log would be real topic-computing material.
+`roomId` MAY appear in local diagnostics and in the §7.1 control frames; it
+MUST NOT be published to a carrier, where it would link a room to itself
+across days.
+
+Rooms are frozen because a divergent base used to be undetectable. Deriving
+topics from the base meant two devices that disagreed about it were not
+merely unable to *talk* — they were unable to *observe each other failing*:
+disjoint topics, no decrypt errors, no diagnostics, silence indistinguishable
+from a peer that is simply offline, permanently. With the room frozen the
+same divergence puts both devices on the same topics, where the AEAD failures
+are visible, countable, and repairable (§7.1 `pair-verify`).
+
+A ceremony makes the ONE decision about rooms — keep, or reset to
+`topicBits(newBase)`:
+
+| this side | peer | verdict |
+|---|---|---|
+| room *R* | announces *R* (v≥3) | **keep** *R* |
+| room *R* | announces *R'* ≠ *R* | reset — heal a split |
+| room *R* | announces none, or speaks v<3 | reset — a v2 peer derives topics from the base and would otherwise be stranded |
+| none | anything | reset |
+
+Both sides compare the same unordered pair of ids and so reach the same
+verdict with no round trip, and a reset lands on the same value on both sides
+because it is computed from the base they just agreed. Room *material* is
+never transmitted and never adopted from a peer — only compared.
 
 ### 7.4 Sealed messages
 
@@ -687,3 +758,4 @@ resume window 6 h.
 | 1.13 | parties: per-party leader role and relay scoping (§5.6) — one node may lead a party while a member of others; local-only, wire-unchanged. Session adoption re-derives the relay role from the link type, fixing the lost hub relay after a hub restart resume (isHost was never re-derived) |
 | 1.14 | **relay removed** (§5.6): no node forwards an app frame between links; the hub role, per-party scoping, the `relayed` stamp and its inbound strip are all deleted. `relayed` becomes a reserved legacy field — parsed so a pre-1.14 hub's frame can be refused, never set. Wire-unchanged and backward-compatible in both directions: a 1.14 node speaking to a 1.13 hub simply receives frames it declines, and a 1.13 node speaking to a 1.14 node sees a peer that relays nothing. Which games may talk over a link moves up to the bridge's open-game scopes (`plans/tables-2026-08.md`) |
 | 2.x (`RDV_BUILD` `v2.4`) | `pair-confirm` key-confirmation before persisting; serialized per-pair record writes; `MultiCarrier` fan-out across several public brokers; flap-resend. **Ratchet frozen, then removed** (see §7.5) — the sealed epoch is the fixed literal `1` and the never-reachable `+3` acceptance window was deleted (wire-identical); a per-episode decrypt rate-limit + day-topic-rollover resubscribe added |
+| 3.0 (`RDV_BUILD` `v3.0`) | **Frozen rooms** (§7.3): the topic key is pinned to `rec.roomBits` and no longer follows the base, so a divergent key leaves both devices in the same room failing to decrypt instead of on disjoint topics in permanent silence. Freezing is wire-invisible (the frozen value is what `deriveTopicKey` already produced) and a ceremony keeps the room only when both sides announce the same `roomId`. Pairing frames go to `v: 3` with an optional `room`; a new `pair-verify` frame (§7.1) announces a key check on each live link. **A link coming up no longer re-mints the pairing secret** — it verifies, and re-keys only on disagreement, closing the once-per-session window in which a lost confirmation frame could split a pair |
