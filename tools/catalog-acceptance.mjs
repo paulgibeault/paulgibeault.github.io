@@ -97,6 +97,60 @@ try {
     check('deep links: quit clears the fragment and returns to the launcher', afterQuit);
     await page.close();
 
+    // ── MRU sort order (arcade-recents.js) ──
+    // The grid is catalog-ordered until something has been played; after that
+    // the launcher leads with the most recently used game and keeps catalog
+    // order for the rest. Re-sorting happens on the way OUT of a game, so the
+    // check is: launch the LAST catalog entry, quit, and watch it lead.
+    if (N >= 2) {
+        const mru = await browser.newPage();
+        mru.on('pageerror', e => check('mru: no page errors', false, e.message));
+        await mru.goto(`${BASE}/`, { waitUntil: 'load' });
+        await mru.waitForSelector('.launcher-btn[data-game-id]', { timeout: 10000 });
+        const readIds = () => mru.evaluate(() =>
+            [...document.querySelectorAll('#launcher-grid-container .launcher-btn[data-game-id]')]
+                .map(b => b.dataset.gameId));
+        check('mru: a device with no history renders plain catalog order',
+            JSON.stringify(await readIds()) === JSON.stringify(expectedGames.map(g => g.id)));
+
+        const last = expectedGames[N - 1];
+        await mru.click(`.launcher-btn[data-game-id="${last.id}"]`);
+        await mru.waitForFunction(() =>
+            !document.getElementById('view-game').classList.contains('hidden'),
+            null, { timeout: 10000 });
+        const orderDuringGame = await readIds();
+        check('mru: the grid does NOT reorder while the game is open',
+            JSON.stringify(orderDuringGame) === JSON.stringify(expectedGames.map(g => g.id)));
+
+        await mru.click('#quit-game-btn');
+        const promoted = await mru.waitForFunction((gid) => {
+            const btns = [...document.querySelectorAll('#launcher-grid-container .launcher-btn[data-game-id]')];
+            return btns.length > 0 && btns[0].dataset.gameId === gid;
+        }, last.id, { timeout: 5000 }).then(() => true).catch(() => false);
+        check('mru: the game just quit leads the grid', promoted);
+        const expectedOrder = [last.id, ...expectedGames.slice(0, N - 1).map(g => g.id)];
+        check('mru: the never-played games keep catalog order behind it',
+            JSON.stringify(await readIds()) === JSON.stringify(expectedOrder),
+            (await readIds()).join(','));
+        check('mru: the re-sorted tile keeps its LIVE badge (frame still warm)',
+            await mru.evaluate((gid) => {
+                const tile = document.querySelector(`.launcher-btn[data-game-id="${gid}"]`);
+                return !!(tile && tile.classList.contains('launcher-btn--live')
+                    && tile.querySelector('.launcher-btn__live-badge'));
+            }, last.id));
+        check('mru: stack persisted under the launcher-private _meta key',
+            await mru.evaluate((gid) =>
+                localStorage.getItem('arcade.v1._meta.recentGames') === JSON.stringify([gid])
+                && localStorage.getItem('arcade.v1.global.recentGames') === null, last.id));
+
+        await mru.reload({ waitUntil: 'load' });
+        await mru.waitForSelector('.launcher-btn[data-game-id]', { timeout: 10000 });
+        check('mru: the order survives a reload',
+            JSON.stringify(await readIds()) === JSON.stringify(expectedOrder),
+            (await readIds()).join(','));
+        await mru.close();
+    }
+
     // Fresh navigation with a fragment boots straight into the game.
     const deep = await browser.newPage();
     deep.on('pageerror', e => check('deep links: no page errors', false, e.message));
