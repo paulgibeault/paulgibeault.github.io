@@ -154,7 +154,7 @@ two fleet checks above).
 
 | Path | What |
 | --- | --- |
-| `index.html` | The launcher: iframe pool, settings, Game Data dialog, Multiplayer panel |
+| `index.html` | The launcher: iframe pool, settings, Game Data dialog, Share dialog, Multiplayer panel |
 | `arcade-sdk.js` | `window.Arcade` — the SDK every game loads |
 | `arcade-p2p.js` | Launcher-side bridge to the vendored P2P transport |
 | `p2p/` | The P2P transport + its protocol spec (maintained here; formerly vendored from the archived QRCodeP2P repo) |

@@ -35,6 +35,7 @@
     "export-roundtrip": "node tools/export-roundtrip-acceptance.mjs",
     "export-advanced-acceptance": "node tools/export-advanced-acceptance.mjs",
     "backup-dialog-acceptance": "node tools/backup-dialog-acceptance.mjs",
+    "share-dialog-acceptance": "node tools/share-dialog-acceptance.mjs",
     "catalog-acceptance": "node tools/catalog-acceptance.mjs",
     "records-acceptance": "node tools/records-acceptance.mjs",
     "configs-acceptance": "node tools/configs-acceptance.mjs",
