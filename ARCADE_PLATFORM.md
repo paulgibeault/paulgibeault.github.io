@@ -704,6 +704,41 @@ import from file / stored trusted-peer backups), one **Export** form, and the
 Multiplayer dialog with the rest of the trust controls; only restore lives
 here.
 
+### The Share dialog — handing the arcade to someone standing next to you
+
+**"Share Arcade…"** in the launcher menu opens `#share-dialog`: a QR code, the
+plain link under it, **Copy link**, and — only where `navigator.share` exists —
+a **Share…** button for the OS sheet. It is a leaf surface with no state and no
+network of its own.
+
+Two decisions are load-bearing:
+
+- **The address is a constant, not `location`.** `SHARE_URL` is
+  `https://paulgibeault.github.io`, full stop. A share code gets photographed
+  off whatever screen happens to be in the room — a dev server on 127.0.0.1, a
+  staging copy, a page opened at the manifest's `?v=` `start_url` — and every
+  one of those would mint a link nobody else can open, or one that pins the
+  scanner to a single build. `share-dialog-acceptance` pins the same string, so
+  changing it anywhere else fails the gate rather than silently redirecting
+  codes that are already printed on something. A self-hosted fork
+  (SELF_HOSTING.md) that wants to share its own address edits that one line.
+- **One QR loader, shared.** The vendored `p2p/vendor/qrcode.min.js` normally
+  rides the full P2P bridge. This dialog owns the single lazy loader for it,
+  `window.__arcade.ensureQRCodeLib()`, which the Multiplayer dialog's recovery
+  code borrows. Neither surface may boot the transport just to draw a code, and
+  neither should race a second `<script>` for the same file.
+
+The QR is rasterized at `size × devicePixelRatio` and scaled back down in CSS,
+the same trick `p2p-ui.js` uses: modules land on whole device pixels, which is
+the difference between a code a phone reads across a room and one it hunts for.
+Display size runs up to 400 CSS px, clamped to the panel width and to 78% of
+the viewport's short side. If the loader fails, the dialog says so and the link
+below still works — the text form is canonical.
+
+Attribution lives under the game grid (`.launcher-credit`: "Built by Paul
+Gibeault", linking to `profile.html`, plus the tagline), not as a menu item.
+Whose arcade this is belongs beside the work, not above the settings.
+
 ### Per-app export & optional encryption (IMPLEMENTED, #29)
 
 The Game Data dialog's Export form replaces the old pair of menu items ("Export to File" + "Export App / Encrypted…") with one flow and two optional controls; the defaults (Everything, blank passphrase) are the instant whole-arcade plaintext export:

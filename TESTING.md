@@ -146,6 +146,7 @@ source of truth):
 | --- | --- |
 | Save / export / import | `export-roundtrip`, `export-advanced-acceptance`, `save-unit` |
 | Game Data dialog | `backup-dialog-acceptance` |
+| Share dialog | `share-dialog-acceptance` |
 | Local + peer backup | `local-backup-acceptance`, `backup-acceptance` (+ `-unit` pairs) |
 | Sync + leaderboards | `sync-acceptance`, `leaderboard-acceptance` (+ `-unit` pairs) |
 | Records | `records-acceptance` |

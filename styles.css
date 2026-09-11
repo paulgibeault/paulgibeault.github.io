@@ -627,6 +627,45 @@ body.app-in-game .launcher-menu__panel {
     padding: 8px;
     border-radius: 6px;
 }
+/* Share Arcade dialog: the QR is the point of the panel, so it gets the
+   largest quiet zone on a white card (scanners need the light margin on a
+   dark theme) and the link sits under it in the same light card the recovery
+   code uses — legible in a photo, and selectable in one tap. */
+.share-dialog__panel {
+    max-width: 460px;
+    text-align: center;
+}
+.share-dialog__intro {
+    margin: 0 0 4px;
+}
+.share-dialog__qr {
+    display: flex;
+    justify-content: center;
+    margin: 12px 0 4px;
+    min-height: 0;
+}
+.share-dialog__qr img,
+.share-dialog__qr canvas {
+    background: #fff;
+    padding: 12px;
+    border-radius: 8px;
+    max-width: 100%;
+    height: auto;
+}
+.share-dialog__fallback {
+    font-size: 0.66rem;
+    color: var(--text-secondary);
+    margin: 4px 0 0;
+}
+.share-dialog__url {
+    font-size: 0.72rem;
+    text-align: center;
+}
+.share-dialog__actions {
+    justify-content: center;
+    flex-wrap: wrap;
+}
+
 .connections-row--revoked {
     opacity: 0.65;
 }
