@@ -16,6 +16,18 @@ Battery is won by **frames not run**, not by faster frames: every kernel must
 report quietness so the host can let the loop reach 0 fps (GAME_INTEGRATION
 §6d). Compilation buys CPU per frame; that is the second prize, not the first.
 
+## Status — 2026-09-12 (code-verified, branch `compiled-kernels-sand`)
+
+| WP | State | Evidence |
+|---|---|---|
+| WP0 | ✅ done | Headless trace: solver 0.07–1.6 ms/frame across 40–120 bodies and 1×/4× throttle; painting 10–68 ms. **Painting dominates 40–90×.** No solver kernel. Sprite caching filed as shuiguo#23. Side finding: `arcade-audio.js` graph cues allocate nodes per play (~1 ms/frame under throttle). |
+| WP1 | ✅ done | `sdk/v3/arcade-sim-sand.js` + `.wasm` (4.3 KB), SDK 3.15.0. Reference `tools/sim/sand-reference.mjs` (rules R1–R14); `tools/sim-sand-unit.mjs` 196 KATs byte-comparing WASM vs reference; `tools/sim-sand-build-unit.mjs` rebuild-and-compare; `tools/sim-sand-acceptance.mjs` in an opaque-origin frame. Full unit tier + `run-ci.mjs` green. |
+| WP2 | ✅ done | GAME_INTEGRATION §7e (`Arcade.sim`, host contract) + §9 worker bullet. `dev.sh` stages `.wasm`. |
+| WP3 | ✅ test bed | `../sand-art` (local repo, not published, not in `catalog.json`): pour / sprinkle / funnel / brush / wall / unwall / erase / two sticks / stir / water, 16 tints, autosave via `Arcade.store`, rests when quiet. 18/18 driven checks, standalone and framed. |
+| WP4 | ⏳ owed | On-phone measurement: step cost at 192×320 is 0.011 ms/call headless; battery over a 10-minute session vs a JS-only build not yet taken. |
+
+**API grew past §3 on consumer demand** (all deterministic, all in the KAT suite): 32 sand tints (`materials.SAND_BASE + t`, `tint(t)`), `nudge` (the stick), `stir`, `clear`, `reseed`, `setPalette` (single or batch), `load(bytes)`, `replace(from, to, x, y, r)`. **Deviations:** water spreads sideways only toward a reachable drop (R5) so a puddle always reaches `quiet()`; no `sw.js` edit — the precache list is generated at stage time and `CACHE_NAME` follows the CI-owned `APP_VERSION`. **Deferred:** `emit()` with kernel-side jitter, a dirty-generation counter, SIMD, a worker route.
+
 ## 0. The verdict on Shui Guo Tan
 
 Read before assuming the fruit game benefits. It does not, from a particle
