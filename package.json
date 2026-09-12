@@ -41,9 +41,12 @@
     "configs-acceptance": "node tools/configs-acceptance.mjs",
     "configs-p2p-acceptance": "node tools/configs-p2p-acceptance.mjs",
     "acceptance:pool": "node tools/acceptance.mjs --pool --serve --catalog tools/fixtures/ci-catalog.json",
-    "test:units": "node tools/run-units.mjs"
+    "test:units": "node tools/run-units.mjs",
+    "build:sim-sand": "node tools/sim/build-sand.mjs",
+    "sim-sand-acceptance": "node tools/sim-sand-acceptance.mjs"
   },
   "devDependencies": {
+    "assemblyscript": "^0.28.20",
     "playwright": "^1.50.0"
   },
   "engines": {
