@@ -20,7 +20,7 @@
  *   Gate D — pinned hashes of the reference grid per script × seed.
  *   Gate E — edges the scripts do not reach: paint validation, get() out of
  *            bounds, seed 0, a grid that is not a multiple of the chunk size.
- *   Gate F — the tools a sand-art host uses: tints share sand's physics,
+ *   Gate F — the tools a picture-making host uses: tints share sand's physics,
  *            nudge() wakes a settled pile and it re-settles, stir() advances
  *            the stream deterministically, clear() is instantly quiet and
  *            keeps the stream, setPalette() changes pixels on both.
@@ -109,7 +109,7 @@ const SCRIPTS = {
             if (k < 300) { sim.paint(WATER, 30, 4, 2); sim.paint(SAND, 110, 4, 2); }
         },
     },
-    // The sand-art session: every tint, water, a wall, two stick shoves, a
+    // A picture-making session: every tint, water, a wall, two stick shoves, a
     // stir, a palette change, then clear() and a fresh pour on the same
     // stream. Pinned BEFORE the clear (step 245) — after it the grid is a
     // saturated single-tint pour and comes out the same for every seed.

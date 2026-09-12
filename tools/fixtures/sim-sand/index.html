@@ -93,7 +93,7 @@ window.__run = async function () {
     out.wokeOnPaint = !sim.quiet();
     n = 0; while (!sim.quiet() && n < 300) { sim.step(); n++; }
     out.restedAgain = sim.quiet();
-    // The stick, then the palette, then a clear — the sand-art loop.
+    // The stick, then the palette, then a clear — a picture-making host's loop.
     var h0 = fnv1a(sim.grid);
     sim.nudge(64, 90, 6, 4, -3);
     out.nudgeWoke = !sim.quiet() && fnv1a(sim.grid) !== h0;
