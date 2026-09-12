@@ -1285,8 +1285,9 @@ The contract every kernel keeps, and every host must honour:
   rejects it. The launcher publishes and precaches them.
 
 Kernels available: **`Arcade.sim.sand`** — a falling-sand automaton with 32
-sand tints, water and wall, `paint`/`nudge`/`stir`/`clear`/`setPalette`,
-`get`/`quiet`/`activeCells`, `pixels`/`grid`. Full surface in the 3.15.0 entry
+sand tints, water and wall, `paint`/`nudge`/`stir`/`replace`/`load`/`clear`/
+`reseed`/`setPalette` (single or batch), `get`/`quiet`/`activeCells`,
+`pixels`/`grid`. Full surface in the 3.15.0 entry
 of `sdk/CHANGELOG.md`; the rules are specified by
 `tools/sim/sand-reference.mjs` and pinned byte-for-byte by
 `tools/sim-sand-unit.mjs`.
