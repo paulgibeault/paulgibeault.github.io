@@ -79,6 +79,10 @@ try {
         check(`${label}: nudge() wakes a settled pile and it re-settles`, r.nudgeWoke && r.nudgeRested);
         check(`${label}: setPalette() changes pixels`, r.paletteChangedPixels);
         check(`${label}: clear() is instantly quiet, a paint after it wakes`, r.clearQuiet && r.clearThenPaintWakes);
+        check(`${label}: load() round-trips grid+pixels and wakes; a settled picture stays put`, r.loadRoundTrip && r.loadSettles);
+        check(`${label}: load() rejects a wrong-length array with RangeError`, r.loadRejects);
+        check(`${label}: replace(WATER, EMPTY) erases water in the disc and wakes`, r.replaceErased);
+        check(`${label}: batch setPalette() repaints`, r.batchPalette);
         check(`${label}: two sims have independent memory`, r.independent);
         check(`${label}: tint(5) is SAND_BASE + 5`, r.tint5 === r.materials.SAND_BASE + 5 && r.materials.SAND_COUNT === 32);
         check(`${label}: bad material / bad dims / disposed sim are refused`, r.badMaterialThrows && r.badDimsReject && r.disposedThrows);

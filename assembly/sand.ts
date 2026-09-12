@@ -2,7 +2,7 @@
 // sdk/v3/arcade-sim-sand.wasm by `npm run build:sim-sand`.
 //
 // This is a PORT, not a design: tools/sim/sand-reference.mjs is the
-// specification, its rule numbers (R1–R14) are cited below, and
+// specification, its rule numbers (R1–R16) are cited below, and
 // tools/sim-sand-unit.mjs asserts the two grids are byte-identical after every
 // checkpoint of every known-answer script. Change the rules there first, mirror
 // them here, and let the gate prove the mirror. The compiled binary is checked
@@ -383,15 +383,57 @@ export function reseed(seed: u32): void {
   stepIndex = 0;
 }
 
-// R11 — replace one palette entry and repaint the whole framebuffer.
-export function setPalette(index: i32, r: i32, g: i32, b: i32, a: i32): void {
+// R11 — the two halves: write one palette entry, repaint every cell. The
+// wrapper composes them so a batch of entries costs one repaint.
+export function setPaletteEntry(index: i32, r: i32, g: i32, b: i32, a: i32): void {
   if (index < 0 || index >= PALETTE_SIZE) return;
   const q = palette + (<usize>index << 2);
   store<u8>(q, <u8>r);
   store<u8>(q + 1, <u8>g);
   store<u8>(q + 2, <u8>b);
   store<u8>(q + 3, <u8>a);
+}
+
+export function repaint(): void {
   for (let i = 0; i < n; i++) setPixel(i, load<u8>(grid + <usize>i));
+}
+
+// R11 — the single-entry form, kept as one call.
+export function setPalette(index: i32, r: i32, g: i32, b: i32, a: i32): void {
+  setPaletteEntry(index, r, g, b, a);
+  repaint();
+}
+
+// R15 — the host has just written width×height validated bytes at gridPtr();
+// finish the load: nothing has moved, everything may, repaint. (Not named
+// `load`: that is AssemblyScript's memory builtin.) Validation
+// (length, material ids) is the wrapper's job, done before memory is touched.
+export function commitLoad(): void {
+  memory.fill(moved, 0, <usize>n);
+  memory.fill(active, 1, <usize>nc);
+  lastMoves = 0;
+  repaint();
+}
+
+// R16 — stencil: every `from` in the disc becomes `to`.
+export function replace(from: i32, to: i32, x: i32, y: i32, r: i32): void {
+  if (!isMaterial(from) || !isMaterial(to)) return;
+  if (r < 0 || from == to) return;
+  const f = <u8>from, t = <u8>to;
+  const r2 = r * r;
+  let any = false;
+  for (let yy = y - r; yy <= y + r; yy++) {
+    if (yy < 0 || yy >= h) continue;
+    for (let xx = x - r; xx <= x + r; xx++) {
+      if (xx < 0 || xx >= w) continue;
+      const ddx = xx - x, ddy = yy - y;
+      if (ddx * ddx + ddy * ddy > r2) continue;
+      if (load<u8>(grid + <usize>(yy * w + xx)) != f) continue;
+      put(xx, yy, t);
+      any = true;
+    }
+  }
+  if (any) recomputeActive();
 }
 
 export function get(x: i32, y: i32): i32 {

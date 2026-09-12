@@ -49,12 +49,22 @@ game loads with one `<script>` after the SDK, exactly as `arcade-audio.js` is.
   `stir(x, y, r)` (seeded shuffle inside the disc), `clear()` (grid to
   empty, instantly quiet; the rng stream is NOT reset — a new picture on the
   same stream), `reseed(seed)` (restarts the stream; `clear()+reseed(s)` is a
-  fresh sim), `setPalette(index, r, g, b, a=255)` (replaces one colour and
-  repaints the whole framebuffer — O(cells), a theme change not a per-frame
-  call), `get(x, y)`, `quiet()`, `activeCells()`, `pixels` (RGBA
+  fresh sim), `setPalette(index, r, g, b, a=255)` or
+  `setPalette([[index, r, g, b, a], …])` (replaces one colour or many and
+  repaints the whole framebuffer ONCE — O(cells), a theme change not a
+  per-frame call), `load(bytes)` (replace the whole grid from a
+  width×height `Uint8Array` — save/restore, share codes, replays; a wrong
+  length or an invalid id is a `RangeError` before memory is touched; every
+  chunk wakes so the next step settles whatever the picture left
+  unsupported; the rng stream is untouched, pair it with `reseed()` for a
+  replay), `replace(from, to, x, y, r)` (stencil: every `from` cell in the
+  disc becomes `to` — `to=EMPTY` erases one material, tint→tint
+  recolours), `get(x, y)`, `quiet()`, `activeCells()`, `pixels` (RGBA
   `Uint8ClampedArray` over module memory — read it every frame, never cache
   it), `grid` (read-only `Uint8Array`), `width`, `height`, `dispose()`.
-  Erasing is `paint(EMPTY, …)`; there is no separate op.
+  Erasing is `paint(EMPTY, …)`; there is no separate op. Not yet: an
+  `emit()` with kernel-side jitter, and a dirty-generation counter — both
+  wait on a consumer that needs them.
 - **Coloured sand.** `materials` carries `EMPTY/SAND/WATER/WALL` plus
   `SAND_BASE` (16) and `SAND_COUNT` (32): ids 16..47 are sand tints with
   identical physics and their own palette entries (defaults: tint 0 is
@@ -66,7 +76,7 @@ game loads with one `<script>` after the SDK, exactly as `arcade-audio.js` is.
 - **Deterministic by construction.** Integer-only stepping with a seeded
   xorshift32 inside the kernel: the same seed and paint script give a
   byte-identical grid on every device. The rules are SPECIFIED by a plain-JS
-  reference (`tools/sim/sand-reference.mjs`, rules R1–R14) and
+  reference (`tools/sim/sand-reference.mjs`, rules R1–R16) and
   `tools/sim-sand-unit.mjs` asserts the shipped WASM matches it byte for
   byte; `tools/sim-sand-build-unit.mjs` rebuilds the checked-in binary and
   byte-compares, so neither the rules nor the bytes can drift silently.
@@ -80,7 +90,7 @@ game loads with one `<script>` after the SDK, exactly as `arcade-audio.js` is.
   never reads `Arcade.settings` — power saver and reduced motion stay the
   host's door.
 - Build: `npm run build:sim-sand` (AssemblyScript, `--runtime stub`, no SIMD,
-  3.7 KB). `assemblyscript` is a devDependency; nothing at runtime.
+  4.3 KB). `assemblyscript` is a devDependency; nothing at runtime.
 
 ## 3.14.0
 

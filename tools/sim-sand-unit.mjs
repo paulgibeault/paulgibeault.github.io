@@ -24,6 +24,10 @@
  *            nudge() wakes a settled pile and it re-settles, stir() advances
  *            the stream deterministically, clear() is instantly quiet and
  *            keeps the stream, setPalette() changes pixels on both.
+ *   Gate G — save/restore and stencils: load() round-trips grid+pixels and
+ *            settles a floating pile, rejects bad input before touching
+ *            memory; replace() erases and recolours; batch setPalette()
+ *            equals the sequential form with one repaint.
  *
  * No browser: node instantiates the .wasm natively. Run:
  *   node tools/sim-sand-unit.mjs
@@ -59,6 +63,10 @@ async function createWasm({ width, height, seed }) {
         clear: () => ex.clear(),
         reseed: (seed) => ex.reseed(seed >>> 0),
         setPalette: (i, r, g, b, a = 255) => ex.setPalette(i, r, g, b, a),
+        setPaletteEntry: (i, r, g, b, a = 255) => ex.setPaletteEntry(i, r, g, b, a),
+        repaint: () => ex.repaint(),
+        load(bytes) { this.grid.set(bytes); ex.commitLoad(); },   // validation is the wrapper's; the twin trusts its caller
+        replace: (f, t, x, y, r) => ex.replace(f, t, x, y, r),
         get: (x, y) => ex.get(x, y),
         quiet: () => ex.quiet() !== 0,
         activeCells: () => ex.activeCells(),
@@ -322,6 +330,84 @@ console.log('\nGate F — tints, nudge, stir, clear, reseed, setPalette');
     w2.paint(SAND, 5, 5, 3); w2.clear(); w2.reseed(5);
     for (let k = 0; k < 60; k++) { w2.paint(SAND, 10 + (k % 9), 1, 1); w2.step(); }
     ok(sameBytes(w2.grid, c.grid), 'WASM clear()+reseed() agrees with the reference');
+}
+
+console.log('\nGate G — load, replace, batch setPalette');
+{
+    // Round trip: a busy scene → bytes → load() on a FRESH sim of each kind.
+    const src = createSandReference({ width: 64, height: 48, seed: 21 });
+    for (let k = 0; k < 90; k++) {
+        src.paint(SAND_BASE + (k % 32), 20 + (k % 7), 2, 2);
+        if (k > 30) src.paint(WATER, 50, 2, 2);
+        if (k === 10) src.paint(WALL, 32, 30, 4);
+        src.step();
+    }
+    const bytes = src.grid.slice();
+    const ref = createSandReference({ width: 64, height: 48, seed: 1 });
+    const wasm = await createWasm({ width: 64, height: 48, seed: 1 });
+    ref.load(bytes); wasm.load(bytes);
+    ok(sameBytes(ref.grid, bytes) && sameBytes(wasm.grid, bytes), 'load() round-trips the grid on both');
+    ok(sameBytes(ref.pixels, src.pixels) && sameBytes(wasm.pixels, src.pixels), 'load() repaints the framebuffer to match the source');
+    ok(!ref.quiet() && !wasm.quiet() && ref.activeCells() === 0, 'load() wakes every chunk and reports 0 moved');
+    ok(bytes !== ref.grid && (bytes[0] = 99, ref.grid[0] !== 99), 'load() copies its input, never aliases it');
+    bytes[0] = 0;
+
+    // A floating pile: paint mid-air with no step, save, load into fresh sims, settle.
+    const air = createSandReference({ width: 40, height: 40, seed: 2 });
+    air.paint(SAND_BASE + 9, 20, 10, 5); air.paint(WATER, 8, 6, 3);
+    const floating = air.grid.slice();
+    const r2 = createSandReference({ width: 40, height: 40, seed: 77 });
+    const w2 = await createWasm({ width: 40, height: 40, seed: 77 });
+    r2.load(floating); w2.load(floating);
+    let n = 0; while (!r2.quiet() && n < 300) { r2.step(); w2.step(); n++; }
+    ok(r2.quiet() && w2.quiet() && sameBytes(r2.grid, w2.grid), `a loaded floating pile settles to quiet identically (${n} steps)`);
+    ok(r2.get(20, 39) !== EMPTY && !sameBytes(r2.grid, floating), 'the pile actually fell');
+    ok(r2.grid.filter(isSand).length === floating.filter(isSand).length, 'load() + settling conserves grains');
+
+    // Rejections happen before memory is touched.
+    const before = fnv1a(ref.grid);
+    let threw = 0;
+    try { ref.load(new Uint8Array(10)); } catch (e) { if (e instanceof RangeError) threw++; }
+    const badId = ref.grid.slice(); badId[123] = 9;
+    try { ref.load(badId); } catch (e) { if (e instanceof RangeError) threw++; }
+    try { ref.load([0, 1, 2]); } catch (e) { if (e instanceof RangeError) threw++; }
+    ok(threw === 3 && fnv1a(ref.grid) === before, 'load() rejects wrong length / invalid id / non-Uint8Array with RangeError, grid untouched');
+
+    // replace: stencil erase and recolour, on both, chunk activation.
+    const scene = src.grid.slice();
+    ref.load(scene); wasm.load(scene);
+    let s = 0; while (!ref.quiet() && s < 300) { ref.step(); wasm.step(); s++; }
+    const waterBefore = ref.grid.filter((m) => m === WATER).length;
+    ref.replace(WATER, EMPTY, 50, 40, 12); wasm.replace(WATER, EMPTY, 50, 40, 12);
+    ok(sameBytes(ref.grid, wasm.grid) && ref.grid.filter((m) => m === WATER).length < waterBefore, 'replace(WATER, EMPTY) erases only water, identically on both');
+    ok(!ref.quiet() && !wasm.quiet(), 'replace() wakes the touched chunks');
+    const tintA = SAND_BASE + 3, tintB = SAND_BASE + 30;
+    const aBefore = ref.grid.filter((m) => m === tintA).length;
+    ref.replace(tintA, tintB, 32, 24, 100); wasm.replace(tintA, tintB, 32, 24, 100);
+    ok(aBefore > 0 && ref.grid.filter((m) => m === tintA).length === 0 && sameBytes(ref.grid, wasm.grid) && sameBytes(ref.pixels, wasm.pixels),
+        'replace(tint a, tint b) recolours every grain in reach, identically on both');
+    const h0 = fnv1a(ref.grid);
+    ref.replace(WALL, WALL, 32, 24, 100); ref.replace(SAND, WALL, 0, 0, -1);
+    ok(fnv1a(ref.grid) === h0, 'replace() with from == to or r < 0 is a no-op');
+    let bad = false; try { ref.replace(5, EMPTY, 1, 1, 1); } catch (e) { bad = e instanceof RangeError; }
+    ok(bad, 'replace() rejects an invalid material with RangeError');
+    wasm.replace(5, EMPTY, 1, 1, 1);
+    ok(sameBytes(ref.grid, wasm.grid), 'WASM replace() with an invalid material is a no-op');
+
+    // batch setPalette == sequential entries + one repaint, on both.
+    const seqRef = createSandReference({ width: 64, height: 48, seed: 1 }); seqRef.load(scene);
+    const entries = [[SAND_BASE + 30, 9, 8, 7], [WATER, 1, 2, 3, 200], [EMPTY, 0, 0, 0, 255]];
+    seqRef.setPaletteEntry(SAND_BASE + 30, 9, 8, 7); seqRef.setPaletteEntry(WATER, 1, 2, 3, 200); seqRef.setPaletteEntry(EMPTY, 0, 0, 0, 255); seqRef.repaint();
+    ref.setPalette(entries);
+    for (const e of entries) wasm.setPaletteEntry(e[0], e[1], e[2], e[3], e.length > 4 ? e[4] : 255);
+    wasm.repaint();
+    ok(sameBytes(ref.palette, seqRef.palette) && sameBytes(ref.palette, wasm.palette), 'batch setPalette writes every entry (alpha defaults to 255)');
+    ok(sameBytes(ref.pixels, wasm.pixels) && ref.pixels.every((v, k) => v === ref.palette[ref.grid[k >> 2] * 4 + (k & 3)]),
+        'one repaint after the batch maps every cell through the new palette, identically on both');
+    ref.setPaletteEntry(WALL, 5, 5, 5);
+    ok(ref.pixels[ref.grid.indexOf(WALL) * 4] !== 5, 'setPaletteEntry() alone does not repaint');
+    ref.repaint();
+    ok(ref.pixels[ref.grid.indexOf(WALL) * 4] === 5, 'repaint() applies it');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

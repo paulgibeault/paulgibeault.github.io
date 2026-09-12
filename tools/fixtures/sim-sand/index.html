@@ -102,8 +102,26 @@ window.__run = async function () {
     var px0 = fnv1a(sim.pixels);
     sim.setPalette(api.tint(3), 255, 0, 255, 255);
     out.paletteChangedPixels = fnv1a(sim.pixels) !== px0;
+    // Save → clear → load: the share-code round trip, then a stencil and a
+    // batch palette.
+    var saved = sim.grid.slice();
+    var savedPix = fnv1a(sim.pixels);
     sim.clear();
     out.clearQuiet = sim.quiet() && sim.activeCells() === 0 && sim.get(64, 95) === M.EMPTY;
+    sim.load(saved);
+    out.loadRoundTrip = fnv1a(sim.grid) === fnv1a(saved) && fnv1a(sim.pixels) === savedPix && !sim.quiet();
+    n = 0; while (!sim.quiet() && n < 300) { sim.step(); n++; }
+    out.loadSettles = sim.quiet() && fnv1a(sim.grid) === fnv1a(saved);   // it was already settled
+    try { sim.load(new Uint8Array(3)); out.loadRejects = false; } catch (e) { out.loadRejects = e instanceof RangeError; }
+    var waterBefore = 0, waterAfter = 0;
+    for (var q = 0; q < saved.length; q++) if (sim.grid[q] === M.WATER) waterBefore++;
+    sim.replace(M.WATER, M.EMPTY, 30, 90, 10);
+    for (q = 0; q < saved.length; q++) if (sim.grid[q] === M.WATER) waterAfter++;
+    out.replaceErased = waterBefore > 0 && waterAfter < waterBefore && !sim.quiet();
+    var pxB = fnv1a(sim.pixels);
+    sim.setPalette([[api.tint(0), 1, 2, 3], [M.WATER, 4, 5, 6, 255]]);
+    out.batchPalette = fnv1a(sim.pixels) !== pxB;
+    sim.clear();
     sim.paint(M.SAND, 64, 4, 2);
     out.clearThenPaintWakes = !sim.quiet();
 

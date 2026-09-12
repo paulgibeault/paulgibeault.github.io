@@ -93,7 +93,10 @@
  *      one entry and then REPAINTS THE WHOLE FRAMEBUFFER — O(cells), the
  *      simple honest way to make a palette change visible without a dirty
  *      bit per cell. Call it on a theme change, not per frame. It touches
- *      neither the grid nor the chunks.
+ *      neither the grid nor the chunks. The batch form
+ *      setPalette([[index, r, g, b, a], …]) writes every entry and repaints
+ *      once; the kernel exposes the two halves (setPaletteEntry, repaint)
+ *      and the wrapper composes them.
  *
  *  R12 nudge(x, y, r, dx, dy) — the stick. Every movable cell (sand tints,
  *      water; never wall) with dx²+dy² ≤ r² of (x,y) moves by the integer
@@ -118,6 +121,20 @@
  *      and stepIndex are NOT reset: a clear mid-session is a new picture on
  *      the same stream. reseed(seed) resets both, so clear() + reseed(s) is
  *      indistinguishable from a fresh sim with seed s.
+ *
+ *  R15 load(bytes) — replace the whole grid from a width×height byte array.
+ *      A wrong length or any invalid id is a RangeError thrown BEFORE the
+ *      grid is touched. Then: moved cleared, EVERY chunk active (so the next
+ *      step settles whatever the picture left unsupported), activeCells() 0,
+ *      framebuffer repainted. The rng stream and stepIndex are untouched —
+ *      a replay that wants a known stream calls reseed() too. Pure function
+ *      of its input; the byte array is copied, never aliased.
+ *
+ *  R16 replace(from, to, x, y, r) — every cell in the disc whose material
+ *      is `from` becomes `to`; both must be valid ids (reference throws,
+ *      kernel ignores, wrapper throws). to=EMPTY is a stencil erase,
+ *      from=tint(a) to=tint(b) a recolour. Touched chunks are marked and
+ *      active recomputed. No rng.
  */
 
 export const EMPTY = 0, SAND = 1, WATER = 2, WALL = 3;
@@ -423,13 +440,57 @@ export function createSandReference({ width, height, seed = 1 }) {
             rng = (seed >>> 0) || 0x9E3779B9;
             stepIndex = 0;
         },
-        // R11
-        setPalette(index, r, g, b, a = 255) {
+        // R11 — the two halves, and the composed forms.
+        setPaletteEntry(index, r, g, b, a = 255) {
             index |= 0;
             if (index < 0 || index >= PALETTE_SIZE) return;
             const q = index << 2;
             palette[q] = r & 255; palette[q + 1] = g & 255; palette[q + 2] = b & 255; palette[q + 3] = a & 255;
+        },
+        repaint() {
             for (let i = 0; i < n; i++) setPixel(i, grid[i]);
+        },
+        setPalette(index, r, g, b, a = 255) {
+            if (Array.isArray(index)) {
+                for (const e of index) this.setPaletteEntry(e[0], e[1], e[2], e[3], e.length > 4 ? e[4] : 255);
+            } else {
+                this.setPaletteEntry(index, r, g, b, a);
+            }
+            this.repaint();
+        },
+        // R15
+        load(bytes) {
+            if (!(bytes instanceof Uint8Array) || bytes.length !== n) {
+                throw new RangeError('load: expected a Uint8Array of ' + n + ' bytes');
+            }
+            for (let i = 0; i < n; i++) {
+                if (!isMaterial(bytes[i])) throw new RangeError('load: invalid material ' + bytes[i] + ' at index ' + i);
+            }
+            grid.set(bytes);
+            moved.fill(0);
+            active.fill(1);
+            lastMoves = 0;
+            for (let i = 0; i < n; i++) setPixel(i, grid[i]);
+        },
+        // R16
+        replace(from, to, x, y, r) {
+            from |= 0; to |= 0; x |= 0; y |= 0; r |= 0;
+            if (!isMaterial(from) || !isMaterial(to)) throw new RangeError('replace: unknown material ' + (isMaterial(from) ? to : from));
+            if (r < 0 || from === to) return;
+            const r2 = r * r;
+            let any = false;
+            for (let yy = y - r; yy <= y + r; yy++) {
+                if (yy < 0 || yy >= h) continue;
+                for (let xx = x - r; xx <= x + r; xx++) {
+                    if (xx < 0 || xx >= w) continue;
+                    const ddx = xx - x, ddy = yy - y;
+                    if (ddx * ddx + ddy * ddy > r2) continue;
+                    if (grid[yy * w + xx] !== from) continue;
+                    put(xx, yy, to);
+                    any = true;
+                }
+            }
+            if (any) recomputeActive();
         },
         get(x, y) {
             x |= 0; y |= 0;

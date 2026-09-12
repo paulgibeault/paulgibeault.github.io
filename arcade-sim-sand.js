@@ -22,6 +22,7 @@
  *   const sim = await sand.create({ width: 256, height: 384, seed });
  *   sim.paint(sand.tint(5), x, y, 3);   // coloured sand; sand.materials.WATER, .WALL, .EMPTY
  *   sim.nudge(x, y, 6, 0, -4);          // the stick: shove what is under it
+ *   saved = sim.grid.slice();           // … later: sim.load(saved) — share codes, replays
  *   sim.step();                         // inside your Arcade.loop tick
  *   ctx.putImageData(new ImageData(sim.pixels, sim.width, sim.height), 0, 0);
  *   if (sim.quiet()) rest();            // GAME_INTEGRATION §6d — let the screen rest
@@ -135,13 +136,39 @@
             // A new picture on the same rng stream (R14); reseed() restarts it.
             clear: function () { alive(); ex.clear(); },
             reseed: function (seed) { alive(); ex.reseed(coerceSeed(seed)); },
-            // Replace one palette entry and repaint the whole framebuffer
-            // (R11) — O(cells); a theme change, not a per-frame call.
+            // Replace palette entries and repaint the whole framebuffer ONCE
+            // (R11) — O(cells); a theme change, not a per-frame call. Either
+            // (index, r, g, b, a=255) or ([[index, r, g, b, a], ...]).
             setPalette: function (index, r, g, b, a) {
                 alive();
-                index |= 0;
-                if (index < 0 || index >= PALETTE_SIZE) throw new RangeError('setPalette: index ' + index + ' is not in [0, ' + PALETTE_SIZE + ')');
-                ex.setPalette(index, r | 0, g | 0, b | 0, a === undefined ? 255 : a | 0);
+                var entries = Array.isArray(index) ? index : [[index, r, g, b, a]];
+                for (var k = 0; k < entries.length; k++) {
+                    var e = entries[k];
+                    var i = e[0] | 0;
+                    if (i < 0 || i >= PALETTE_SIZE) throw new RangeError('setPalette: index ' + i + ' is not in [0, ' + PALETTE_SIZE + ')');
+                    ex.setPaletteEntry(i, e[1] | 0, e[2] | 0, e[3] | 0, e[4] === undefined ? 255 : e[4] | 0);
+                }
+                ex.repaint();
+            },
+            // Replace the whole grid (R15): save/restore, share codes, replays.
+            // Validated in full before a byte of module memory is written.
+            load: function (bytes) {
+                alive();
+                if (!(bytes instanceof Uint8Array) || bytes.length !== n) {
+                    throw new RangeError('load: expected a Uint8Array of ' + n + ' bytes');
+                }
+                for (var k = 0; k < n; k++) {
+                    if (!isMaterial(bytes[k])) throw new RangeError('load: invalid material ' + bytes[k] + ' at index ' + k);
+                }
+                sim.grid.set(bytes);
+                ex.commitLoad();
+            },
+            // Stencil (R16): every `from` cell in the disc becomes `to`.
+            replace: function (from, to, x, y, r) {
+                alive();
+                from |= 0; to |= 0;
+                if (!isMaterial(from) || !isMaterial(to)) throw new RangeError('replace: unknown material ' + (isMaterial(from) ? to : from));
+                ex.replace(from, to, x | 0, y | 0, r | 0);
             },
             get: function (x, y) { alive(); return ex.get(x | 0, y | 0); },
             quiet: function () { alive(); return ex.quiet() !== 0; },
