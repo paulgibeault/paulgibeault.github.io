@@ -18,11 +18,13 @@
  * The binary (arcade-sim-sand.wasm) is fetched from beside THIS script, so
  * `/sdk/v3/` and the root alias both work and a game never vendors it.
  *
- *   const sim = await Arcade.sim.sand.create({ width: 256, height: 384, seed });
- *   sim.paint(Arcade.sim.sand.materials.SAND, x, y, 3);
- *   sim.step();                       // inside your Arcade.loop tick
+ *   const sand = Arcade.sim.sand;
+ *   const sim = await sand.create({ width: 256, height: 384, seed });
+ *   sim.paint(sand.tint(5), x, y, 3);   // coloured sand; sand.materials.WATER, .WALL, .EMPTY
+ *   sim.nudge(x, y, 6, 0, -4);          // the stick: shove what is under it
+ *   sim.step();                         // inside your Arcade.loop tick
  *   ctx.putImageData(new ImageData(sim.pixels, sim.width, sim.height), 0, 0);
- *   if (sim.quiet()) rest();          // GAME_INTEGRATION §6d — let the screen rest
+ *   if (sim.quiet()) rest();            // GAME_INTEGRATION §6d — let the screen rest
  *
  * What this file deliberately does NOT do: read `Arcade.settings`. Power saver
  * and reduced motion are the host's door to keep, as they are in every game;
@@ -39,7 +41,19 @@
     'use strict';
 
     // R1 of the reference — the material ids paint() takes and get() returns.
-    var materials = Object.freeze({ EMPTY: 0, SAND: 1, WATER: 2, WALL: 3 });
+    // Sand is a RANGE: SAND_BASE + t for tint t in [0, SAND_COUNT), every tint
+    // with identical physics; SAND (1) is kept as a plain-sand id that shares
+    // tint 0's default colour. tint(t) below spells the arithmetic out.
+    var materials = Object.freeze({ EMPTY: 0, SAND: 1, WATER: 2, WALL: 3, SAND_BASE: 16, SAND_COUNT: 32 });
+    var PALETTE_SIZE = 48;
+    function isMaterial(m) {
+        return (m >= 0 && m <= materials.WALL) || (m >= materials.SAND_BASE && m < materials.SAND_BASE + materials.SAND_COUNT);
+    }
+    function tint(t) {
+        t |= 0;
+        if (t < 0 || t >= materials.SAND_COUNT) throw new RangeError('tint: ' + t + ' is not in [0, ' + materials.SAND_COUNT + ')');
+        return materials.SAND_BASE + t;
+    }
 
     // Resolve the binary beside this script, whichever path it was served
     // from. document.currentScript is null when a script is injected after
@@ -110,8 +124,24 @@
             paint: function (material, x, y, r) {
                 alive();
                 material |= 0;
-                if (material < 0 || material > materials.WALL) throw new RangeError('paint: unknown material ' + material);
+                if (!isMaterial(material)) throw new RangeError('paint: unknown material ' + material);
                 ex.paint(material, x | 0, y | 0, r | 0);
+            },
+            // The stick (reference R12): shove every movable cell within r
+            // of (x, y) by (dx, dy) where the destination is empty.
+            nudge: function (x, y, r, dx, dy) { alive(); ex.nudge(x | 0, y | 0, r | 0, dx | 0, dy | 0); },
+            // Seeded shuffle within a disc (R13) — advances the rng stream.
+            stir: function (x, y, r) { alive(); ex.stir(x | 0, y | 0, r | 0); },
+            // A new picture on the same rng stream (R14); reseed() restarts it.
+            clear: function () { alive(); ex.clear(); },
+            reseed: function (seed) { alive(); ex.reseed(coerceSeed(seed)); },
+            // Replace one palette entry and repaint the whole framebuffer
+            // (R11) — O(cells); a theme change, not a per-frame call.
+            setPalette: function (index, r, g, b, a) {
+                alive();
+                index |= 0;
+                if (index < 0 || index >= PALETTE_SIZE) throw new RangeError('setPalette: index ' + index + ' is not in [0, ' + PALETTE_SIZE + ')');
+                ex.setPalette(index, r | 0, g | 0, b | 0, a === undefined ? 255 : a | 0);
             },
             get: function (x, y) { alive(); return ex.get(x | 0, y | 0); },
             quiet: function () { alive(); return ex.quiet() !== 0; },
@@ -183,6 +213,7 @@
         // Warm the binary during a menu so the first create() is instant.
         preload: function () { return loadModule().then(function () { }); },
         materials: materials,
+        tint: tint,
         binaryUrl: binaryUrl,
     };
 

@@ -10,12 +10,21 @@
  *
  * So: small, boring, no cleverness that the AssemblyScript port cannot mirror
  * line for line. Typed arrays only, no DOM, runs under node. Every rule below
- * is numbered so a port can be checked against it.
+ * is numbered so a port can be checked against it. Every operation is a pure
+ * function of (grid, rng state, arguments) — nothing reads a clock, a setting
+ * or Math.random — which is what makes a replayed paint script a share code.
  *
  * ── Rules, v0 ──────────────────────────────────────────────────────────────
  *
- *  R1  Materials: EMPTY=0, SAND=1, WATER=2, WALL=3. The grid is a Uint8Array
- *      of width×height, row-major, y down: index = y*width + x.
+ *  R1  Materials: EMPTY=0, SAND=1, WATER=2, WALL=3, and 32 sand TINTS at
+ *      SAND_BASE..SAND_BASE+31 = 16..47. Every tint has exactly SAND's
+ *      physics; only its palette entry differs. Id 1 is kept as "sand, tint
+ *      0" for compatibility and shares tint 0's default colour — but it is a
+ *      distinct id in the grid (1 ≠ 16), so a script that mixes them gets two
+ *      colours that behave the same. Ids 4..15 and 48..255 are invalid: the
+ *      reference throws, the kernel ignores, the wrapper throws before
+ *      calling — so no grid ever holds one. The grid is a Uint8Array of
+ *      width×height, row-major, y down: index = y*width + x.
  *
  *  R2  A step scans rows bottom-to-top (y = height-1 … 0). Within a row the
  *      horizontal direction alternates: left-to-right when (stepIndex + y)
@@ -30,10 +39,10 @@
  *      be revisited by the scan after moving (a sideways spread lands on a
  *      cell later in the same row), which is what the flag exists for.
  *
- *  R4  SAND: if the cell below is EMPTY, or is WATER that has not moved this
- *      step, swap with it (sand sinks through water). Else draw one rng bit
- *      and try the two diagonals below in that order (bit=1 → right first),
- *      each with the same enter rule. Else stay.
+ *  R4  SAND (any tint): if the cell below is EMPTY, or is WATER that has not
+ *      moved this step, swap with it (sand sinks through water). Else draw
+ *      one rng bit and try the two diagonals below in that order (bit=1 →
+ *      right first), each with the same enter rule. Else stay.
  *
  *  R5  WATER: if the cell below is EMPTY, swap. Else draw one rng bit and try
  *      the two diagonals below (EMPTY only). Else draw one more bit and FLOW:
@@ -52,10 +61,10 @@
  *
  *  R7  The rng is xorshift32 seeded with `seed >>> 0`, or 0x9E3779B9 when
  *      that is zero (xorshift has a fixed point at 0). A draw is one
- *      xorshift round; the bit used is the low bit of the new state. Draws
- *      happen ONLY where R4/R5 say, so the stream depends on the scan, and
- *      the scan skips inactive chunks (R8): skipping is deliberately part of
- *      the spec, not an optimisation layered over it.
+ *      xorshift round; R4/R5 use the low bit of the new state, R13 the whole
+ *      state. Draws happen ONLY where R4/R5/R13 say, so the stream depends
+ *      on the scan, and the scan skips inactive chunks (R8): skipping is
+ *      deliberately part of the spec, not an optimisation layered over it.
  *
  *  R8  Active chunks: the grid is tiled in 16×16 chunks (partial at the
  *      edges). A chunk is CHANGED in a step if any cell in it was written by
@@ -68,31 +77,107 @@
  *
  *  R9  paint(material, x, y, r) writes `material` into every in-bounds cell
  *      with dx²+dy² ≤ r², marks their chunks changed, and clears nothing
- *      else. It does not consume rng.
+ *      else. It does not consume rng. Erasing is paint(EMPTY, …).
  *
  *  R10 activeCells() is the number of cells written by moves in the last
  *      step (2 per swap into EMPTY or WATER — both endpoints change). It is
  *      0 whenever quiet() is true. Hosts use it to notice a source that
  *      never lets the sim settle.
  *
- *  R11 pixels is an RGBA Uint8ClampedArray of width×height×4, palette-mapped
- *      from the grid and updated only for the cells a move or paint wrote —
- *      the kernel never repaints the whole buffer after init. Palette:
- *      EMPTY (16,16,24), SAND (214,178,92), WATER (52,120,220),
- *      WALL (110,110,110); alpha always 255.
+ *  R11 pixels is an RGBA Uint8ClampedArray of width×height×4, mapped from
+ *      the grid through a 48-entry palette (4 bytes per material id, ids
+ *      0..47; the unused ids 4..15 hold EMPTY's colour) and updated only for
+ *      the cells a move or paint wrote. Defaults: EMPTY (16,16,24), SAND and
+ *      tint 0 (214,178,92), WATER (52,120,220), WALL (110,110,110), tints
+ *      1..31 a hue sweep; alpha 255. setPalette(index, r, g, b, a) replaces
+ *      one entry and then REPAINTS THE WHOLE FRAMEBUFFER — O(cells), the
+ *      simple honest way to make a palette change visible without a dirty
+ *      bit per cell. Call it on a theme change, not per frame. It touches
+ *      neither the grid nor the chunks.
+ *
+ *  R12 nudge(x, y, r, dx, dy) — the stick. Every movable cell (sand tints,
+ *      water; never wall) with dx²+dy² ≤ r² of (x,y) moves by the integer
+ *      offset (dx,dy) if its destination is in bounds and EMPTY. Cells are
+ *      visited FRONT FIRST — rows from the (dy) end of the disc toward the
+ *      other, columns from the (dx) end — so the cell ahead has already
+ *      vacated before the cell behind tries to follow it, and no cell is
+ *      visited again at its own destination. Touched chunks are marked
+ *      changed and active is recomputed so the pile re-settles. No rng.
+ *      (0,0) is a no-op.
+ *
+ *  R13 stir(x, y, r) — every non-WALL cell in the disc, in row-major order,
+ *      draws two rng values a, b and picks the partner
+ *      (x - r + a mod (2r+1), y - r + b mod (2r+1)); if the partner is in
+ *      the disc, in bounds, not WALL and holds a different material, the
+ *      two swap. Chunks are marked and active recomputed. The draws happen
+ *      whether or not the swap does, so the stream advances by exactly
+ *      2 × (disc cells that are not WALL).
+ *
+ *  R14 clear() — every cell EMPTY, every chunk quiet (quiet() is true
+ *      immediately), framebuffer repainted, activeCells() 0. The rng stream
+ *      and stepIndex are NOT reset: a clear mid-session is a new picture on
+ *      the same stream. reseed(seed) resets both, so clear() + reseed(s) is
+ *      indistinguishable from a fresh sim with seed s.
  */
 
 export const EMPTY = 0, SAND = 1, WATER = 2, WALL = 3;
+export const SAND_BASE = 16, SAND_COUNT = 32;
+export const PALETTE_SIZE = 48;
 export const CHUNK = 16;
 export const FLOW = 8;
 
-// R11 — one flat table, 4 bytes per material, in material order.
-export const PALETTE = new Uint8Array([
-    16, 16, 24, 255,
-    214, 178, 92, 255,
-    52, 120, 220, 255,
-    110, 110, 110, 255,
-]);
+export function isSand(m) { return m === SAND || (m >= SAND_BASE && m < SAND_BASE + SAND_COUNT); }
+export function isMaterial(m) { return (m >= EMPTY && m <= WALL) || (m >= SAND_BASE && m < SAND_BASE + SAND_COUNT); }
+// Movable = takes part in R4/R5/R12/R13: sand tints and water.
+function isMovable(m) { return m === WATER || isSand(m); }
+
+// R11 — the default palette, 4 bytes per id for ids 0..47.
+export const PALETTE = new Uint8Array(PALETTE_SIZE * 4);
+{
+    const base = [
+        16, 16, 24, 255,      // EMPTY
+        214, 178, 92, 255,    // SAND (== tint 0)
+        52, 120, 220, 255,    // WATER
+        110, 110, 110, 255,   // WALL
+    ];
+    const tints = [
+        214, 178, 92, 255,    // tint 0 == SAND
+        212, 169, 73, 255,
+        212, 195, 73, 255,
+        204, 212, 73, 255,
+        178, 212, 73, 255,
+        151, 212, 73, 255,
+        125, 212, 73, 255,
+        99, 212, 73, 255,
+        73, 212, 73, 255,
+        73, 212, 99, 255,
+        73, 212, 125, 255,
+        73, 212, 151, 255,
+        73, 212, 178, 255,
+        73, 212, 204, 255,
+        73, 195, 212, 255,
+        73, 169, 212, 255,
+        73, 143, 212, 255,
+        73, 117, 212, 255,
+        73, 91, 212, 255,
+        82, 73, 212, 255,
+        108, 73, 212, 255,
+        134, 73, 212, 255,
+        160, 73, 212, 255,
+        186, 73, 212, 255,
+        212, 73, 212, 255,
+        212, 73, 186, 255,
+        212, 73, 160, 255,
+        212, 73, 134, 255,
+        212, 73, 108, 255,
+        212, 73, 82, 255,
+        212, 91, 73, 255,
+        212, 117, 73, 255,
+    ];
+    PALETTE.set(base, 0);
+    for (let i = 4; i < SAND_BASE; i++) PALETTE.set(base.slice(0, 4), i * 4); // unused ids read as EMPTY
+    PALETTE.set(tints, SAND_BASE * 4);
+}
 
 export function createSandReference({ width, height, seed = 1 }) {
     if (!(width > 0 && height > 0) || width !== (width | 0) || height !== (height | 0)) {
@@ -102,6 +187,7 @@ export function createSandReference({ width, height, seed = 1 }) {
     const grid = new Uint8Array(n);
     const moved = new Uint8Array(n);
     const pixels = new Uint8ClampedArray(n * 4);
+    const palette = new Uint8Array(PALETTE);   // per-instance copy (R11)
     const cw = Math.ceil(w / CHUNK), ch = Math.ceil(h / CHUNK), nc = cw * ch;
     const changed = new Uint8Array(nc);  // written this step (R8)
     const active = new Uint8Array(nc);   // scanned next step (R8)
@@ -114,21 +200,22 @@ export function createSandReference({ width, height, seed = 1 }) {
 
     function setPixel(i, m) {
         const p = i << 2, q = m << 2;
-        pixels[p] = PALETTE[q];
-        pixels[p + 1] = PALETTE[q + 1];
-        pixels[p + 2] = PALETTE[q + 2];
-        pixels[p + 3] = 255;
+        pixels[p] = palette[q];
+        pixels[p + 1] = palette[q + 1];
+        pixels[p + 2] = palette[q + 2];
+        pixels[p + 3] = palette[q + 3];
     }
 
-    // R7 — one xorshift32 round, returns the low bit.
-    function bit() {
+    // R7 — one xorshift32 round; returns the whole new state.
+    function next() {
         let x = rng;
         x ^= x << 13;
         x ^= x >>> 17;
         x ^= x << 5;
         rng = x >>> 0;
-        return rng & 1;
+        return rng;
     }
+    function bit() { return next() & 1; }
 
     function touch(x, y) {
         changed[((y / CHUNK) | 0) * cw + ((x / CHUNK) | 0)] = 1;
@@ -184,7 +271,7 @@ export function createSandReference({ width, height, seed = 1 }) {
                 }
                 const i = y * w + x;
                 const m = grid[i];
-                if (m === SAND && moved[i] === 0) {
+                if (isSand(m) && moved[i] === 0) {
                     if (below) {
                         const j = i + w;
                         if (sandCanEnter(j)) { swap(i, j, x, y, x, y + 1); x += dx; continue; }
@@ -231,18 +318,27 @@ export function createSandReference({ width, height, seed = 1 }) {
         }
     }
 
+    // Write material m at (x,y) outside a step: grid, pixel, chunk.
+    function put(x, y, m) {
+        const i = y * w + x;
+        grid[i] = m;
+        setPixel(i, m);
+        touch(x, y);
+    }
+
     return {
         width: w,
         height: h,
         grid,
         pixels,
+        palette,
         step(count = 1) {
             for (let k = 0; k < count; k++) stepOnce();
         },
         // R9
         paint(material, x, y, r) {
             material |= 0; x |= 0; y |= 0; r |= 0;
-            if (material < 0 || material > WALL) throw new RangeError('paint: unknown material ' + material);
+            if (!isMaterial(material)) throw new RangeError('paint: unknown material ' + material);
             if (r < 0) return;
             const r2 = r * r;
             let any = false;
@@ -252,16 +348,88 @@ export function createSandReference({ width, height, seed = 1 }) {
                     if (xx < 0 || xx >= w) continue;
                     const ddx = xx - x, ddy = yy - y;
                     if (ddx * ddx + ddy * ddy > r2) continue;
-                    const i = yy * w + xx;
-                    grid[i] = material;
-                    setPixel(i, material);
-                    touch(xx, yy);
+                    put(xx, yy, material);
                     any = true;
                 }
             }
             // A paint between steps must wake its chunks for the NEXT scan;
             // active is otherwise only recomputed at the end of a step.
             if (any) recomputeActive();
+        },
+        // R12
+        nudge(x, y, r, dx, dy) {
+            x |= 0; y |= 0; r |= 0; dx |= 0; dy |= 0;
+            if (r < 0 || (dx === 0 && dy === 0)) return;
+            const r2 = r * r;
+            const y0 = dy >= 0 ? y + r : y - r, ys = dy >= 0 ? -1 : 1;
+            const x0 = dx >= 0 ? x + r : x - r, xs = dx >= 0 ? -1 : 1;
+            let any = false;
+            for (let k = 0, yy = y0; k <= 2 * r; k++, yy += ys) {
+                if (yy < 0 || yy >= h) continue;
+                for (let l = 0, xx = x0; l <= 2 * r; l++, xx += xs) {
+                    if (xx < 0 || xx >= w) continue;
+                    const ddx = xx - x, ddy = yy - y;
+                    if (ddx * ddx + ddy * ddy > r2) continue;
+                    const m = grid[yy * w + xx];
+                    if (!isMovable(m)) continue;
+                    const tx = xx + dx, ty = yy + dy;
+                    if (tx < 0 || tx >= w || ty < 0 || ty >= h) continue;
+                    if (grid[ty * w + tx] !== EMPTY) continue;
+                    put(tx, ty, m);
+                    put(xx, yy, EMPTY);
+                    any = true;
+                }
+            }
+            if (any) recomputeActive();
+        },
+        // R13
+        stir(x, y, r) {
+            x |= 0; y |= 0; r |= 0;
+            if (r < 0) return;
+            const r2 = r * r, span = 2 * r + 1;
+            let any = false;
+            for (let yy = y - r; yy <= y + r; yy++) {
+                if (yy < 0 || yy >= h) continue;
+                for (let xx = x - r; xx <= x + r; xx++) {
+                    if (xx < 0 || xx >= w) continue;
+                    const ddx = xx - x, ddy = yy - y;
+                    if (ddx * ddx + ddy * ddy > r2) continue;
+                    const m = grid[yy * w + xx];
+                    if (m === WALL) continue;
+                    const a = next(), b = next();
+                    const tx = x - r + (a % span), ty = y - r + (b % span);
+                    const tdx = tx - x, tdy = ty - y;
+                    if (tdx * tdx + tdy * tdy > r2) continue;
+                    if (tx < 0 || tx >= w || ty < 0 || ty >= h) continue;
+                    const o = grid[ty * w + tx];
+                    if (o === WALL || o === m) continue;
+                    put(tx, ty, m);
+                    put(xx, yy, o);
+                    any = true;
+                }
+            }
+            if (any) recomputeActive();
+        },
+        // R14
+        clear() {
+            grid.fill(EMPTY);
+            moved.fill(0);
+            changed.fill(0);
+            active.fill(0);
+            lastMoves = 0;
+            for (let i = 0; i < n; i++) setPixel(i, EMPTY);
+        },
+        reseed(seed) {
+            rng = (seed >>> 0) || 0x9E3779B9;
+            stepIndex = 0;
+        },
+        // R11
+        setPalette(index, r, g, b, a = 255) {
+            index |= 0;
+            if (index < 0 || index >= PALETTE_SIZE) return;
+            const q = index << 2;
+            palette[q] = r & 255; palette[q + 1] = g & 255; palette[q + 2] = b & 255; palette[q + 3] = a & 255;
+            for (let i = 0; i < n; i++) setPixel(i, grid[i]);
         },
         get(x, y) {
             x |= 0; y |= 0;

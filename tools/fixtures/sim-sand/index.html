@@ -1,0 +1,124 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>sim-sand acceptance fixture</title>
+<!-- Mounted by tools/sim-sand-acceptance.mjs in an iframe carrying the pool's
+     real sandbox flags (allow-scripts allow-downloads — arcade-pool.js), so
+     the module is exercised at an OPAQUE origin: the .wasm fetch is a CORS
+     request from origin null, exactly what a game frame does in production.
+     The SDK loads first, as in a game; the kernel script is appended by the
+     inline loader so the same page can load the evergreen alias (default) or
+     the pinned path (?path=/sdk/v3/arcade-sim-sand.js) and prove the binary
+     resolves beside whichever script was used. -->
+<script src="/arcade-sdk.js"></script>
+<script>Arcade.init({ gameId: 'sim-sand-test' });</script>
+<body>
+<canvas id="c" width="128" height="96"></canvas>
+<script>
+(function () {
+    var path = new URLSearchParams(location.search).get('path') || '/arcade-sim-sand.js';
+    var s = document.createElement('script');
+    s.src = path;
+    window.__kernelLoaded = new Promise(function (res, rej) { s.onload = res; s.onerror = function () { rej(new Error('failed to load ' + path)); }; });
+    document.head.appendChild(s);
+})();
+
+// FNV-1a over bytes — the same function tools/sim/sand-reference.mjs exports,
+// so the node side and this frame hash the grid identically.
+function fnv1a(bytes) {
+    var h = 2166136261 >>> 0;
+    for (var i = 0; i < bytes.length; i++) { h ^= bytes[i]; h = Math.imul(h, 16777619) >>> 0; }
+    return h >>> 0;
+}
+
+// The paint script. tools/sim-sand-acceptance.mjs runs the identical script
+// through the reference in node and compares hashes; change both or neither.
+function runScript(sim, M, tint) {
+    for (var k = 0; k < 200; k++) {
+        if (k % 3 === 0) sim.paint(tint(k % 32), 64, 4, 1);
+        if (k >= 100) sim.paint(M.WATER, 30, 4, 2);
+        if (k === 50) sim.paint(M.WALL, 64, 40, 5);
+        if (k === 150) sim.nudge(64, 90, 8, -6, -2);
+        sim.step();
+    }
+}
+
+window.__run = async function () {
+    var out = {};
+    await window.__kernelLoaded;
+    var api = window.ArcadeSimSand;
+    out.globalPresent = !!api && typeof api.create === 'function';
+    out.attachedToArcade = !!(window.Arcade && window.Arcade.sim && window.Arcade.sim.sand === api);
+    out.binaryUrl = api.binaryUrl;
+    out.materials = api.materials;
+    out.tint5 = api.tint(5);
+    var M = api.materials;
+
+    var sim = await api.create({ width: 128, height: 96, seed: 7 });
+    out.dims = [sim.width, sim.height];
+    out.quietAtStart = sim.quiet();           // every chunk active before step 0 → false
+    runScript(sim, M, api.tint);
+    out.hashAfterScript = fnv1a(sim.grid);
+    out.activeDuring = sim.activeCells();
+    out.quietDuring = sim.quiet();
+
+    var n = 0;
+    while (!sim.quiet() && n < 600) { sim.step(); n++; }
+    out.settleSteps = n;
+    out.quietAfter = sim.quiet();
+    out.activeAfter = sim.activeCells();
+    out.hashSettled = fnv1a(sim.grid);
+    sim.step(20);
+    out.stillQuiet = sim.quiet() && fnv1a(sim.grid) === out.hashSettled;
+
+    // The view is stable while memory does not grow, and never a husk.
+    var p1 = sim.pixels, p2 = sim.pixels;
+    out.pixelsStable = p1 === p2 && p1.length === 128 * 96 * 4 && p1.byteLength > 0;
+
+    // Draw it the way a game does, then read the canvas back: not uniform.
+    var c = document.getElementById('c'), ctx = c.getContext('2d');
+    ctx.putImageData(new ImageData(sim.pixels, sim.width, sim.height), 0, 0);
+    var img = ctx.getImageData(0, 0, c.width, c.height).data;
+    var seen = new Set();
+    for (var i = 0; i < img.length; i += 4) seen.add((img[i] << 16) | (img[i + 1] << 8) | img[i + 2]);
+    out.distinctColours = seen.size;
+    // Sampled cells: the canvas shows the palette of the material underneath.
+    var samples = [[64, 95], [30, 95], [64, 40], [0, 0]];
+    out.samples = samples.map(function (xy) {
+        var i = (xy[1] * 128 + xy[0]) * 4;
+        return { m: sim.get(xy[0], xy[1]), rgb: [img[i], img[i + 1], img[i + 2]] };
+    });
+
+    // wake → rest again: a paint after quiet un-quiets, then settles.
+    sim.paint(M.SAND, 20, 4, 2);
+    out.wokeOnPaint = !sim.quiet();
+    n = 0; while (!sim.quiet() && n < 300) { sim.step(); n++; }
+    out.restedAgain = sim.quiet();
+    // The stick, then the palette, then a clear — the sand-art loop.
+    var h0 = fnv1a(sim.grid);
+    sim.nudge(64, 90, 6, 4, -3);
+    out.nudgeWoke = !sim.quiet() && fnv1a(sim.grid) !== h0;
+    n = 0; while (!sim.quiet() && n < 300) { sim.step(); n++; }
+    out.nudgeRested = sim.quiet();
+    var px0 = fnv1a(sim.pixels);
+    sim.setPalette(api.tint(3), 255, 0, 255, 255);
+    out.paletteChangedPixels = fnv1a(sim.pixels) !== px0;
+    sim.clear();
+    out.clearQuiet = sim.quiet() && sim.activeCells() === 0 && sim.get(64, 95) === M.EMPTY;
+    sim.paint(M.SAND, 64, 4, 2);
+    out.clearThenPaintWakes = !sim.quiet();
+
+    // Two sims are independent instances (own memory).
+    var other = await api.create({ width: 16, height: 16, seed: 1 });
+    other.paint(M.SAND, 8, 0, 1); other.step(3);
+    out.independent = other.grid.buffer !== sim.grid.buffer && fnv1a(sim.grid) !== 0;
+
+    // Bad input is rejected the way the reference rejects it.
+    try { sim.paint(9, 1, 1, 1); out.badMaterialThrows = false; } catch (e) { out.badMaterialThrows = e instanceof RangeError; }
+    try { await api.create({ width: 0, height: 5 }); out.badDimsReject = false; } catch (e) { out.badDimsReject = e instanceof RangeError; }
+
+    sim.dispose();
+    try { sim.step(); out.disposedThrows = false; } catch (e) { out.disposedThrows = true; }
+    return out;
+};
+</script>
+</body>
