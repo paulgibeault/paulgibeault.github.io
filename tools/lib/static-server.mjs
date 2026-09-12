@@ -21,6 +21,9 @@ const MIME = {
     '.css': 'text/css',
     '.svg': 'image/svg+xml',
     '.png': 'image/png',
+    // GitHub Pages serves this type, and WebAssembly.instantiateStreaming
+    // refuses anything else — the runners must exercise the same path.
+    '.wasm': 'application/wasm',
 };
 
 // serveRepo({ root, port, cors, catalogOverride, mounts })

@@ -51,15 +51,17 @@ if (existsSync(join(ROOT, pinnedPath))) {
     if (!inSync) console.log(`      fix: cp arcade-sdk.js ${pinnedPath}   (and add a sdk/CHANGELOG.md entry)`);
 }
 
-// The companion element library ships beside the SDK on the same pinned path,
-// so it needs the same drift protection. It is optional — games that only use
-// spec cues never load it — but if it exists at the root it must be mirrored.
-const companion = 'arcade-audio.js';
-if (existsSync(join(ROOT, companion))) {
+// Companion modules ship beside the SDK on the same pinned path, so they need
+// the same drift protection. Each is optional — games that never use it never
+// load it — but if it exists at the root it must be mirrored byte-for-byte
+// (compared as bytes: the sim kernel is a .wasm, not text).
+const companions = ['arcade-audio.js', 'arcade-sim-sand.js', 'arcade-sim-sand.wasm'];
+for (const companion of companions) {
+    if (!existsSync(join(ROOT, companion))) continue;
     const pinnedCompanion = join('sdk', `v${major}`, companion);
     ok(existsSync(join(ROOT, pinnedCompanion)), `${pinnedCompanion} exists`);
     if (existsSync(join(ROOT, pinnedCompanion))) {
-        const same = readFileSync(join(ROOT, pinnedCompanion), 'utf8') === readFileSync(join(ROOT, companion), 'utf8');
+        const same = readFileSync(join(ROOT, pinnedCompanion)).equals(readFileSync(join(ROOT, companion)));
         ok(same, `${pinnedCompanion} byte-identical to ${companion}`);
         if (!same) console.log(`      fix: cp ${companion} ${pinnedCompanion}`);
     }

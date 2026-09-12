@@ -1238,6 +1238,71 @@ const { ok, sent } = await Arcade.configs.send('pack', myPack);
 
 ---
 
+## 7e. Compiled simulation kernels — `Arcade.sim` (SDK 3.15.0+)
+
+Some per-frame work is a large, regular array walk that must be deterministic:
+a falling-sand grid, a fluid field, a cellular automaton. That work ships as a
+**compiled kernel** — an optional companion module beside the SDK, exactly as
+`arcade-audio.js` is: a small JS wrapper plus a WebAssembly binary, loaded from
+the launcher origin with one `<script>` after the SDK. The wrapper is the API;
+the binary is an implementation detail it fetches from beside itself, so the
+pinned and evergreen paths both work and a game never vendors it. Design and
+rationale: `plans/compiled-kernels-2026-09.md`.
+
+```html
+<script src="/sdk/v3/arcade-sdk.js"></script>
+<script src="/sdk/v3/arcade-sim-sand.js"></script>   <!-- optional; skip it and you pay nothing -->
+```
+```js
+const sand = Arcade.sim.sand;
+const sim = await sand.create({ width: 180, height: 300, seed: Arcade.rng.hash(Arcade.daily.dateStr()) });
+sim.paint(sand.tint(5), x, y, 2);        // coloured sand; sand.materials.WATER / .WALL / .EMPTY
+sim.nudge(x, y, 3, dx, dy);              // a stick: shove what is under the finger
+sim.step();                              // inside your Arcade.loop tick
+ctx.putImageData(new ImageData(sim.pixels, sim.width, sim.height), 0, 0);
+if (sim.quiet()) rest();                 // §6d — nothing can move, so no more frames
+```
+
+The contract every kernel keeps, and every host must honour:
+
+- [ ] **`quiet()` is the §6d hook.** A kernel tracks what can still move and
+  answers in O(chunks). Step it inside `Arcade.loop`; call `loop.stop()` when
+  it is quiet and nothing is being painted; `loop.start()` on any input. A
+  kernel that is stepped while quiet is a battery bug, not a kernel bug.
+- [ ] **The kernel never reads `Arcade.settings`.** Power saver and reduced
+  motion stay the host's door (§5): gate decoration there, guard the
+  `powerSaver()` read as documented, and let the kernel be pure.
+- [ ] **Read `sim.pixels` every frame; never hold it.** It is a view over the
+  module's memory, re-created when that memory grows. A cached view goes
+  silently stale.
+- [ ] **Deterministic by construction.** Integer stepping and a seeded rng
+  inside the kernel: the same seed and the same inputs give a byte-identical
+  grid on every device. A recorded input script is therefore a replay, a
+  share code (§7c) and, later, a lockstep multiplayer frame. Feed it
+  `Arcade.rng`-derived seeds, not `Math.random()`.
+- [ ] **Never precache `/arcade-sim-*.js` or `.wasm`** in your service worker —
+  the same rule as the SDK and the audio module (§10); `verify-artifact.mjs`
+  rejects it. The launcher publishes and precaches them.
+
+Kernels available: **`Arcade.sim.sand`** — a falling-sand automaton with 32
+sand tints, water and wall, `paint`/`nudge`/`stir`/`replace`/`load`/`clear`/
+`reseed`/`setPalette` (single or batch), `get`/`quiet`/`activeCells`,
+`pixels`/`grid`. Full surface in the 3.15.0 entry
+of `sdk/CHANGELOG.md`; the rules are specified by
+`tools/sim/sand-reference.mjs` and pinned byte-for-byte by
+`tools/sim-sand-unit.mjs`.
+
+**Running a kernel off the main thread.** Possible, but know the sandbox: a
+game frame has an opaque origin, so `new Worker('/some/url.js')` **throws**.
+`fetch()` the worker source, wrap it in a `Blob`, and construct the worker
+from the blob URL — one self-contained file, no relative `import`. WebAssembly
+and a transferred `OffscreenCanvas` both work inside such a worker;
+`SharedArrayBuffer` does not exist (GitHub Pages sends no COOP/COEP), so
+frames cross by `postMessage` transfer. The main-thread route inside
+`Arcade.loop` is the default for exactly this reason.
+
+---
+
 ## 8. Standalone mode must keep working
 
 The launcher is one of two ways to run the game; the GitHub Pages URL is the other.
@@ -1264,6 +1329,7 @@ anchor-triggered downloads from a sandboxed iframe.
 - [ ] If the game requests fullscreen, request it on a user gesture only and target the game's own root element.
 - [ ] **Never touch `window.localStorage` / `indexedDB` / OPFS / `caches` directly in code that runs framed** — in an opaque-origin frame the property access itself throws `SecurityError`. Go through `Arcade.state/store/files`; wrap any unavoidable direct probe in try/catch.
 - [ ] ES modules and `fetch()`ed assets load fine framed — GitHub Pages (and the dev servers) send `Access-Control-Allow-Origin: *`, which opaque-origin CORS requests need.
+- [ ] **`new Worker(url)` throws framed** — the opaque origin is same-origin with nothing. Fetch the source and construct the worker from a blob URL (§7e). WebAssembly loads fine either way.
 
 You do **not** need a postMessage storage shim — the SDK IS the shim when
 framed.

@@ -47,7 +47,9 @@ rAF/timer helper. Framework fix in [framework-launcher.md](framework-launcher.md
 > [`implementation-roadmap.md`](implementation-roadmap.md) — the **active build plan**: batch-1
 > framework work (quick-wins + security + `Arcade.store`/`files`), then app refactors; everything
 > deferred is filed as detailed issues **#28–#43**. `fleet-hardening-plan.md` remains the
-> security/bug tracker.
+> security/bug tracker. [`compiled-kernels-2026-09.md`](compiled-kernels-2026-09.md) — compiled
+> (WASM) simulation kernels as SDK companion modules: sand first, Shui Guo Tan measured not
+> assumed, sandbox constraints verified.
 
 ## Status — 2026-07-10 (code-verified)
 
