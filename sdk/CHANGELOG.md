@@ -20,7 +20,9 @@ directory for an unshipped major.
    feature, major = breaking — see below).
 2. `cp arcade-sdk.js sdk/v3/arcade-sdk.js` (current major's directory).
 3. Add an entry at the top of this file.
-4. Bump `CACHE_NAME` in `sw.js` (both SDK paths are precached).
+4. Nothing in `sw.js`: its precache list is generated at stage time from the
+   published files and `CACHE_NAME` derives from the `APP_VERSION` fleet CI
+   bumps on every deploy (`tools/repo-gates-unit.mjs` Gate D pins that).
 
 **Breaking change (new major N)**: the old directory `sdk/v<N-1>/` is frozen
 as-is (its last release keeps serving forever), `VERSION`/`SDK_SEMVER` bump to
@@ -29,6 +31,43 @@ with it. Compatibility is still negotiated at runtime by `welcome.caps` —
 semver is for humans and URLs, never checked on the wire.
 
 ---
+
+## 3.15.0
+
+Additive: **the first compiled simulation kernel** — a new optional companion
+module, `/sdk/v<major>/arcade-sim-sand.js` + `arcade-sim-sand.wasm`
+(root aliases `/arcade-sim-sand.js`, `/arcade-sim-sand.wasm`), attaching
+`Arcade.sim.sand` (and a standalone `ArcadeSimSand` global). No SDK surface
+change — `arcade-sdk.js` is untouched but for this number — and no wire caps:
+nothing here crosses `welcome.caps`, the module is a launcher-origin asset a
+game loads with one `<script>` after the SDK, exactly as `arcade-audio.js` is.
+
+- **`Arcade.sim.sand.create({ width, height, seed })`** → Promise of a sim:
+  `step(n=1)`, `paint(material, x, y, r)`, `get(x, y)`, `quiet()`,
+  `activeCells()`, `pixels` (RGBA `Uint8ClampedArray` over module memory —
+  read it every frame, never cache it), `grid` (read-only `Uint8Array`),
+  `width`, `height`, `dispose()`. `materials` carries the ids
+  (`EMPTY/SAND/WATER/WALL`), `preload()` warms the binary, `binaryUrl` says
+  where it came from. The binary is resolved beside the script, so the
+  pinned and evergreen paths both work.
+- **Deterministic by construction.** Integer-only stepping with a seeded
+  xorshift32 inside the kernel: the same seed and paint script give a
+  byte-identical grid on every device. The rules are SPECIFIED by a plain-JS
+  reference (`tools/sim/sand-reference.mjs`, rules R1–R11) and
+  `tools/sim-sand-unit.mjs` asserts the shipped WASM matches it byte for
+  byte; `tools/sim-sand-build-unit.mjs` rebuilds the checked-in binary and
+  byte-compares, so neither the rules nor the bytes can drift silently.
+  Seeded from `Arcade.rng.hash(Arcade.daily.dateStr())` this is a daily
+  challenge; replay the paint script and it is a share code.
+- **`quiet()` is the §6d hook and it is non-negotiable.** The kernel tracks
+  16×16 active chunks and answers "nothing can move" in O(chunks); water
+  flows sideways only toward a reachable drop (R5) precisely so a poured
+  puddle always settles. The host pattern is Shui Guo Tan's `wake()`/`rest()`
+  verbatim: step inside `Arcade.loop`, `rest()` when `quiet()`. The kernel
+  never reads `Arcade.settings` — power saver and reduced motion stay the
+  host's door.
+- Build: `npm run build:sim-sand` (AssemblyScript, `--runtime stub`, no SIMD,
+  2.3 KB). `assemblyscript` is a devDependency; nothing at runtime.
 
 ## 3.14.0
 

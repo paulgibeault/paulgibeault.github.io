@@ -26,8 +26,10 @@ export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 // spend their cache budget on reading material. Prose is fetched live.
 export const PRECACHE_EXCLUDE = ["*.md", "plans/", "docs/", "LICENSE", "NOTICE"];
 
+// "assembly" is AssemblyScript source (assembly/sand.ts): the compiled .wasm
+// next to the SDK is what ships, the source is a dev file like tools/.
 const EXCLUDE_DIRS = new Set([".github", ".claude", "node_modules",
-  "tests", "test", "scratch", "tools", "scripts"]);
+  "tests", "test", "scratch", "tools", "scripts", "assembly"]);
 const EXCLUDE_ROOT = new Set(["package.json", "package-lock.json",
   ".gitignore", "go.sh", "ago", "dev.sh"]);
 const EXCLUDE_EXT = new Set([".py", ".pid"]);

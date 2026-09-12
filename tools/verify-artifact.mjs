@@ -55,7 +55,7 @@ function precached(dir) {
   const src = fs.readFileSync(sw, "utf8");
   return {
     entries: [...src.matchAll(/['"]\.\/([^'"]*?)['"]/g)].map((m) => m[1].split(/[?#]/)[0]),
-    launcher: [...src.matchAll(/['"]([^'"]*arcade-(?:sdk|audio)\.js)['"]/g)].map((m) => m[1]),
+    launcher: [...src.matchAll(/['"]([^'"]*arcade-(?:sdk|audio|sim-[a-z0-9-]+)\.(?:js|wasm))['"]/g)].map((m) => m[1]),
   };
 }
 
@@ -92,7 +92,8 @@ export function verify(dir) {
     }
   }
   // The game↔launcher boundary, checked from whichever side this repo is on.
-  // A game loads /arcade-sdk.js and /arcade-audio.js from the launcher origin
+  // A game loads /arcade-sdk.js, /arcade-audio.js and the /arcade-sim-*.js
+  // kernels (with their .wasm) from the launcher origin
   // and must NOT precache them — caching another origin's SDK is how an app
   // pins itself to a stale one. The launcher publishes those same files, so
   // for it precaching is correct. Detect which side we are by whether the
