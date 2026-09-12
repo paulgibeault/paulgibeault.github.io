@@ -171,6 +171,7 @@
       "subtitle": "Fleet Soundboard",
       "icon": "/audio-tune/icon.png",
       "url": "/audio-tune/",
+      "inDevelopment": true,
       "profile": {
         "subtitle": "Soundboard, Sound Lab & Sequencer",
         "alt": "Audio Tune — a grid of glowing pads, each one a sound from a different arcade game",
