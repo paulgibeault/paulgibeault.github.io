@@ -207,12 +207,16 @@ if (!existsSync(distDir)) {
 // fixture does exactly that). Enumerated rather than falling back to the
 // launcher for any 404, so a genuinely missing file in the app's own artifact
 // still 404s here instead of being quietly satisfied from next door.
+// Binaries ride along: a compiled kernel (§7e) is a .wasm beside its wrapper,
+// and an app that loads the wrapper without the binary boots down its
+// "kernel did not load" path — a page that draws chrome and no content, which
+// is exactly the false positive this harness exists to avoid.
 function buildOverlay(sdkDir) {
     if (!sdkDir) return null;
     const root = path.resolve(sdkDir);
     const overlay = {};
     for (const f of readdirSync(root)) {
-        if (/^arcade-[a-z0-9-]+\.js$/.test(f)) overlay['/' + f] = path.join(root, f);
+        if (/^arcade-[a-z0-9-]+\.(?:js|wasm)$/.test(f)) overlay['/' + f] = path.join(root, f);
     }
     const walk = (rel) => {
         const abs = path.join(root, rel);
@@ -220,7 +224,7 @@ function buildOverlay(sdkDir) {
         for (const e of readdirSync(abs, { withFileTypes: true })) {
             const child = `${rel}/${e.name}`;
             if (e.isDirectory()) walk(child);
-            else if (e.name.endsWith('.js')) overlay['/' + child] = path.join(root, child);
+            else if (/\.(?:js|wasm)$/.test(e.name)) overlay['/' + child] = path.join(root, child);
         }
     };
     walk('sdk');
