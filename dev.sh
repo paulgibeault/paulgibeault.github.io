@@ -197,6 +197,15 @@ for src in "$LAUNCHER_DIR"/index.html "$LAUNCHER_DIR"/profile.html \
   fi
 done
 
+# Compiled kernels ship as binaries beside their wrappers (arcade-sim-*.wasm,
+# GAME_INTEGRATION §7e). Bytes, not text: copied, never sed-rewritten. The
+# same glob-not-list rule applies — the first kernel 404'd in dev because
+# only *.js was staged, and a wrapper whose binary is missing fails the way
+# the audio companion once did: green in production, broken on localhost.
+for src in "$LAUNCHER_DIR"/arcade-*.wasm; do
+  [ -f "$src" ] && cp "$src" "$STAGE_DIR/$(basename "$src")"
+done
+
 # Symlink images and the vendored P2P transport (large/binary, no rewrite needed).
 ln -snf "$LAUNCHER_DIR/images" "$STAGE_DIR/images"
 ln -snf "$LAUNCHER_DIR/p2p" "$STAGE_DIR/p2p"
@@ -212,6 +221,13 @@ for src in "$LAUNCHER_DIR"/sdk/v*/*.js; do
     rel_dir="sdk/$(basename "$(dirname "$src")")"
     mkdir -p "$STAGE_DIR/$rel_dir"
     sed "s|https://paulgibeault.github.io|$LOCAL_ORIGIN|g" "$src" > "$STAGE_DIR/$rel_dir/$(basename "$src")"
+  fi
+done
+for src in "$LAUNCHER_DIR"/sdk/v*/*.wasm; do
+  if [ -f "$src" ]; then
+    rel_dir="sdk/$(basename "$(dirname "$src")")"
+    mkdir -p "$STAGE_DIR/$rel_dir"
+    cp "$src" "$STAGE_DIR/$rel_dir/$(basename "$src")"
   fi
 done
 
