@@ -164,6 +164,23 @@
         "tags": ["HTML5 Canvas", "JS", "ES Modules", "PWA", "Arcade SDK"],
         "codeUrl": "https://github.com/paulgibeault/grav-well"
       }
+    },
+    {
+      "id": "audio-tune",
+      "name": "Audio Tune",
+      "subtitle": "Fleet Soundboard",
+      "icon": "/audio-tune/icon.png",
+      "url": "/audio-tune/",
+      "inDevelopment": true,
+      "profile": {
+        "subtitle": "Soundboard, Sound Lab & Sequencer",
+        "alt": "Audio Tune — a grid of glowing pads, each one a sound from a different arcade game",
+        "descLead": "Every sound in the arcade, on one grid.",
+        "descBody": "Each fleet game's shipped sound pack, loaded live: tap a temple bell, a piggy in the mud, a bomb fuse, a sonar ping. Explore the synthesis elements the packs are built from with every knob exposed, then sequence pads into songs, share them as codes, jam with a linked device, or render to WAV.",
+        "kicker": "The fleet's audio, played by hand.",
+        "tags": ["Web Audio", "JS", "ES Modules", "PWA", "Arcade SDK"],
+        "codeUrl": "https://github.com/paulgibeault/audio-tune"
+      }
     }
   ]
 }
