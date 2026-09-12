@@ -166,22 +166,6 @@
       }
     },
     {
-<<<<<<< HEAD
-      "id": "sand-art",
-      "name": "Sand Art",
-      "subtitle": "Pour, Poke, Picture",
-      "icon": "/sand-art/icon.png",
-      "url": "/sand-art/",
-      "inDevelopment": true,
-      "profile": {
-        "subtitle": "Coloured Sand in a Jar",
-        "alt": "Sand Art — layered bands of coloured sand settling in a tall glass jar",
-        "descLead": "Pour coloured sand into a jar and make a picture.",
-        "descBody": "Pour from the rim, sprinkle, funnel a fine stream, or brush grains straight on. Draw walls to shape the fall, then fine-tune with a thin stick, a thick stick, a stir, or a recolour. Every grain is simulated by the arcade's first compiled kernel, deterministic to the byte, and the jar keeps itself when you leave.",
-        "kicker": "The test bed for the arcade's compiled simulation kernels.",
-        "tags": ["WebAssembly", "HTML5 Canvas", "JS", "PWA", "Arcade SDK"],
-        "codeUrl": "https://github.com/paulgibeault/sand-art"
-=======
       "id": "audio-tune",
       "name": "Audio Tune",
       "subtitle": "Fleet Soundboard",
@@ -196,7 +180,23 @@
         "kicker": "The fleet's audio, played by hand.",
         "tags": ["Web Audio", "JS", "ES Modules", "PWA", "Arcade SDK"],
         "codeUrl": "https://github.com/paulgibeault/audio-tune"
->>>>>>> origin/main
+      }
+    },
+    {
+      "id": "sand-art",
+      "name": "Sand Art",
+      "subtitle": "Pour, Poke, Picture",
+      "icon": "/sand-art/icon.png",
+      "url": "/sand-art/",
+      "inDevelopment": true,
+      "profile": {
+        "subtitle": "Coloured Sand in a Jar",
+        "alt": "Sand Art — layered bands of coloured sand settling in a tall glass jar",
+        "descLead": "Pour coloured sand into a jar and make a picture.",
+        "descBody": "Pour from the rim, sprinkle, funnel a fine stream, or brush grains straight on. Draw walls to shape the fall, then fine-tune with a thin stick, a thick stick, a stir, or a recolour. Every grain is simulated by the arcade's first compiled kernel, deterministic to the byte, and the jar keeps itself when you leave.",
+        "kicker": "The test bed for the arcade's compiled simulation kernels.",
+        "tags": ["WebAssembly", "HTML5 Canvas", "JS", "PWA", "Arcade SDK"],
+        "codeUrl": "https://github.com/paulgibeault/sand-art"
       }
     }
   ]
