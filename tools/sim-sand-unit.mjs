@@ -28,6 +28,10 @@
  *            settles a floating pile, rejects bad input before touching
  *            memory; replace() erases and recolours; batch setPalette()
  *            equals the sequential form with one repaint.
+ *   Gate H — tilt (R17): the 'tilt' script above rides Gates A–D like any
+ *            other (parity under every gravity, settles, pinned); here the
+ *            edges: bad directions, the same direction twice, a settled
+ *            pile leaning to a wall and rising to the ceiling, identically.
  *
  * No browser: node instantiates the .wasm natively. Run:
  *   node tools/sim-sand-unit.mjs
@@ -68,6 +72,8 @@ async function createWasm({ width, height, seed }) {
         load(bytes) { this.grid.set(bytes); ex.commitLoad(); },   // validation is the wrapper's; the twin trusts its caller
         replace: (f, t, x, y, r) => ex.replace(f, t, x, y, r),
         get: (x, y) => ex.get(x, y),
+        tilt: (gx, gy) => ex.tilt(gx, gy),
+        gravity: () => [ex.gravityX(), ex.gravityY()],
         quiet: () => ex.quiet() !== 0,
         activeCells: () => ex.activeCells(),
         get grid() { return new Uint8Array(ex.memory.buffer, ex.gridPtr(), n); },
@@ -127,6 +133,21 @@ const SCRIPTS = {
             if (k >= 250 && k < 300) sim.paint(SAND_BASE + 7, 64 + (k % 3), 4, 1);
         },
     },
+    // R17: a pour, then the jar tilted down-right, left, up, and upright
+    // again with water in between — every rule under every kind of gravity
+    // (a sideways part, none, both), and a settle at the end under (0,1).
+    'tilt': {
+        pourUntil: 300, steps: 400, settleWithin: 400,
+        paint(sim, k) {
+            if (k < 100 && k % 3 === 0) sim.paint(SAND_BASE + 3, 64, 4, 2);
+            if (k === 100) sim.tilt(1, 1);
+            if (k >= 100 && k < 200 && k % 3 === 0) sim.paint(SAND_BASE + 9, 20, 4, 2);
+            if (k === 200) sim.tilt(-1, 0);
+            if (k >= 200 && k < 260 && k % 2 === 0) sim.paint(WATER, 64, 48, 2);
+            if (k === 260) sim.tilt(0, -1);
+            if (k === 300) sim.tilt(0, 1);
+        },
+    },
 };
 const SEEDS = [1, 7, 0xdeadbeef, 42];
 const CHECKPOINTS = [1, 2, 3, 10, 50, 100, 150, 190, 200, 210, 230, 240, 245, 250, 251, 300, 400];
@@ -138,6 +159,7 @@ const PINNED = {
     'sand then water, layered': { 1: 1509407540, 7: 191890108, 3735928559: 1092082580, 42: 589046728 },
     'wall shelf': { 1: 3918263654, 7: 1327368378, 3735928559: 2403979590, 42: 3789155266 },
     'tints, nudge, stir, clear': { 1: 3716367102, 7: 3781409420, 3735928559: 3966140336, 42: 2484319428 },
+    'tilt': { 1: 4020397336, 7: 637478940, 3735928559: 3189969290, 42: 3687178696 },
 };
 
 function sameBytes(a, b) {
@@ -408,6 +430,52 @@ console.log('\nGate G — load, replace, batch setPalette');
     ok(ref.pixels[ref.grid.indexOf(WALL) * 4] !== 5, 'setPaletteEntry() alone does not repaint');
     ref.repaint();
     ok(ref.pixels[ref.grid.indexOf(WALL) * 4] === 5, 'repaint() applies it');
+}
+
+console.log('\nGate H — tilt');
+{
+    const ref = createSandReference({ width: 64, height: 48, seed: 5 });
+    const wasm = await createWasm({ width: 64, height: 48, seed: 5 });
+    for (const sim of [ref, wasm]) { for (let k = 0; k < 60; k++) { if (k % 2 === 0) sim.paint(SAND, 32, 2, 2); sim.step(); } for (let k = 0; k < 300 && !sim.quiet(); k++) sim.step(); }
+    ok(ref.quiet() && wasm.quiet() && sameBytes(ref.grid, wasm.grid), 'a pile settled upright, identically');
+    ok(ref.gravity()[0] === 0 && ref.gravity()[1] === 1 && wasm.gravity()[0] === 0 && wasm.gravity()[1] === 1, 'gravity() starts upright (0,1)');
+    let threw = 0;
+    for (const [gx, gy] of [[0, 0], [2, 0], [0, -2], [1, 3]]) { try { ref.tilt(gx, gy); } catch (e) { if (e instanceof RangeError) threw++; } }
+    const before = fnv1a(wasm.grid);
+    for (const [gx, gy] of [[0, 0], [2, 0], [0, -2], [1, 3]]) wasm.tilt(gx, gy);
+    ok(threw === 4 && ref.quiet(), 'reference tilt() rejects (0,0) and anything off the ring with RangeError, and stays quiet');
+    ok(wasm.quiet() && fnv1a(wasm.grid) === before && wasm.gravity()[1] === 1, 'WASM tilt() with a bad direction is a no-op');
+    ref.tilt(0, 1); wasm.tilt(0, 1);
+    ok(ref.quiet() && wasm.quiet(), 'tilt() to the gravity already set is a no-op: nothing wakes');
+    const grains = ref.grid.filter(isSand).length;
+    const centroidX = (g) => { let sx = 0, n = 0; for (let i = 0; i < g.length; i++) if (isSand(g[i])) { sx += i % 64; n++; } return sx / n; };
+    const cx0 = centroidX(ref.grid);
+    ref.tilt(1, 0); wasm.tilt(1, 0);
+    ok(!ref.quiet() && !wasm.quiet(), 'tilt() to a new gravity wakes every chunk');
+    let n = 0;
+    while (n < 2000 && !(ref.quiet() && wasm.quiet())) { ref.step(); wasm.step(); n++; }
+    ok(ref.quiet() && wasm.quiet() && sameBytes(ref.grid, wasm.grid), `the pile re-settles under (1,0) identically (${n} steps)`);
+    ok(centroidX(ref.grid) > cx0 + 10 && ref.get(63, 47) !== EMPTY, 'under gravity (1,0) the sand lies against the right wall');
+    ok(ref.grid.filter(isSand).length === grains, 'tilting conserves grains');
+    ref.tilt(0, -1); wasm.tilt(0, -1);
+    n = 0;
+    while (n < 2000 && !(ref.quiet() && wasm.quiet())) { ref.step(); wasm.step(); n++; }
+    let topRow = 0; for (let x = 0; x < 64; x++) if (isSand(ref.get(x, 0))) topRow++;
+    ok(ref.quiet() && wasm.quiet() && sameBytes(ref.grid, wasm.grid) && topRow > 0, `under gravity (0,-1) the sand rises to the ceiling, identically (${n} steps)`);
+    ref.tilt(-1, 1); wasm.tilt(-1, 1);
+    n = 0;
+    while (n < 2000 && !(ref.quiet() && wasm.quiet())) { ref.step(); wasm.step(); n++; }
+    ok(ref.quiet() && wasm.quiet() && sameBytes(ref.grid, wasm.grid) && ref.get(0, 47) !== EMPTY, `under gravity (-1,1) it gathers in the bottom-left corner, identically (${n} steps)`);
+    ok(ref.gravity()[0] === -1 && wasm.gravity()[0] === -1, 'gravity() reports the tilt');
+    // water under a sideways gravity still spreads across it, and settles
+    const rw = createSandReference({ width: 64, height: 48, seed: 9 });
+    const ww = await createWasm({ width: 64, height: 48, seed: 9 });
+    for (const sim of [rw, ww]) { sim.tilt(1, 0); for (let k = 0; k < 80; k++) { if (k % 2 === 0) sim.paint(WATER, 10, 24, 2); sim.step(); } }
+    n = 0;
+    while (n < 3000 && !(rw.quiet() && ww.quiet())) { rw.step(); ww.step(); n++; }
+    let wet = 0, wetRows = new Set(); for (let y = 0; y < 48; y++) for (let x = 0; x < 64; x++) if (rw.get(x, y) === WATER) { wet++; wetRows.add(y); }
+    ok(rw.quiet() && ww.quiet() && sameBytes(rw.grid, ww.grid), `water settles under gravity (1,0) identically (${n} steps)`);
+    ok(wet > 0 && wetRows.size > 8, `water spreads across gravity (${wetRows.size} rows wet)`);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

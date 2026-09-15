@@ -135,6 +135,25 @@
  *      kernel ignores, wrapper throws). to=EMPTY is a stencil erase,
  *      from=tint(a) to=tint(b) a recolour. Touched chunks are marked and
  *      active recomputed. No rng.
+ *
+ *  R17 tilt(gx, gy) — gravity is one of the eight ring directions, (0,1)
+ *      (down) after init(). "Below" in R4/R5 is (x+gx, y+gy); the two
+ *      diagonals are gravity's neighbours on the ring — with y down and
+ *      the ring clockwise from (1,0), the one before gravity is tried first
+ *      when the bit is 1 (for (0,1) that is (1,1), "right first", as
+ *      before), the one after it otherwise; R5's flow walks the two
+ *      directions across gravity (two before on the ring first when the
+ *      bit is 1; for (0,1) that is +x, as before) and a drop is judged by
+ *      gravity's "below". The scan (R2) goes front first: rows from the end
+ *      gravity points to when gy≠0, alternating per step otherwise; columns
+ *      from the end gx points to when gx≠0, alternating per row otherwise.
+ *      With gravity (0,1) every rule reads exactly as it did before R17
+ *      existed, and the pinned hashes prove it. tilt() to the same gravity
+ *      is a no-op; a change wakes every chunk so the picture re-settles.
+ *      Each of gx, gy is -1, 0 or 1 and they are not both 0 (reference
+ *      throws, kernel ignores, wrapper throws). init() resets gravity;
+ *      clear() and reseed() leave it — it is part of the picture, like the
+ *      grid, and a replay sets it as it goes.
  */
 
 export const EMPTY = 0, SAND = 1, WATER = 2, WALL = 3;
@@ -142,6 +161,8 @@ export const SAND_BASE = 16, SAND_COUNT = 32;
 export const PALETTE_SIZE = 48;
 export const CHUNK = 16;
 export const FLOW = 8;
+// R17 — the 8-ring, clockwise from (1,0) with y down; index 2 is down.
+export const RING = [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]];
 
 export function isSand(m) { return m === SAND || (m >= SAND_BASE && m < SAND_BASE + SAND_COUNT); }
 export function isMaterial(m) { return (m >= EMPTY && m <= WALL) || (m >= SAND_BASE && m < SAND_BASE + SAND_COUNT); }
@@ -212,6 +233,15 @@ export function createSandReference({ width, height, seed = 1 }) {
     let rng = (seed >>> 0) || 0x9E3779B9; // R7
     let stepIndex = 0;
     let lastMoves = 0;                    // R10
+    // R17 — gravity and the directions that hang off it.
+    let gx = 0, gy = 1, ax = 1, ay = 1, bx = -1, by = 1, px = 1, py = 0;
+    function setGravity(k) {
+        [gx, gy] = RING[k & 7];
+        [ax, ay] = RING[(k + 7) & 7];
+        [bx, by] = RING[(k + 1) & 7];
+        [px, py] = RING[(k + 6) & 7];
+    }
+    const inBounds = (x, y) => x >= 0 && x < w && y >= 0 && y < h;
 
     for (let i = 0; i < n; i++) setPixel(i, EMPTY);
 
@@ -255,17 +285,17 @@ export function createSandReference({ width, height, seed = 1 }) {
         return m === EMPTY || (m === WATER && moved[j] === 0);
     }
 
-    // R5 FLOW — the x of the first EMPTY cell within FLOW of (x,y) in
-    // direction `side` that has an EMPTY cell below it, or -1. The walk stops
-    // at the first non-EMPTY cell: water does not pass through anything.
-    function flowTarget(x, y, side) {
-        if (y + 1 >= h) return -1;
-        const row = y * w;
+    // R5 FLOW — the index of the first EMPTY cell within FLOW of (x,y)
+    // along (sx,sy), a direction across gravity, that has an EMPTY cell
+    // below it (R17's below), or -1. The walk stops at the first non-EMPTY
+    // cell: water does not pass through anything.
+    function flowTarget(x, y, sx, sy) {
         for (let d = 1; d <= FLOW; d++) {
-            const xx = x + side * d;
-            if (xx < 0 || xx >= w) return -1;
-            if (grid[row + xx] !== EMPTY) return -1;
-            if (grid[row + w + xx] === EMPTY) return xx;
+            const xx = x + sx * d, yy = y + sy * d;
+            if (!inBounds(xx, yy)) return -1;
+            if (grid[yy * w + xx] !== EMPTY) return -1;
+            const ux = xx + gx, uy = yy + gy;
+            if (inBounds(ux, uy) && grid[uy * w + ux] === EMPTY) return yy * w + xx;
         }
         return -1;
     }
@@ -274,12 +304,17 @@ export function createSandReference({ width, height, seed = 1 }) {
         moved.fill(0);
         changed.fill(0);
         lastMoves = 0;
-        for (let y = h - 1; y >= 0; y--) {
-            const below = y + 1 < h;
+        // R2/R17 — front first: see the kernel's stepOnce for the same words.
+        const yFixed = gy !== 0;
+        const yDown = yFixed ? gy > 0 : (stepIndex & 1) === 0;
+        const y0 = yDown ? h - 1 : 0, ys = yDown ? -1 : 1;
+        for (let y = y0; y >= 0 && y < h; y += ys) {
             const crow = ((y / CHUNK) | 0) * cw;
-            const ltr = ((stepIndex + y) & 1) === 0;          // R2
+            const ltr = gx !== 0 ? gx < 0 : ((stepIndex + y) & 1) === 0;
             let x = ltr ? 0 : w - 1;
             const dx = ltr ? 1 : -1;
+            const uy = y + gy;
+            const belowRow = uy >= 0 && uy < h;
             while (x >= 0 && x < w) {
                 // R8 — skip a whole inactive chunk in one hop.
                 if (active[crow + ((x / CHUNK) | 0)] === 0) {
@@ -289,27 +324,36 @@ export function createSandReference({ width, height, seed = 1 }) {
                 const i = y * w + x;
                 const m = grid[i];
                 if (isSand(m) && moved[i] === 0) {
-                    if (below) {
-                        const j = i + w;
-                        if (sandCanEnter(j)) { swap(i, j, x, y, x, y + 1); x += dx; continue; }
-                        const first = bit() ? 1 : -1;
-                        const x1 = x + first, x2 = x - first;
-                        if (x1 >= 0 && x1 < w && sandCanEnter(j + first)) { swap(i, j + first, x, y, x1, y + 1); x += dx; continue; }
-                        if (x2 >= 0 && x2 < w && sandCanEnter(j - first)) { swap(i, j - first, x, y, x2, y + 1); x += dx; continue; }
+                    const ux = x + gx;
+                    if (belowRow && ux >= 0 && ux < w) {
+                        const j = uy * w + ux;
+                        if (sandCanEnter(j)) { swap(i, j, x, y, ux, uy); x += dx; continue; }
+                        const aFirst = bit() !== 0;
+                        const f1x = aFirst ? ax : bx, f1y = aFirst ? ay : by;
+                        const f2x = aFirst ? bx : ax, f2y = aFirst ? by : ay;
+                        const x1 = x + f1x, y1 = y + f1y;
+                        if (inBounds(x1, y1) && sandCanEnter(y1 * w + x1)) { swap(i, y1 * w + x1, x, y, x1, y1); x += dx; continue; }
+                        const x2 = x + f2x, y2 = y + f2y;
+                        if (inBounds(x2, y2) && sandCanEnter(y2 * w + x2)) { swap(i, y2 * w + x2, x, y, x2, y2); x += dx; continue; }
                     }
                 } else if (m === WATER && moved[i] === 0) {
-                    if (below) {
-                        const j = i + w;
-                        if (grid[j] === EMPTY) { swap(i, j, x, y, x, y + 1); x += dx; continue; }
-                        const first = bit() ? 1 : -1;
-                        const x1 = x + first, x2 = x - first;
-                        if (x1 >= 0 && x1 < w && grid[j + first] === EMPTY) { swap(i, j + first, x, y, x1, y + 1); x += dx; continue; }
-                        if (x2 >= 0 && x2 < w && grid[j - first] === EMPTY) { swap(i, j - first, x, y, x2, y + 1); x += dx; continue; }
+                    const ux = x + gx;
+                    if (belowRow && ux >= 0 && ux < w) {
+                        const j = uy * w + ux;
+                        if (grid[j] === EMPTY) { swap(i, j, x, y, ux, uy); x += dx; continue; }
+                        const aFirst = bit() !== 0;
+                        const f1x = aFirst ? ax : bx, f1y = aFirst ? ay : by;
+                        const f2x = aFirst ? bx : ax, f2y = aFirst ? by : ay;
+                        const x1 = x + f1x, y1 = y + f1y;
+                        if (inBounds(x1, y1) && grid[y1 * w + x1] === EMPTY) { swap(i, y1 * w + x1, x, y, x1, y1); x += dx; continue; }
+                        const x2 = x + f2x, y2 = y + f2y;
+                        if (inBounds(x2, y2) && grid[y2 * w + x2] === EMPTY) { swap(i, y2 * w + x2, x, y, x2, y2); x += dx; continue; }
                     }
-                    const side = bit() ? 1 : -1;
-                    let t = flowTarget(x, y, side);
-                    if (t < 0) t = flowTarget(x, y, -side);
-                    if (t >= 0) { swap(i, y * w + t, x, y, t, y); x += dx; continue; }
+                    const pFirst = bit() !== 0;
+                    const sx = pFirst ? px : -px, sy = pFirst ? py : -py;
+                    let t = flowTarget(x, y, sx, sy);
+                    if (t < 0) t = flowTarget(x, y, -sx, -sy);
+                    if (t >= 0) { swap(i, t, x, y, t % w, (t / w) | 0); x += dx; continue; }
                 }
                 x += dx;
             }
@@ -492,6 +536,17 @@ export function createSandReference({ width, height, seed = 1 }) {
             }
             if (any) recomputeActive();
         },
+        // R17
+        tilt(gx2, gy2) {
+            gx2 |= 0; gy2 |= 0;
+            if (gx2 < -1 || gx2 > 1 || gy2 < -1 || gy2 > 1 || (gx2 === 0 && gy2 === 0)) {
+                throw new RangeError('tilt: gravity must be a ring direction, got ' + gx2 + ',' + gy2);
+            }
+            if (gx2 === gx && gy2 === gy) return;
+            setGravity(RING.findIndex(([rx, ry]) => rx === gx2 && ry === gy2));
+            active.fill(1);
+        },
+        gravity() { return [gx, gy]; },
         get(x, y) {
             x |= 0; y |= 0;
             if (x < 0 || y < 0 || x >= w || y >= h) return EMPTY;
