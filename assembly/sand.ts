@@ -99,6 +99,26 @@ let rng: u32 = 1;
 let stepIndex: i32 = 0;
 let lastMoves: i32 = 0;
 
+// R17 — gravity, one of the eight ring directions; (0,1) is down. "Below"
+// is (x+gx, y+gy); the two diagonals R4/R5 try are its neighbours on the
+// ring, a first (the one bit()=1 picks) and b; the flow directions R5 walks
+// are the two across gravity, p first when bit()=1. All set by tilt().
+let gx: i32 = 0, gy: i32 = 1;
+let ax: i32 = 1, ay: i32 = 1;
+let bx: i32 = -1, by: i32 = 1;
+let px: i32 = 1, py: i32 = 0;
+
+// The 8-ring, clockwise from (1,0) with y down. Index k = 2 is (0,1).
+const RING = memory.data<i8>([1, 0, 1, 1, 0, 1, -1, 1, -1, 0, -1, -1, 0, -1, 1, -1]);
+function ringX(k: i32): i32 { return <i32>load<i8>(RING + <usize>(((k & 7) << 1))); }
+function ringY(k: i32): i32 { return <i32>load<i8>(RING + <usize>(((k & 7) << 1) + 1)); }
+function setGravity(k: i32): void {
+  gx = ringX(k); gy = ringY(k);
+  ax = ringX(k - 1); ay = ringY(k - 1);
+  bx = ringX(k + 1); by = ringY(k + 1);
+  px = ringX(k - 2); py = ringY(k - 2);
+}
+
 function align16(p: usize): usize {
   return (p + 15) & ~<usize>15;
 }
@@ -167,18 +187,23 @@ function sandCanEnter(j: i32): bool {
   return m == EMPTY || (m == WATER && load<u8>(moved + <usize>j) == 0);
 }
 
-// R5 FLOW — the x of the first EMPTY cell within FLOW of (x,y) in direction
-// `side` that has an EMPTY cell below it, or -1.
-function flowTarget(x: i32, y: i32, side: i32): i32 {
-  if (y + 1 >= h) return -1;
-  const row = y * w;
+// R5 FLOW — the index of the first EMPTY cell within FLOW of (x,y) along
+// (sx,sy), a direction across gravity, that has an EMPTY cell below it
+// (below in gravity's sense), or -1.
+function flowTarget(x: i32, y: i32, sx: i32, sy: i32): i32 {
   for (let d = 1; d <= FLOW; d++) {
-    const xx = x + side * d;
-    if (xx < 0 || xx >= w) return -1;
-    if (load<u8>(grid + <usize>(row + xx)) != EMPTY) return -1;
-    if (load<u8>(grid + <usize>(row + w + xx)) == EMPTY) return xx;
+    const xx = x + sx * d, yy = y + sy * d;
+    if (xx < 0 || xx >= w || yy < 0 || yy >= h) return -1;
+    if (load<u8>(grid + <usize>(yy * w + xx)) != EMPTY) return -1;
+    const ux = xx + gx, uy = yy + gy;
+    if (ux >= 0 && ux < w && uy >= 0 && uy < h && load<u8>(grid + <usize>(uy * w + ux)) == EMPTY) return yy * w + xx;
   }
   return -1;
+}
+
+@inline
+function inBounds(x: i32, y: i32): bool {
+  return x >= 0 && x < w && y >= 0 && y < h;
 }
 
 // R8 — active = changed dilated by one chunk in every direction.
@@ -211,12 +236,20 @@ function stepOnce(): void {
   memory.fill(moved, 0, <usize>n);
   memory.fill(changed, 0, <usize>nc);
   lastMoves = 0;
-  for (let y = h - 1; y >= 0; y--) {
-    const below = y + 1 < h;
+  // R2/R17 — scan front first: rows from the end gravity points to, and
+  // columns from that end when gravity has a sideways part; otherwise the
+  // columns alternate per row (and, with no downward part, the rows
+  // alternate per step) so nothing leans that gravity does not.
+  const yFixed = gy != 0;
+  const yDown = yFixed ? gy > 0 : (stepIndex & 1) == 0;
+  const y0 = yDown ? h - 1 : 0, ys = yDown ? -1 : 1;
+  for (let y = y0; y >= 0 && y < h; y += ys) {
     const crow = (y / CHUNK) * cw;
-    const ltr = ((stepIndex + y) & 1) == 0;                // R2
+    const ltr = gx != 0 ? gx < 0 : ((stepIndex + y) & 1) == 0;
     let x = ltr ? 0 : w - 1;
     const dx = ltr ? 1 : -1;
+    const uy = y + gy;
+    const belowRow = uy >= 0 && uy < h;
     while (x >= 0 && x < w) {
       // R8 — skip a whole inactive chunk in one hop.
       if (load<u8>(active + <usize>(crow + x / CHUNK)) == 0) {
@@ -226,27 +259,36 @@ function stepOnce(): void {
       const i = y * w + x;
       const m = load<u8>(grid + <usize>i);
       if (isSand(m) && load<u8>(moved + <usize>i) == 0) {
-        if (below) {
-          const j = i + w;
-          if (sandCanEnter(j)) { swap(i, j, x, y, x, y + 1); x += dx; continue; }
-          const first: i32 = bit() ? 1 : -1;
-          const x1 = x + first, x2 = x - first;
-          if (x1 >= 0 && x1 < w && sandCanEnter(j + first)) { swap(i, j + first, x, y, x1, y + 1); x += dx; continue; }
-          if (x2 >= 0 && x2 < w && sandCanEnter(j - first)) { swap(i, j - first, x, y, x2, y + 1); x += dx; continue; }
+        const ux = x + gx;
+        if (belowRow && ux >= 0 && ux < w) {
+          const j = uy * w + ux;
+          if (sandCanEnter(j)) { swap(i, j, x, y, ux, uy); x += dx; continue; }
+          const aFirst = bit() != 0;
+          const f1x = aFirst ? ax : bx, f1y = aFirst ? ay : by;
+          const f2x = aFirst ? bx : ax, f2y = aFirst ? by : ay;
+          const x1 = x + f1x, y1 = y + f1y;
+          if (inBounds(x1, y1) && sandCanEnter(y1 * w + x1)) { swap(i, y1 * w + x1, x, y, x1, y1); x += dx; continue; }
+          const x2 = x + f2x, y2 = y + f2y;
+          if (inBounds(x2, y2) && sandCanEnter(y2 * w + x2)) { swap(i, y2 * w + x2, x, y, x2, y2); x += dx; continue; }
         }
       } else if (m == WATER && load<u8>(moved + <usize>i) == 0) {
-        if (below) {
-          const j = i + w;
-          if (load<u8>(grid + <usize>j) == EMPTY) { swap(i, j, x, y, x, y + 1); x += dx; continue; }
-          const first: i32 = bit() ? 1 : -1;
-          const x1 = x + first, x2 = x - first;
-          if (x1 >= 0 && x1 < w && load<u8>(grid + <usize>(j + first)) == EMPTY) { swap(i, j + first, x, y, x1, y + 1); x += dx; continue; }
-          if (x2 >= 0 && x2 < w && load<u8>(grid + <usize>(j - first)) == EMPTY) { swap(i, j - first, x, y, x2, y + 1); x += dx; continue; }
+        const ux = x + gx;
+        if (belowRow && ux >= 0 && ux < w) {
+          const j = uy * w + ux;
+          if (load<u8>(grid + <usize>j) == EMPTY) { swap(i, j, x, y, ux, uy); x += dx; continue; }
+          const aFirst = bit() != 0;
+          const f1x = aFirst ? ax : bx, f1y = aFirst ? ay : by;
+          const f2x = aFirst ? bx : ax, f2y = aFirst ? by : ay;
+          const x1 = x + f1x, y1 = y + f1y;
+          if (inBounds(x1, y1) && load<u8>(grid + <usize>(y1 * w + x1)) == EMPTY) { swap(i, y1 * w + x1, x, y, x1, y1); x += dx; continue; }
+          const x2 = x + f2x, y2 = y + f2y;
+          if (inBounds(x2, y2) && load<u8>(grid + <usize>(y2 * w + x2)) == EMPTY) { swap(i, y2 * w + x2, x, y, x2, y2); x += dx; continue; }
         }
-        const side: i32 = bit() ? 1 : -1;
-        let t = flowTarget(x, y, side);
-        if (t < 0) t = flowTarget(x, y, -side);
-        if (t >= 0) { swap(i, y * w + t, x, y, t, y); x += dx; continue; }
+        const pFirst = bit() != 0;
+        const sx = pFirst ? px : -px, sy = pFirst ? py : -py;
+        let t = flowTarget(x, y, sx, sy);
+        if (t < 0) t = flowTarget(x, y, -sx, -sy);
+        if (t >= 0) { swap(i, t, x, y, t % w, t / w); x += dx; continue; }
       }
       x += dx;
     }
@@ -283,9 +325,25 @@ export function init(width: i32, height: i32, seed: u32): i32 {
   rng = seed != 0 ? seed : 0x9E3779B9;                   // R7
   stepIndex = 0;
   lastMoves = 0;
+  setGravity(2);                                         // R17: down
   for (let i = 0; i < n; i++) setPixel(i, EMPTY);
   return 1;
 }
+
+// R17 — tilt the jar: gravity becomes (gx, gy), each in -1..1, not both 0.
+// Anything else is a no-op (the wrapper throws first). Every chunk wakes,
+// so the whole picture re-settles under the new gravity.
+export function tilt(x: i32, y: i32): void {
+  if (x < -1 || x > 1 || y < -1 || y > 1 || (x == 0 && y == 0)) return;
+  if (x == gx && y == gy) return;
+  for (let k = 0; k < 8; k++) {
+    if (ringX(k) == x && ringY(k) == y) { setGravity(k); break; }
+  }
+  memory.fill(active, 1, <usize>nc);
+}
+
+export function gravityX(): i32 { return gx; }
+export function gravityY(): i32 { return gy; }
 
 export function step(count: i32): void {
   for (let k = 0; k < count; k++) stepOnce();

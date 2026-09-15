@@ -22,6 +22,7 @@
  *   const sim = await sand.create({ width: 256, height: 384, seed });
  *   sim.paint(sand.tint(5), x, y, 3);   // coloured sand; sand.materials.WATER, .WALL, .EMPTY
  *   sim.nudge(x, y, 6, 0, -4);          // the stick: shove what is under it
+ *   sim.tilt(1, 1);                     // tilt the jar: gravity down-right; (0, 1) is upright
  *   saved = sim.grid.slice();           // … later: sim.load(saved) — share codes, replays
  *   sim.step();                         // inside your Arcade.loop tick
  *   ctx.putImageData(new ImageData(sim.pixels, sim.width, sim.height), 0, 0);
@@ -170,6 +171,21 @@
                 if (!isMaterial(from) || !isMaterial(to)) throw new RangeError('replace: unknown material ' + (isMaterial(from) ? to : from));
                 ex.replace(from, to, x | 0, y | 0, r | 0);
             },
+            // Tilt the jar (R17): gravity becomes (gx, gy), each -1, 0 or 1
+            // and not both 0 — the eight directions of the ring, (0, 1)
+            // being upright. A change wakes every chunk so the picture
+            // re-settles; the same gravity again is a no-op. init() starts
+            // upright; clear() and load() leave it, so a host that saves a
+            // tilted jar saves the tilt beside the grid.
+            tilt: function (gx, gy) {
+                alive();
+                gx |= 0; gy |= 0;
+                if (gx < -1 || gx > 1 || gy < -1 || gy > 1 || (gx === 0 && gy === 0)) {
+                    throw new RangeError('tilt: gravity must be one of the eight ring directions, got ' + gx + ',' + gy);
+                }
+                ex.tilt(gx, gy);
+            },
+            gravity: function () { alive(); return [ex.gravityX(), ex.gravityY()]; },
             get: function (x, y) { alive(); return ex.get(x | 0, y | 0); },
             quiet: function () { alive(); return ex.quiet() !== 0; },
             activeCells: function () { alive(); return ex.activeCells(); },

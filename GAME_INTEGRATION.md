@@ -1286,8 +1286,9 @@ The contract every kernel keeps, and every host must honour:
 
 Kernels available: **`Arcade.sim.sand`** — a falling-sand automaton with 32
 sand tints, water and wall, `paint`/`nudge`/`stir`/`replace`/`load`/`clear`/
-`reseed`/`setPalette` (single or batch), `get`/`quiet`/`activeCells`,
-`pixels`/`grid`. Full surface in the 3.15.0 entry
+`reseed`/`setPalette` (single or batch), `tilt`/`gravity` (3.16.0: the jar
+tilted so gravity is any of the eight ring directions), `get`/`quiet`/
+`activeCells`, `pixels`/`grid`. Full surface in the 3.15.0 and 3.16.0 entries
 of `sdk/CHANGELOG.md`; the rules are specified by
 `tools/sim/sand-reference.mjs` and pinned byte-for-byte by
 `tools/sim-sand-unit.mjs`.

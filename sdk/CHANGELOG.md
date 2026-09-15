@@ -32,6 +32,25 @@ semver is for humans and URLs, never checked on the wire.
 
 ---
 
+## 3.16.0
+
+Additive, to the sand kernel companion (`arcade-sim-sand.js` + `.wasm`):
+**`sim.tilt(gx, gy)`** tilts the jar — gravity becomes any of the eight
+ring directions, each of `gx`, `gy` in -1..1 and not both 0, `(0, 1)`
+being upright — and **`sim.gravity()`** reads it back as `[gx, gy]`. A
+change wakes every chunk so the picture re-settles; the same direction
+again is a no-op; a direction off the ring is a `RangeError` from the
+wrapper. `init()` starts upright; `clear()` and `load()` leave gravity
+alone, so a host that saves a tilted jar saves the tilt beside the grid.
+Rule R17 in `tools/sim/sand-reference.mjs`: "below" is `(x+gx, y+gy)`,
+the diagonals are gravity's neighbours on the ring, water flows across
+gravity, and the scan goes front first from the end gravity points to.
+With gravity upright every rule reads exactly as before, and the
+pinned hashes prove it; `tools/sim-sand-unit.mjs` gains a tilting script
+through every gate and a Gate H for the edges. Petra's sloped layers
+(sand-art#3) are the first consumer. No SDK surface changes; the SDK
+semver moves with the kernel it documents.
+
 ## 3.15.0
 
 Additive: **the first compiled simulation kernel** — a new optional companion
