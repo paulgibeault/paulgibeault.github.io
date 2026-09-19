@@ -91,11 +91,11 @@ try {
     // 1. the contract arrives
     const hello = await frame.evaluate(() => ({
         caps: Arcade.peer.caps(), available: Arcade.motion.available(),
-        master: Arcade.settings.motion(), running: Arcade.motion.running()
+        running: Arcade.motion.running()
     }));
     check('welcome advertises motion.bridge', hello.caps.includes('motion.bridge'), JSON.stringify(hello.caps));
-    check('available() is true on a touch device; settings.motion() true; not running',
-        hello.available === true && hello.master === true && hello.running === false, JSON.stringify(hello));
+    check('available() is true on a touch device; not running',
+        hello.available === true && hello.running === false, JSON.stringify(hello));
     check('idle: the launcher is not listening to the sensor',
         await page.evaluate(() => window.__arcade.motion.snapshot().listening === false));
     check('idle: no top-bar mark', await page.evaluate(() => document.getElementById('game-motion-mark').hidden));
@@ -228,14 +228,14 @@ try {
     // 9. the master switch
     await page.click('#menu-motion-master');
     await poll(frame, () => Arcade.motion.available() === false);
-    const off = await Promise.all([frame, frame2].map(f => f.evaluate(() => ({ a: Arcade.motion.available(), m: Arcade.settings.motion() }))));
-    check('master Off: available() false for every game; settings.motion() false',
-        off.every(o => o.a === false && o.m === false), JSON.stringify(off));
+    const off = await Promise.all([frame, frame2].map(f => f.evaluate(() => ({ a: Arcade.motion.available() }))));
+    check('master Off: available() false for every game',
+        off.every(o => o.a === false), JSON.stringify(off));
     check('master Off: label says so and the rows are disabled', await page.evaluate((sel) =>
         document.getElementById('menu-motion-master-label').textContent === 'Motion Off'
         && document.querySelector(sel).disabled === true, row));
     await page.click('#menu-motion-master');
-    check('master back On: available() returns', (await poll(frame, () => Arcade.motion.available() && Arcade.settings.motion())) === true);
+    check('master back On: available() returns', (await poll(frame, () => Arcade.motion.available())) === true);
     await page.keyboard.press('Escape');
 
     // 10. a reloaded launcher remembers; a fresh frame starts dialog-free

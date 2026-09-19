@@ -2031,13 +2031,6 @@
             const av = readGlobal('audioVolume', null);
             const hd = readGlobal('handedness', null);
             const ps = readGlobal('powerSaver', null);
-            // The Motion section's master switch (launcher-owned _meta, not
-            // a global.* key: a game must not be able to write it).
-            let motionOn = true;
-            try {
-                const m = JSON.parse(localStorage.getItem('arcade.v1._meta.motion'));
-                if (m && m.enabled === false) motionOn = false;
-            } catch (e) {}
             return {
                 fontScale: fs,
                 theme: (th === 'light' || th === 'dark') ? th : defaultTheme(),
@@ -2045,8 +2038,7 @@
                 audioVolume: (typeof av === 'number' && isFinite(av))
                     ? Math.max(0, Math.min(1, av)) : 1,
                 handedness: (hd === 'left' || hd === 'right') ? hd : 'right',
-                powerSaver: typeof ps === 'boolean' ? ps : false,
-                motion: motionOn
+                powerSaver: typeof ps === 'boolean' ? ps : false
             };
         }
         window.__arcade.broadcastSettings = function () {
@@ -2698,8 +2690,6 @@
         getGameName: motionName,
         onPoolChanged: window.__arcade.pool.onPoolChanged,
         openSettings: () => { if (window.__arcade.openLauncherMenu) window.__arcade.openLauncherMenu(); },
-        // The master switch is also Arcade.settings.motion() — re-broadcast.
-        onMasterChanged: () => window.__arcade.broadcastSettings(),
         els: {
             section: document.getElementById('menu-motion-section'),
             master: document.getElementById('menu-motion-master'),

@@ -48,8 +48,9 @@ Framed, motion is **brokered by the launcher** behind the new cap
 **`motion.bridge`**: a game frame has no `accelerometer`/`gyroscope`
 permission, so the launcher owns the one `deviceorientation` listener and the
 consent (asked once per game, remembered, revocable in the launcher menu's
-new *Motion* section, which also holds a master switch — surfaced as
-**`Arcade.settings.motion()`**), and streams samples to the active app only.
+new *Motion* section, which also holds a master switch), and streams samples
+to the active app only. Both switches reach a game as `available()` and
+`onChange` — there is deliberately no separate settings accessor.
 Wire: `arcade:motion.op { op: 'start'|'stop', id, hz }` →
 `arcade:bridge.result`; `arcade:motion.sample { x, y, z, t }`;
 `arcade:motion.state { enabled }` and `welcome.motion.enabled`. Standalone,

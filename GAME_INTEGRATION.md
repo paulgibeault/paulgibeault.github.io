@@ -377,7 +377,6 @@ every change. The SDK applies the visual ones to the game's `<html>` for free:
 | `reducedMotion`  | `Arcade.settings.reducedMotion()`   | `data-reduced-motion="true|false"` + `style="--motion-scale: 0"` (1 otherwise) |
 | `audioVolume`    | `Arcade.settings.audioVolume()`     | `style="--audio-volume: <0..1>"` (read in JS) — or just use `Arcade.audio` (below), which honours it for you |
 | `handedness`     | `Arcade.settings.handedness()`      | `data-handedness="left"` or `data-handedness="right"` |
-| `motion` (SDK 3.17.0+) | `Arcade.settings.motion()` | none — the launcher's Motion master switch; games read `Arcade.motion.available()` instead (§7f), which also folds in the per-game toggle |
 | `powerSaver` (SDK 3.13.0+) | `Arcade.settings.powerSaver()`      | `data-power-saver="true|false"` + `--arcade-pulse-count: 3` normally, `1` under power saver, `0` under reduced motion (what the game observes under reduced motion is `1`, not `0` — see the bullet below) |
 
 - [ ] **Sound effects → `Arcade.audio`.** Don't hand-roll an AudioContext — the SDK owns the foot-guns (lazy ctx, first-gesture unlock, master gain wired to `audioVolume`, suspend-on-hide/resume-on-return, and the exponentialRamp-from-zero crash). Register cues and play them:
@@ -1349,8 +1348,8 @@ Arcade.motion.stop();                                 // and off() to unsubscrib
   `c.reset()`.
 - **`available()`** is false when the launcher lacks the cap, the device
   has no plausible sensor (no touch screen, insecure context), the player
-  turned the launcher's **Motion** master switch off
-  (`Arcade.settings.motion()`), or turned *your* row off there. Read it after
+  turned the launcher's **Motion** master switch off, or turned *your* row
+  off there. Read it after
   `Arcade.ready`; **`Arcade.motion.onChange(fn)`** fires `{ available,
   running }` when a switch flips or a stream starts or ends — a row turned
   off mid-stream ends your stream at once, so follow it rather than showing

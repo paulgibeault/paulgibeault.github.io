@@ -12,7 +12,7 @@ import { readFile } from 'node:fs/promises';
 import {
     screenGravity, normalizeScreenAngle, isFlat, clampHz, createThrottle,
     createCompass, sensorPlausible, normalizeConsent, decideStart, enabledFor,
-    withAnswer, withUse, withMaster, validateMotionOp,
+    withAnswer, withMaster, validateMotionOp,
     FLAT_LENGTH, FIRST_EVENT_TIMEOUT_MS
 } from '../arcade-motion-core.js';
 import { initMotionBridge } from '../arcade-motion-bridge.js';
@@ -174,8 +174,6 @@ console.log('\nconsent');
     const c3 = withMaster(c1, false);
     ok(decideStart(c3, 'tilt-game') === 'off' && decideStart(c3, 'never-asked') === 'off', 'master off: off for every game');
     ok(decideStart(withMaster(c3, true), 'tilt-game') === 'allow', 'master back on re-arms the dialog-free path');
-    ok(withUse(c1, 'tilt-game', 5000).games['tilt-game'].at === 5000, 'withUse stamps last-used');
-    ok(withUse(c2, 'tilt-game', 5000).games['tilt-game'].at === 2000, '…but not on an Off row');
     ok(Object.keys(withAnswer(c0, '../evil', true, 1).games).length === 0, 'a malformed gameId is never stored');
     const dirty = normalizeConsent({ enabled: 'no', games: { ok: { allowed: true, at: 'x' }, bad: { allowed: 'yes' }, '__proto__': { allowed: true }, 'a b': { allowed: true } } });
     ok(dirty.enabled === true && JSON.stringify(dirty.games) === '{"ok":{"allowed":true,"at":0}}', 'normalizeConsent drops malformed rows, keeps good ones');

@@ -139,7 +139,6 @@ Arcade.settings.reducedMotion()       // boolean
 Arcade.settings.audioVolume()         // 0..1
 Arcade.settings.handedness()          // 'left' | 'right'
 Arcade.settings.powerSaver()          // boolean — user asked to trim battery use
-Arcade.settings.motion()              // boolean — the launcher's Motion master switch (3.17.0+)
 Arcade.onSettingsChange(fn)           // fires when launcher updates a setting
 
 // AUDIO — SDK owns the AudioContext, gesture unlock, volume, suspend/resume
@@ -222,7 +221,7 @@ child → parent:  { type: 'arcade:hello',   gameId }
 parent → child:  { type: 'arcade:welcome', peerStatus: 'idle',
                    caps: ['peer.sendTo', 'peer.roster', 'peer.meta', 'peer.party', 'peer.invite', 'storage.bridge', 'ui.bridge', 'configs.bridge', 'motion.bridge'],  // capability flags (absent ⇒ [])
                    peers: [{ deviceId, name, status, direct }, ...],   // live remote devices (roster seed)
-                   settings: { fontScale, theme, reducedMotion, audioVolume, handedness, powerSaver, motion },
+                   settings: { fontScale, theme, reducedMotion, audioVolume, handedness, powerSaver },
                    motion: { enabled },                                // is motion offered to THIS app (sensor plausible,
                                                                        // master switch on, its Motion row not Off)
                    state: { '<fullKey>': '<raw string>', ... } }       // storage-bridge snapshot: the app's own

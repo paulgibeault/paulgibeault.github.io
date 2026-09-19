@@ -26,8 +26,7 @@
  *   the OK click — the gesture iOS's requestPermission() needs], showToast,
  *   getActiveGameId(), getMountedGameIds(), getGameName(gameId) [catalog
  *   name], onPoolChanged(fn),
- *   openSettings() [open the menu], onMasterChanged() [re-broadcast
- *   settings — the master switch is Arcade.settings.motion()], and `els`
+ *   openSettings() [open the menu], and `els`
  *   { section, master, masterLabel, list, mark } for the menu section and the
  *   top-bar mark. `env` (optional) overrides window/document/navigator/
  *   localStorage for tests.
@@ -35,7 +34,7 @@
 import { KEY_PREFIX } from './arcade-storage-core.js';
 import {
     screenGravity, createThrottle, sensorPlausible, validateMotionOp,
-    normalizeConsent, decideStart, enabledFor, withAnswer, withUse, withMaster,
+    normalizeConsent, decideStart, enabledFor, withAnswer, withMaster,
     FIRST_EVENT_TIMEOUT_MS
 } from './arcade-motion-core.js';
 
@@ -224,7 +223,6 @@ export function initMotionBridge(host) {
             return reply(gameId, op.id, 'unavailable');
         }
         if (!started.has(gameId)) return reply(gameId, op.id, 'denied'); // stopped or switched off meanwhile
-        writeConsent(withUse(readConsent(), gameId, Date.now()));
         reevaluate();
         reply(gameId, op.id, 'granted');
     }
@@ -261,7 +259,6 @@ export function initMotionBridge(host) {
 
     function setMaster(enabled) {
         writeConsent(withMaster(readConsent(), enabled));
-        if (host.onMasterChanged) host.onMasterChanged();
         consentChanged();
     }
     function setGame(gameId, allowed) {
@@ -270,14 +267,6 @@ export function initMotionBridge(host) {
     }
 
     // ─── The Motion section + the top-bar mark ─────────────────────────
-    function lastUsed(at) {
-        if (!at) return '';
-        const days = Math.floor((Date.now() - at) / 86400000);
-        if (days <= 0) return 'used today';
-        if (days === 1) return 'used yesterday';
-        return 'used ' + days + ' days ago';
-    }
-
     let scrollTarget = null;
     const rows = new Map(); // gameId → its switch button
     function render() {
@@ -336,7 +325,7 @@ export function initMotionBridge(host) {
             btn.firstChild.textContent = host.getGameName(gid) || gid;
             btn.lastChild.textContent = row.allowed ? 'Allowed' : 'Off';
             btn.title = row.allowed
-                ? ('Motion allowed' + (row.at ? ' — ' + lastUsed(row.at) : '') + '. Tap to turn off.')
+                ? 'Motion allowed for this game. Tap to turn off.'
                 : 'Motion off for this game. Tap to allow.';
             els.list.appendChild(btn); // (re)append in sorted order; a no-op move when already there
             if (scrollTarget === gid) {

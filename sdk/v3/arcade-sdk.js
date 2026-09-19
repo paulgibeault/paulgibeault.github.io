@@ -76,7 +76,7 @@
  *
  *   // Settings — pushed by launcher; SDK auto-applies CSS hooks
  *   Arcade.settings.fontScale | theme | reducedMotion | audioVolume | handedness
- *   Arcade.settings.powerSaver | motion
+ *   Arcade.settings.powerSaver
  *   Arcade.motion.available() | start({hz}) | on(fn) | stop() | onChange(fn)
  *   Arcade.motion.compass(n, opts)     (gravity in screen axes — §7f)
  *   Arcade.settings.snapshot()
@@ -240,10 +240,7 @@
         reducedMotion: false,
         audioVolume: 1,
         handedness: 'right',
-        powerSaver: false,
-        // The launcher's Motion master switch. True standalone: there is no
-        // launcher menu to turn it off in, and the OS prompt is the consent.
-        motion: true
+        powerSaver: false
     };
 
     var listeners = {
@@ -834,8 +831,7 @@
             reducedMotion: settings.reducedMotion,
             audioVolume: settings.audioVolume,
             handedness: settings.handedness,
-            powerSaver: settings.powerSaver,
-            motion: settings.motion
+            powerSaver: settings.powerSaver
         };
     }
     function applySettings(incoming) {
@@ -866,10 +862,6 @@
         if (typeof incoming.powerSaver === 'boolean'
                 && incoming.powerSaver !== settings.powerSaver) {
             settings.powerSaver = incoming.powerSaver; changed = true;
-        }
-        if (typeof incoming.motion === 'boolean'
-                && incoming.motion !== settings.motion) {
-            settings.motion = incoming.motion; changed = true;
         }
         applySettingsToDOM();
         return changed;
@@ -2208,7 +2200,6 @@
         audioVolume: function () { return settings.audioVolume; },
         handedness: function () { return settings.handedness; },
         powerSaver: function () { return settings.powerSaver; },
-        motion: function () { return settings.motion; },
         snapshot: snapshotSettings
     };
 

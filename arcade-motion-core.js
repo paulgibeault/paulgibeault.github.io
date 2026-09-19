@@ -169,7 +169,7 @@ export function sensorPlausible(env) {
 /* ─── Consent ────────────────────────────────────────────────────────
  * The stored record (arcade.v1._meta.motion, launcher-owned, outside every
  * game's namespace):
- *     { enabled: bool, games: { <gameId>: { allowed: bool, at: ms } } }
+ *     { enabled: bool, games: { <gameId>: { allowed: bool, at: ms } } }   (at = when answered)
  * `enabled` is the master switch (default on). A game has a row only once
  * the player has ANSWERED for it: Allow writes allowed:true, the Motion
  * section's toggle writes either. "Not now" writes nothing — it is not a
@@ -228,14 +228,6 @@ export function withAnswer(consent, gameId, allowed, now) {
     const next = normalizeConsent(consent);
     if (!GAME_ID_RE.test(gameId)) return next;
     next.games[gameId] = { allowed: !!allowed, at: (typeof now === 'number') ? now : 0 };
-    return next;
-}
-
-/** Stamp "last used" without changing the answer. */
-export function withUse(consent, gameId, now) {
-    const next = normalizeConsent(consent);
-    const row = next.games[gameId];
-    if (row && row.allowed) row.at = now;
     return next;
 }
 

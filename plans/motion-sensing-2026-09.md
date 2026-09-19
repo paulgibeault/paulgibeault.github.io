@@ -79,7 +79,12 @@ below):
 9. **Shape rules live in the core** (`validateMotionOp`) rather than
    `arcade-envelope.js`, so the whole feature's pure half is one file with
    one unit suite.
-10. **Desk findings worth keeping** (Chromium 147, headless): an opaque
+10. **Cut after a value review (2026-09-18):** `Arcade.settings.motion()` —
+    no consumer, and `available()` + `onChange` already carry both switches,
+    so it would have been permanent public surface for nothing; and the
+    "last used" stamp — a localStorage write per start for a tooltip touch
+    users never see. `at` stays as "when answered".
+11. **Desk findings worth keeping** (Chromium 147, headless): an opaque
     sandboxed frame *without* `allow` receives zero orientation events; with
     `allow="accelerometer; gyroscope; magnetometer"` but no granted
     permission it receives exactly one all-null event. The bridge and SDK
@@ -178,7 +183,7 @@ Arcade.motion.onChange(({ available, running }) => …); // a Motion switch flip
   the launcher also streams only to the active app, so a pooled frame is
   silent twice over.
 - **Settings.** The launcher's *Motion* section: a master switch (default
-  on) surfaced as `Arcade.settings.motion()`, and a per-game toggle for
+  on), and a per-game toggle for
   every game that has asked. Either one off ⇒ that game's `available()` is
   false and a running stream stops at once. It is independent of
   `reducedMotion`, which is about what the screen does, not what the hand
@@ -236,7 +241,7 @@ Launcher side (`arcade-motion-core.js` pure + `arcade-motion-bridge.js`):
 | **WP0** | **Hardware probe.** A page in the launcher's diag view that shows raw `beta/gamma`, `screen.orientation.angle`, the derived vector, event rate, and the result of `requestPermission()` — top level, and from a sandboxed frame with and without `allow`. Run on an iPhone (Safari, installed PWA) and an Android phone. Settles: the landscape sign convention (the parked red test), whether iOS re-prompts per page load, real event rates, and records *why* we broker. | launcher | S | findings written into §0 here; needs Paul's phones, HTTPS (deployed diag page) |
 | WP1 | Pure core: orientation → screen gravity for all four angles; throttle; `compass()`; consent state machine. | `arcade-motion-core.js`, `tools/motion-unit.mjs` | S | unit tier |
 | WP2 | Launcher bridge, consent dialog, remembered + revocable answers, the *Motion* menu section + top-bar mark, cap `motion.bridge`. | `arcade-motion-bridge.js`, `arcade-router.js`, `index.html` | M | caps-contract unit (`tools/caps-contract-unit.mjs:29`), repo gates |
-| WP3 | SDK `Arcade.motion` — framed via bridge, standalone direct, suspend/resume, `settings.motion()`; 3.17.0 changelog; GAME_INTEGRATION §7f, §14 wire table, §13 checklist line; ARCADE_PLATFORM caps list. | `arcade-sdk.js` + `sdk/v3/` | M | sdk-version unit |
+| WP3 | SDK `Arcade.motion` — framed via bridge, standalone direct, suspend/resume; 3.17.0 changelog; GAME_INTEGRATION §7f, §14 wire table, §13 checklist line; ARCADE_PLATFORM caps list. | `arcade-sdk.js` + `sdk/v3/` | M | sdk-version unit |
 | WP4 | `tools/motion-acceptance.mjs`: Playwright + CDP `DeviceOrientation.setDeviceOrientationOverride` — cap advertised; dialog allow/deny; samples reach only the active frame; silence after suspend/stop; settings switch; standalone path. `tools/acceptance.mjs` check 11 learns the new cap. | launcher | M | CI acceptance step |
 | WP5 | **Sand Art: a "Phone" state on the Tilt chip** using `Arcade.motion.compass(8)` → `sim.tilt()`. The parked `phone-tilt` branch's maths moves to WP1; the game keeps only the chip. README "The hand" and the Library's Petra entry gain a sentence. | sand-art | S | its tests; on-phone check |
 | WP6 | **True gyro, soon after v1**: `devicemotion` rotation rate and user acceleration on the same sample (`m.rate {x,y,z}` °/s in screen axes, `m.accel`), a fused attitude that does not drift or gimbal-lock (quaternion, complementary filter — §7), `shake`/`twist` detectors as helpers. Sign normalisation per platform from WP0's table. Second consumers (a marble-style tilt in Shui Guo Tan is the obvious one). | launcher core + SDK | M | unit KATs from recorded traces; acceptance via CDP |
@@ -249,7 +254,7 @@ time after, since the chip state is gated on `available()`.
 ## 6. Where the toggle lives (decision 2)
 
 - **Launcher menu → Motion.** Master switch; then a row per game that has
-  ever asked: name, *Allowed* / *Off*, last used. Flipping a row off stops
+  ever asked: name, *Allowed* / *Off*. Flipping a row off stops
   a live stream immediately and makes the next `start()` answer `'denied'`
   without a dialog; flipping it back on re-arms the dialog-free path.
 - **In the moment.** While a game streams, a motion mark sits in the top
