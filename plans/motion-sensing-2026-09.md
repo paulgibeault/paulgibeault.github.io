@@ -90,6 +90,32 @@ below):
     permission it receives exactly one all-null event. The bridge and SDK
     therefore treat null angles as "no sensor", never as a sample.
 
+## Revision — 2026-09-19: one switch for the fleet (supersedes decision 2 and §6)
+
+After living with it for a day Paul simplified the consent UI to match the
+precedent sound and power saver set: **one toggle for the entire fleet**, no
+per-game rows, **no motion mark in the top bar**. The launcher menu's three
+fleet switches — sound, power saver, motion — now sit on one **Settings row**
+as icon switches: gold frame when on; greyed *and* a changed glyph when off
+(🔊/🔇, 🔋/🪫, a struck-through phone); the accessible name and tooltip say
+"Motion: on/off"; a tap closes the menu and raises a toast with the state in
+words. Mute stays one tap.
+
+- Storage is `{ enabled, asked }`. The first `start()` from any game raises
+  the one dialog, for every game; turning the switch on yourself counts as
+  the yes (and is the iOS gesture). The older per-game record migrates (any
+  game allowed ⇒ asked).
+- No SDK, wire or game change: `available()` / `onChange` already carried
+  "is motion offered", the launcher just gives every frame the same answer.
+- What was dropped on purpose, and when to bring it back: per-app consent and
+  the visible "this app is reading motion" mark exist because motion is a
+  side channel (tap inference, fingerprinting). For a catalog that is all the
+  arcade's own code they were ceremony; for third-party code (#42) they are
+  the point.
+
+§2's Settings bullet, §3 step 1 and §6 below describe the earlier per-game
+design and are kept as the record of it.
+
 ## 0. What is true today (code-verified)
 
 - The game frame is `sandbox="allow-scripts allow-downloads"` with

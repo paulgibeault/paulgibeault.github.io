@@ -167,73 +167,66 @@ export function sensorPlausible(env) {
 }
 
 /* ─── Consent ────────────────────────────────────────────────────────
- * The stored record (arcade.v1._meta.motion, launcher-owned, outside every
- * game's namespace):
- *     { enabled: bool, games: { <gameId>: { allowed: bool, at: ms } } }   (at = when answered)
- * `enabled` is the master switch (default on). A game has a row only once
- * the player has ANSWERED for it: Allow writes allowed:true, the Motion
- * section's toggle writes either. "Not now" writes nothing — it is not a
- * refusal, and the game may ask again from the player's next tap.
+ * One switch for the whole fleet, the way sound and power saver are — every
+ * game in the arcade is the arcade's own code, so a row per game was
+ * ceremony. The stored record (arcade.v1._meta.motion — launcher-owned, and
+ * deliberately NOT a global.* key: a game can write those, and a game must
+ * not be able to switch its own sensor on):
+ *     { enabled: bool, asked: bool }
+ * `enabled` is the Settings switch (default on, so a game's tilt control is
+ * offered and can be discovered). `asked` records that the player has said
+ * Allow — to the one-time dialog the first start() raises, or by turning the
+ * switch on themselves. "Not now" writes nothing: it is not a refusal, and a
+ * game may ask again from the player's next tap.
+ *   If the arcade ever hosts code it did not write (the multi-tenant epic),
+ * per-app consent and a visible "this app is reading motion" mark are what
+ * to bring back: motion is a known side channel (tap inference,
+ * fingerprinting). Both existed briefly; git has them.
  */
-const MAX_GAMES = 200;
-const GAME_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
-
 export function emptyConsent() {
-    return { enabled: true, games: {} };
+    return { enabled: true, asked: false };
 }
 
-/** Anything (parsed JSON, garbage, null) → a well-formed consent record. */
+/** Anything (parsed JSON, garbage, null, the older per-game record) → a well-formed record. */
 export function normalizeConsent(raw) {
     const out = emptyConsent();
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
     if (raw.enabled === false) out.enabled = false;
+    if (raw.asked === true) out.asked = true;
+    // The per-game record this replaced: any game the player allowed means
+    // the player has been asked, and said yes.
     const games = raw.games;
     if (games && typeof games === 'object' && !Array.isArray(games)) {
-        let count = 0;
         for (const id of Object.keys(games)) {
-            if (count >= MAX_GAMES) break;
-            const row = games[id];
-            if (!GAME_ID_RE.test(id) || !row || typeof row !== 'object') continue;
-            if (typeof row.allowed !== 'boolean') continue;
-            out.games[id] = {
-                allowed: row.allowed,
-                at: (typeof row.at === 'number' && isFinite(row.at)) ? row.at : 0
-            };
-            count++;
+            if (games[id] && games[id].allowed === true) { out.asked = true; break; }
         }
     }
     return out;
 }
 
 /**
- * What a start() from `gameId` should do, before any sensor is touched:
- *   'off'   — master switch off, or this game's row is Off: answer 'denied'
- *             (available() is already false for it; this is the race)
- *   'allow' — remembered Allow: no dialog
- *   'ask'   — no answer on record: the consent dialog
+ * What a start() should do, before any sensor is touched:
+ *   'off'   — the switch is off: answer 'denied' (available() is already
+ *             false; this is the race)
+ *   'allow' — the player has said yes before: no dialog
+ *   'ask'   — never asked: the one-time dialog
  */
-export function decideStart(consent, gameId) {
+export function decideStart(consent) {
     if (!consent.enabled) return 'off';
-    const row = consent.games[gameId];
-    if (!row) return 'ask';
-    return row.allowed ? 'allow' : 'off';
+    return consent.asked ? 'allow' : 'ask';
 }
 
-/** Is motion offered to this game at all (welcome.motion.enabled)? */
-export function enabledFor(consent, gameId) {
-    return decideStart(consent, gameId) !== 'off';
-}
-
-export function withAnswer(consent, gameId, allowed, now) {
+export function withAllowed(consent) {
     const next = normalizeConsent(consent);
-    if (!GAME_ID_RE.test(gameId)) return next;
-    next.games[gameId] = { allowed: !!allowed, at: (typeof now === 'number') ? now : 0 };
+    next.asked = true;
     return next;
 }
 
+/** The Settings switch. Turning it ON is itself the player saying yes. */
 export function withMaster(consent, enabled) {
     const next = normalizeConsent(consent);
     next.enabled = !!enabled;
+    if (next.enabled) next.asked = true;
     return next;
 }
 

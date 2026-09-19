@@ -193,7 +193,7 @@ Arcade.motion.compass(n, opts)            // pure: n directions, hysteresis, fla
 Arcade.context                        // { framed: boolean, version: number, sdkVersion: string, gameId }
 ```
 
-**Settings auto-apply:** on `Arcade.init()` the SDK injects a low-priority rule `:root { font-size: calc(100% * var(--font-scale, 1)); }` at the start of `<head>` and writes `--font-scale` onto `<html>` whenever the launcher pushes settings. Net effect: any rem/em-sized text in a game scales with the launcher's font setting **without code changes**. Games that explicitly set `:root { font-size: … }` themselves win the cascade and can opt back in via `var(--font-scale)` directly. Range: 0.5× – 3.0× (launcher clamp). The SDK also applies `data-theme`, `--motion-scale`, `--audio-volume`, `data-handedness`, `data-reduced-motion`, and `data-power-saver` — see GAME_INTEGRATION.md §5 for the full DOM-hook table. The injected base rule derives `--arcade-pulse-count` from the last two: 3 normally, 1 under power saver, 0 under reduced motion — though the SDK's reduced-motion kill switch separately forces `animation-iteration-count: 1 !important` on everything, so a game that has not set `data-arcade-keep-motion` on `<html>` actually resolves to one iteration at ~0s duration rather than none. **The launcher declares the same ladder itself, in `styles.css`.** That is not redundancy: the token exists only because `Arcade.init()` injects it, and the launcher never calls `init()` on its own pages — so launcher chrome consuming `var(--arcade-pulse-count, 3)` would silently resolve to the fallback `3` forever, and the Power Saver toggle would stop reaching the very chrome that ships it. Same 3/1/0 values, keyed on `data-power-saver` and the reduced-motion media query, so there is one vocabulary rather than two. Of the six settings, `fontScale`, `powerSaver`, and the iframe-pool cap have a real launcher-menu control today (`#menu-power-saver`, a Power Saver On/Off item in the launcher menu); `theme`/`reducedMotion` mirror `prefers-color-scheme`/`prefers-reduced-motion`, and `audioVolume`/`handedness` currently ship fixed defaults — there is no in-launcher toggle for them yet.
+**Settings auto-apply:** on `Arcade.init()` the SDK injects a low-priority rule `:root { font-size: calc(100% * var(--font-scale, 1)); }` at the start of `<head>` and writes `--font-scale` onto `<html>` whenever the launcher pushes settings. Net effect: any rem/em-sized text in a game scales with the launcher's font setting **without code changes**. Games that explicitly set `:root { font-size: … }` themselves win the cascade and can opt back in via `var(--font-scale)` directly. Range: 0.5× – 3.0× (launcher clamp). The SDK also applies `data-theme`, `--motion-scale`, `--audio-volume`, `data-handedness`, `data-reduced-motion`, and `data-power-saver` — see GAME_INTEGRATION.md §5 for the full DOM-hook table. The injected base rule derives `--arcade-pulse-count` from the last two: 3 normally, 1 under power saver, 0 under reduced motion — though the SDK's reduced-motion kill switch separately forces `animation-iteration-count: 1 !important` on everything, so a game that has not set `data-arcade-keep-motion` on `<html>` actually resolves to one iteration at ~0s duration rather than none. **The launcher declares the same ladder itself, in `styles.css`.** That is not redundancy: the token exists only because `Arcade.init()` injects it, and the launcher never calls `init()` on its own pages — so launcher chrome consuming `var(--arcade-pulse-count, 3)` would silently resolve to the fallback `3` forever, and the Power Saver toggle would stop reaching the very chrome that ships it. Same 3/1/0 values, keyed on `data-power-saver` and the reduced-motion media query, so there is one vocabulary rather than two. Of the six settings, `fontScale`, `powerSaver`, and the iframe-pool cap have a real launcher-menu control today (`#menu-power-saver`, an icon switch in the launcher menu's Settings row beside sound and motion); `theme`/`reducedMotion` mirror `prefers-color-scheme`/`prefers-reduced-motion`, and `audioVolume`/`handedness` currently ship fixed defaults — there is no in-launcher toggle for them yet.
 
 **Standalone mode:** `framed=false`, `peer.status()` locked at `'unavailable'`. Storage just works because of same-origin localStorage.
 
@@ -223,7 +223,7 @@ parent → child:  { type: 'arcade:welcome', peerStatus: 'idle',
                    peers: [{ deviceId, name, status, direct }, ...],   // live remote devices (roster seed)
                    settings: { fontScale, theme, reducedMotion, audioVolume, handedness, powerSaver },
                    motion: { enabled },                                // is motion offered to THIS app (sensor plausible,
-                                                                       // master switch on, its Motion row not Off)
+                                                                       // the fleet's motion switch on)
                    state: { '<fullKey>': '<raw string>', ... } }       // storage-bridge snapshot: the app's own
                                                                        // keys + global.* + _meta identity/dev
 ```
@@ -296,18 +296,24 @@ reason. The game frame's `allow` list has no `accelerometer`/`gyroscope`, so
 a game receives no `deviceorientation` events; delegating them would let any
 game read the sensor silently on Android, and motion is a known side channel
 (tap inference, fingerprinting). Instead a game asks
-(`arcade:motion.op { op: 'start', id, hz }`), the player answers once per game
-in the launcher's attributed dialog — whose **Allow** click is also the
+(`arcade:motion.op { op: 'start', id, hz }`), the player answers **once, for
+the whole arcade**, in the launcher's attributed dialog — whose **Allow** click is also the
 top-level gesture iOS's `requestPermission()` needs — and
 `arcade-motion-bridge.js` then posts `arcade:motion.sample { x, y, z, t }`
 (gravity in screen axes) to the **active** frame only, from **one** top-level
 listener that exists only while the active game has started and the page is
-visible. Answers live in `arcade.v1._meta.motion`
-(`{ enabled, games: { <gameId>: { allowed, at } } }`), launcher-owned and
-unreachable through the storage bridge; the launcher menu's **Motion**
-section is the master switch plus a toggle per game that has asked, and a
-top-bar mark shows while a game streams. *Not now* is never stored; a row set
-Off answers `'denied'` without a dialog. The pure half
+visible. The answer lives in `arcade.v1._meta.motion` (`{ enabled, asked }`),
+launcher-owned and unreachable through the storage bridge — deliberately not
+a `global.*` key, which a game could write. The control is one switch for
+the whole fleet, the way sound and power saver are: the launcher menu's
+**Settings row** holds all three as icon switches (state is the glyph's
+shape, a greyed icon, the accessible name and a toast — never colour alone),
+and turning motion on there is itself the player's yes and, on iOS, the
+gesture. *Not now* is never stored; with the switch off a `start()` answers
+`'denied'` without a dialog. There is no per-game consent and no "reading
+motion" mark in the top bar: every game in the catalog is the arcade's own
+code. They are what to bring back if the arcade ever hosts code it did not
+write (#42). The pure half
 (`arcade-motion-core.js`: the orientation → screen-gravity maths for all four
 screen angles, throttle, compass, consent rules, `validateMotionOp`) is
 pinned by `tools/motion-unit.mjs`, which also evaluates the SDK's own copy of

@@ -408,8 +408,6 @@
             font-family: var(--font-display); font-size: 0.8rem; cursor: pointer;
             transition: all 0.2s ease; display: flex; align-items: center; justify-content: center;
         }
-        /* display:flex above beats the UA's [hidden] rule — say it again. */
-        .topbar-btn[hidden] { display: none; }
         .topbar-btn:hover,
         .topbar-btn[aria-expanded="true"] {
             background: var(--field-gold); color: #000;
@@ -468,29 +466,25 @@
                 <button type="button" class="launcher-menu__btn" id="menu-font-increase" title="Increase font size" aria-label="Increase font size">A+</button>
             </div>
         </div>
+        <!-- Settings: one switch each for the whole fleet — sound, power
+             saver, motion — as icons on one row. State is never colour alone:
+             the glyph changes shape, an off switch is greyed, the accessible
+             name says "on"/"off", and the tap raises a toast that says it in
+             words (the menu closes on the tap, so the toast is the
+             confirmation). Motion is hidden on a device with no sensor. -->
         <div class="launcher-menu__section">
-            <button type="button" class="launcher-menu__item" id="menu-mute" title="Mute or unmute all game sound" aria-pressed="false">
-                <span class="launcher-menu__item-icon" aria-hidden="true" id="menu-mute-icon">🔊</span>
-                <span class="launcher-menu__item-label" id="menu-mute-label">Sound On</span>
-            </button>
-        </div>
-        <div class="launcher-menu__section">
-            <button type="button" class="launcher-menu__item" id="menu-power-saver" title="Trim battery use: attention pulses play once instead of looping, ambient effects pause, and only the active game stays loaded" aria-pressed="false">
-                <span class="launcher-menu__item-icon" aria-hidden="true" id="menu-power-saver-icon">🔋</span>
-                <span class="launcher-menu__item-label" id="menu-power-saver-label">Power Saver Off</span>
-            </button>
-        </div>
-        <!-- Motion (plans/motion-sensing-2026-09.md §6): the master switch,
-             then a row per game that has ever asked. Rendered by
-             arcade-motion-bridge.js; hidden on a device with no sensor and
-             no history. data-menu-stay keeps the menu open on a flip. -->
-        <div class="launcher-menu__section" id="menu-motion-section" hidden>
-            <div class="launcher-menu__heading">Motion</div>
-            <button type="button" class="launcher-menu__item" id="menu-motion-master" role="switch" aria-checked="true" data-menu-stay title="Let games you have allowed sense how you tilt this device">
-                <span class="launcher-menu__item-icon" aria-hidden="true">📱</span>
-                <span class="launcher-menu__item-label" id="menu-motion-master-label">Motion On</span>
-            </button>
-            <div id="menu-motion-games"></div>
+            <div class="launcher-menu__heading">Settings</div>
+            <div class="launcher-menu__row launcher-menu__row--switches">
+                <button type="button" class="launcher-menu__item launcher-menu__switch" id="menu-mute" role="switch" aria-checked="true" aria-label="Sound: on" title="Sound: on — tap to mute all game audio">
+                    <span aria-hidden="true" id="menu-mute-icon">🔊</span>
+                </button>
+                <button type="button" class="launcher-menu__item launcher-menu__switch" id="menu-power-saver" role="switch" aria-checked="false" aria-label="Power saver: off" title="Power saver: off">
+                    <span aria-hidden="true" id="menu-power-saver-icon">🔋</span>
+                </button>
+                <button type="button" class="launcher-menu__item launcher-menu__switch" id="menu-motion" role="switch" aria-checked="true" aria-label="Motion: on" title="Motion: on" hidden>
+                    <span class="launcher-menu__switch-glyph" aria-hidden="true" id="menu-motion-icon">📱</span>
+                </button>
+            </div>
         </div>
         <div class="launcher-menu__section">
             <label class="launcher-menu__inline" for="menu-pool-cap-input" title="How many recently-played games stay loaded in memory. Lower saves battery; higher gives instant relaunch.">
@@ -830,16 +824,6 @@
                  clicking any other = instant switch. -->
             <div class="game-topbar__tabs" id="game-topbar-tabs" aria-label="Open games"></div>
             <div class="game-topbar__actions">
-                <!-- Shown only while the running game is receiving motion
-                     samples; one tap from the Motion section that turns it
-                     off (arcade-motion-bridge.js). -->
-                <button type="button" class="topbar-btn topbar-btn--motion" id="game-motion-mark" hidden aria-label="This game is using motion" title="This game is using motion">
-                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <rect x="8" y="4" width="8" height="16" rx="1.5" transform="rotate(18 12 12)"/>
-                        <path d="M3.5 9a9 9 0 0 1 3-4.5"/>
-                        <path d="M20.5 15a9 9 0 0 1-3 4.5"/>
-                    </svg>
-                </button>
                 <!-- The host-side invite door (plans/tables-2026-08.md D4). A
                      scope needs both ends to agree and SOMETHING has to propose
                      first; before this button the only proposer in the product
@@ -1092,7 +1076,6 @@
         const PREV_KEY = 'arcade.v1._meta.preMuteVolume'; // launcher-internal; _meta.* never reaches games
         const btn = document.getElementById('menu-mute');
         const icon = document.getElementById('menu-mute-icon');
-        const label = document.getElementById('menu-mute-label');
         if (!btn) return;
 
         const clamp01 = (n) => Math.max(0, Math.min(1, n));
@@ -1111,9 +1094,9 @@
         function render() {
             const muted = currentVolume() <= 0;
             if (icon) icon.textContent = muted ? '🔇' : '🔊';
-            if (label) label.textContent = muted ? 'Muted' : 'Sound On';
-            btn.setAttribute('aria-pressed', muted ? 'true' : 'false');
-            btn.title = muted ? 'Sound is muted — tap to unmute all game audio' : 'Mute all game audio';
+            btn.setAttribute('aria-checked', muted ? 'false' : 'true');
+            btn.setAttribute('aria-label', muted ? 'Sound: off' : 'Sound: on');
+            btn.title = muted ? 'Sound: off — tap to unmute all game audio' : 'Sound: on — tap to mute all game audio';
         }
 
         btn.addEventListener('click', () => {
@@ -1124,6 +1107,8 @@
             } else {
                 setVolume(restoreVolume());
             }
+            // The menu closes on the tap; the toast is the confirmation.
+            if (window.__arcade.showToast) window.__arcade.showToast(currentVolume() <= 0 ? 'Sound off' : 'Sound on', { duration: 1800 });
         });
         render();
         window.__arcade.isMuted = () => currentVolume() <= 0;
@@ -1140,7 +1125,6 @@
         const KEY = 'arcade.v1.global.powerSaver';
         const btn = document.getElementById('menu-power-saver');
         const icon = document.getElementById('menu-power-saver-icon');
-        const label = document.getElementById('menu-power-saver-label');
         if (!btn) return;
 
         function readEnabled() {
@@ -1151,11 +1135,11 @@
             const on = readEnabled();
             document.documentElement.setAttribute('data-power-saver', on ? 'true' : 'false');
             if (icon) icon.textContent = on ? '🪫' : '🔋';
-            if (label) label.textContent = on ? 'Power Saver On' : 'Power Saver Off';
-            btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+            btn.setAttribute('aria-checked', on ? 'true' : 'false');
+            btn.setAttribute('aria-label', on ? 'Power saver: on' : 'Power saver: off');
             btn.title = on
-                ? 'Power saver is on — tap to restore looping effects and the game pool'
-                : 'Trim battery use: attention pulses play once instead of looping, ambient effects pause, and only the active game stays loaded';
+                ? 'Power saver: on — tap to restore looping effects and the game pool'
+                : 'Power saver: off — tap to trim battery use: attention pulses play once instead of looping, ambient effects pause, and only the active game stays loaded';
         }
 
         btn.addEventListener('click', () => {
@@ -1167,6 +1151,7 @@
             // shows the override rather than a cap it is no longer honouring.
             if (window.__arcade && window.__arcade.applyPoolCap) window.__arcade.applyPoolCap();
             if (window.__arcade && window.__arcade.renderPoolCapControl) window.__arcade.renderPoolCapControl();
+            if (window.__arcade && window.__arcade.showToast) window.__arcade.showToast(readEnabled() ? 'Power saver on' : 'Power saver off', { duration: 1800 });
         });
         render();
     })();
@@ -1295,14 +1280,11 @@
         // Close after taking an action inside the panel.
         panel.addEventListener('click', (e) => {
             const item = e.target.closest('.launcher-menu__item');
-            // data-menu-stay: a switch the player may flip more than once
-            // (the Motion rows) leaves the menu open.
-            if (item && !item.disabled && !item.hasAttribute('data-menu-stay')) close();
+            if (item && !item.disabled) close();
         });
 
         window.__arcade.launcherMenu = menu;
         window.__arcade.closeLauncherMenu = close;
-        window.__arcade.openLauncherMenu = open;
     })();
 
     // ==========================================
@@ -2677,12 +2659,24 @@
     window.__arcade.uiHost.replayPendingUiMessages();
 
     // MOTION — the brokered sensor (cap 'motion.bridge'). Same capability-
-    // injection contract as the UI bridge; the names come from the catalog so
-    // the Motion section can list games that are not mounted right now.
+    // injection contract as the UI bridge. One switch for the whole fleet,
+    // in the menu's Settings row beside sound and power saver.
     const motionName = (gid) => {
         const g = (window.__arcade.catalog || []).find((c) => c.id === gid);
         return (g && g.name) || window.__arcade.pool.getGameName(gid) || gid;
     };
+    const motionBtn = document.getElementById('menu-motion');
+    function renderMotionSwitch() {
+        const M = window.__arcade.motion;
+        if (!motionBtn || !M) return;
+        const on = M.isEnabled();
+        motionBtn.hidden = !M.plausible();               // no sensor: nothing to switch
+        motionBtn.setAttribute('aria-checked', on ? 'true' : 'false');
+        motionBtn.setAttribute('aria-label', on ? 'Motion: on' : 'Motion: off');
+        motionBtn.title = on
+            ? 'Motion: on — games may sense how you tilt this device. Tap to turn off.'
+            : 'Motion: off — tap to let games sense how you tilt this device';
+    }
     window.__arcade.motion = initMotionBridge({
         postToIframe: window.__arcade.pool.postToIframe,
         dialog: (opts) => window.__arcade.dialog(opts),
@@ -2691,15 +2685,16 @@
         getMountedGameIds: window.__arcade.pool.mountedGameIds,
         getGameName: motionName,
         onPoolChanged: window.__arcade.pool.onPoolChanged,
-        openSettings: () => { if (window.__arcade.openLauncherMenu) window.__arcade.openLauncherMenu(); },
-        els: {
-            section: document.getElementById('menu-motion-section'),
-            master: document.getElementById('menu-motion-master'),
-            masterLabel: document.getElementById('menu-motion-master-label'),
-            list: document.getElementById('menu-motion-games'),
-            mark: document.getElementById('game-motion-mark')
-        }
+        onChange: renderMotionSwitch
     });
+    if (motionBtn) {
+        motionBtn.addEventListener('click', () => {
+            const M = window.__arcade.motion;
+            M.setEnabled(!M.isEnabled());                // in the click: also iOS's gesture
+            window.__arcade.showToast(M.isEnabled() ? 'Motion on' : 'Motion off', { duration: 1800 });
+        });
+    }
+    renderMotionSwitch();
     window.__arcade.save = initSaveLoad(storageHost);
     window.__arcade.sync = initSyncEngine(storageHost);
     // Shared leaderboards (#leaderboards): union-merges peer score boards into
