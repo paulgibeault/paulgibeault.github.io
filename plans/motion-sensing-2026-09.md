@@ -14,6 +14,19 @@ input like any other: never the only way to do something, off until asked
 for, and cheap when idle (the sensor is not listened to unless an active
 game has started it).
 
+## Decisions — 2026-09-18 (Paul)
+
+1. **Brokered** (§1, route B): the launcher owns the sensor and the consent;
+   standalone listens directly; one SDK surface.
+2. **Consent is remembered per game, with a clear and easy way to turn it
+   off.** One *Motion* section in the launcher menu holds it all: a master
+   switch and, under it, every game that has asked, each with its own
+   toggle. That answers the open question about a global switch too — it is
+   the top row of the same place, not a separate setting to find.
+3. **Gravity first, true gyro soon** (WP6 is scheduled, not hypothetical).
+   WebAssembly for the processing was offered; §7 says when it would and
+   would not earn its place.
+
 ## 0. What is true today (code-verified)
 
 - The game frame is `sandbox="allow-scripts allow-downloads"` with
@@ -88,13 +101,18 @@ Arcade.motion.stop();                                 // and `off()` to unsubscr
   `onResume` without the game doing anything (the `Arcade.session` pattern);
   the launcher also streams only to the active app, so a pooled frame is
   silent twice over.
-- **Settings.** A launcher switch, *Motion controls* (default on), surfaced
-  as `Arcade.settings.motion()`; off ⇒ `available()` is false. It is
-  independent of `reducedMotion`, which is about what the screen does, not
-  what the hand does.
-- **v1 is gravity** (what "tilt the phone" means). Rotation rate and shake
-  (`devicemotion`, the gyro proper) are WP6, added as extra fields on the
-  same sample when a game asks; nothing in v1 forecloses it.
+- **Settings.** The launcher's *Motion* section: a master switch (default
+  on) surfaced as `Arcade.settings.motion()`, and a per-game toggle for
+  every game that has asked. Either one off ⇒ that game's `available()` is
+  false and a running stream stops at once. It is independent of
+  `reducedMotion`, which is about what the screen does, not what the hand
+  does. A game that is streaming also shows in the launcher's top bar (a
+  small motion mark beside the title), and tapping it opens the same
+  section — the toggle is one tap from wherever motion is in use.
+- **v1 is gravity** (what "tilt the phone" means). Rotation rate, shake and
+  a fused attitude (`devicemotion`, the gyro proper) are WP6, added as
+  extra fields on the same sample; the sample shape and the wire message
+  are designed so they slot in without a second API (§7).
 
 ## 3. The wire (cap `motion.bridge`; the SDK speaks this for you)
 
@@ -142,14 +160,64 @@ Launcher side (`arcade-motion-core.js` pure + `arcade-motion-bridge.js`):
 | WP3 | SDK `Arcade.motion` — framed via bridge, standalone direct, suspend/resume, `settings.motion()`; 3.17.0 changelog; GAME_INTEGRATION §7f, §14 wire table, §13 checklist line; ARCADE_PLATFORM caps list. | `arcade-sdk.js` + `sdk/v3/` | M | sdk-version unit |
 | WP4 | `tools/motion-acceptance.mjs`: Playwright + CDP `DeviceOrientation.setDeviceOrientationOverride` — cap advertised; dialog allow/deny; samples reach only the active frame; silence after suspend/stop; settings switch; standalone path. `tools/acceptance.mjs` check 11 learns the new cap. | launcher | M | CI acceptance step |
 | WP5 | **Sand Art: a "Phone" state on the Tilt chip** using `Arcade.motion.compass(8)` → `sim.tilt()`. The parked `phone-tilt` branch's maths moves to WP1; the game keeps only the chip. README "The hand" and the Library's Petra entry gain a sentence. | sand-art | S | its tests; on-phone check |
-| WP6 | Later, on demand: rotation rate and shake on the same sample; second consumers (a marble-style tilt in Shui Guo Tan is the obvious one). | — | — | — |
+| WP6 | **True gyro, soon after v1**: `devicemotion` rotation rate and user acceleration on the same sample (`m.rate {x,y,z}` °/s in screen axes, `m.accel`), a fused attitude that does not drift or gimbal-lock (quaternion, complementary filter — §7), `shake`/`twist` detectors as helpers. Sign normalisation per platform from WP0's table. Second consumers (a marble-style tilt in Shui Guo Tan is the obvious one). | launcher core + SDK | M | unit KATs from recorded traces; acceptance via CDP |
 
 Order: WP0 first — an hour on real phones removes the three unknowns that
 would otherwise be discovered after WP2–WP3 ship. WP1–WP4 are one launcher
 PR each or a single PR by the kernel plan's precedent; WP5 can merge any
 time after, since the chip state is gated on `available()`.
 
-## 6. Risks
+## 6. Where the toggle lives (decision 2)
+
+- **Launcher menu → Motion.** Master switch; then a row per game that has
+  ever asked: name, *Allowed* / *Off*, last used. Flipping a row off stops
+  a live stream immediately and makes the next `start()` answer `'denied'`
+  without a dialog; flipping it back on re-arms the dialog-free path.
+- **In the moment.** While a game streams, a motion mark sits in the top
+  bar; tap → the same section, scrolled to that game.
+- **In the consent dialog.** *Allow* / *Not now*, and a line saying where
+  to change it later. *Not now* is not remembered as a refusal — the game
+  may ask again from the player's next tap; a row set to *Off* is.
+- Storage: `_meta.motion` = `{ enabled, games: { <gameId>: { allowed, at } } }`,
+  launcher-owned, outside every game's namespace, carried in the save
+  bundle like other `_meta`.
+
+## 7. WebAssembly for the processing — when it earns its place
+
+The offer was to put the processing in a compiled module if that improves
+performance and accuracy. The honest accounting:
+
+- **Accuracy does not come from the language.** It comes from the fusion
+  algorithm (complementary or Madgwick filter over gyro + accelerometer),
+  from using the sample's own timestamps for `dt`, and from per-platform
+  sign and unit normalisation. The same filter in JS and in wasm gives the
+  same numbers to the last bit that matters; browsers already hand
+  `deviceorientation` out pre-fused by the OS, which v1 uses.
+- **Performance is not the constraint.** A fusion step is ~60 floating-
+  point operations. At 60 Hz that is microseconds per second in either
+  language — three orders of magnitude under one sand-kernel step. The
+  cost that matters is the sensor being on and the messages crossing the
+  frame, which is why the plan spends its effort on "one listener, active
+  app only, stop when idle" instead.
+- **What the kernel discipline does buy** is the part worth copying: a
+  reference implementation that is the specification, known-answer tests
+  from **recorded real traces** (WP0 captures them), and hashes that make a
+  behaviour change loud. WP1 and WP6 use that discipline in plain JS
+  (`arcade-motion-core.js` + `tools/motion-unit.mjs`), which also runs
+  under node with no toolchain.
+- **When wasm would earn it:** if a consumer needs bit-identical motion
+  across devices (a lockstep multiplayer tilt game replaying fused
+  attitude), or if a future kernel consumes motion *inside* its step (a
+  fluid or marble kernel taking gravity as a per-step vector — the sand
+  kernel's `tilt()` is already the integer form of that). Then the fusion
+  moves beside that kernel as `assembly/motion.ts` with the reference kept
+  as its spec, exactly as `sand.ts` did. The core's API is written so that
+  swap is invisible to the SDK.
+
+Recommendation: JS core now, wasm-ready boundary, revisit with WP0's and
+WP6's measurements in hand rather than on a guess.
+
+## 8. Risks
 
 - **iOS permission lifetime.** If Safari forgets the grant per page load,
   a remembered *Allow* still needs a gesture each launch: the launcher then
