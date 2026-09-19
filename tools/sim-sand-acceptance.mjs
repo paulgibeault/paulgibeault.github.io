@@ -83,6 +83,13 @@ try {
         check(`${label}: load() rejects a wrong-length array with RangeError`, r.loadRejects);
         check(`${label}: replace(WATER, EMPTY) erases water in the disc and wakes`, r.replaceErased);
         check(`${label}: batch setPalette() repaints`, r.batchPalette);
+        check(`${label}: lean(15) wakes, keeps gravity (0,1), sets the kernel's integers`,
+            r.leanWoke && r.leanState[0] === 15 && r.leanState[1] === '0,1' && r.leanState[2] === JSON.parse(r.leanPlan).side + ',' + JSON.parse(r.leanPlan).reach + ',' + JSON.parse(r.leanPlan).p + ',' + JSON.parse(r.leanPlan).drift,
+            JSON.stringify(r.leanState) + ' ' + r.leanPlan);
+        check(`${label}: a heap re-settles under lean(15), shifted a little — not none, not the wall (${r.leanShift.toFixed(1)} cells)`,
+            r.leanRested && r.leanShift > 1 && r.leanShift < 15);
+        check(`${label}: the same angle again is a no-op; lean(120) makes the right wall the floor; bad values are refused`,
+            r.leanSameIsNoop && r.leanPast45 === '1,0' && r.leanRejects);
         check(`${label}: two sims have independent memory`, r.independent);
         check(`${label}: tint(5) is SAND_BASE + 5`, r.tint5 === r.materials.SAND_BASE + 5 && r.materials.SAND_COUNT === 32);
         check(`${label}: bad material / bad dims / disposed sim are refused`, r.badMaterialThrows && r.badDimsReject && r.disposedThrows);

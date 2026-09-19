@@ -1264,6 +1264,21 @@ ctx.putImageData(new ImageData(sim.pixels, sim.width, sim.height), 0, 0);
 if (sim.quiet()) rest();                 // §6d — nothing can move, so no more frames
 ```
 
+**Gravity at any angle (SDK 3.18.0+).** `sim.tilt(gx, gy)` gives the eight
+ring directions, 45° apart — and between them a pile does nothing, then
+everything. `sim.lean(degrees)` is the smooth form: how far gravity swings
+from straight down, positive towards the jar's right (`0` upright, `90` is
+`tilt(1, 0)`, `±180` upside down). A pile's downhill face comes to rest at
+45° less the lean and a poured stream falls at the lean, so ten degrees of
+tilt is ten degrees of slope. It is the natural sink for `Arcade.motion`
+(§7f): `sim.lean(Math.atan2(m.x, m.y) * 180 / Math.PI)`. Calling it with the
+angle it already has is free, so call it per sample; a change wakes every
+chunk. Still integer-only and rng-free inside the kernel (rule R18), so
+replays stay exact — record the angle you passed, or the four integers from
+`sand.leanPlan(degrees)` and replay them with `sim.leanRaw(...)` if two
+devices must agree to the bit. Water still lies across the nearest axis.
+Feature-detect: `typeof sim.lean === 'function'`.
+
 The contract every kernel keeps, and every host must honour:
 
 - [ ] **`quiet()` is the §6d hook.** A kernel tracks what can still move and
@@ -1341,7 +1356,8 @@ Arcade.motion.stop();                                 // and off() to unsubscrib
   games where each change is expensive. `c.update(m)` → `{ dir, gx, gy }` or
   `null`. The ring runs clockwise from screen-right with y down, so
   `compass(8)` starts at index 2 (straight down) and `gx, gy` are exactly
-  what `Arcade.sim.sand`'s `tilt(gx, gy)` takes; `compass(4)` suits a menu;
+  what `Arcade.sim.sand`'s `tilt(gx, gy)` takes (its smooth `lean(degrees)`,
+  §7e, wants the raw vector instead); `compass(4)` suits a menu;
   a marble wants the raw vector. `opts`: `margin` (degrees past a boundary
   before flipping; default a fifth of a sector), `flat`, `start` (`null` =
   no direction until the first real sample). `c.dir`, `c.direction`,

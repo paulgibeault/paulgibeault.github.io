@@ -23,6 +23,7 @@
  *   sim.paint(sand.tint(5), x, y, 3);   // coloured sand; sand.materials.WATER, .WALL, .EMPTY
  *   sim.nudge(x, y, 6, 0, -4);          // the stick: shove what is under it
  *   sim.tilt(1, 1);                     // tilt the jar: gravity down-right; (0, 1) is upright
+ *   sim.lean(12.5);                     // …or lean it by any angle (degrees from upright, + to the right)
  *   saved = sim.grid.slice();           // … later: sim.load(saved) — share codes, replays
  *   sim.step();                         // inside your Arcade.loop tick
  *   ctx.putImageData(new ImageData(sim.pixels, sim.width, sim.height), 0, 0);
@@ -51,6 +52,56 @@
     function isMaterial(m) {
         return (m >= 0 && m <= materials.WALL) || (m >= materials.SAND_BASE && m < materials.SAND_BASE + materials.SAND_COUNT);
     }
+    // R18 — degrees of lean → an axis gravity and the kernel's integers.
+    // REPOSE[n] is the slope (degrees) a pile's downhill face rests at when
+    // every cell allows a tread of n: atan(1/n), which is also what the
+    // reference kernel measures (tools/sim-sand-unit.mjs Gate I re-measures
+    // it, so a rule change that moves the curve is loud). Between two treads
+    // the share p of cells allowing the longer one interpolates. Plain
+    // arithmetic only — no Math.tan / Math.atan — so two engines agree on
+    // the integers.
+    var REPOSE = [0, 45, 26.565, 18.435, 14.036, 11.310, 9.462, 8.130, 7.125, 6.340, 5.711,
+        5.194, 4.764, 4.399, 4.086, 3.814, 3.576, 3.366];
+    var MID = { 1: [45, 40, 33.82, 30.18, 26.565], 2: [26.565, 23.06, 21.97, 19.65, 18.435], 3: [18.435, 16.9, 16.26, 14.84, 14.036] };
+    function leanPlan(degrees) {
+        degrees = Number(degrees);
+        if (!isFinite(degrees)) throw new RangeError('lean: degrees must be a finite number');
+        degrees = ((degrees + 180) % 360 + 360) % 360 - 180;          // −180 ≤ d < 180
+        var phi = 90 - degrees;                                        // gravity as atan2(y, x), y down
+        var k = Math.round(phi / 90);                                  // the nearest AXIS gravity
+        var tau = phi - k * 90;                                        // −45 … 45, + is towards the next ring direction
+        k = ((k % 4) + 4) % 4;
+        var g = [[1, 0], [0, 1], [-1, 0], [0, -1]][k];
+        var off = Math.abs(tau);
+        var plan = { degrees: degrees, gx: g[0], gy: g[1], side: 0, reach: 1, p: 0, drift: 0 };
+        if (off < 0.5) return plan;                                    // on the axis: R17 alone
+        var want = 45 - off, n = 16, share = 256;
+        for (var r = 1; r <= 16; r++) {
+            if (want > REPOSE[r + 1]) {
+                n = r;
+                // Within a tread the slope is not quite linear in the share;
+                // MID holds the measured quarter points for the first three
+                // treads (where a degree is visible), linear beyond.
+                var m = MID[r] || [REPOSE[r], 0, 0, 0, REPOSE[r + 1]];
+                if (!MID[r]) { for (var t = 1; t < 4; t++) m[t] = REPOSE[r] + (REPOSE[r + 1] - REPOSE[r]) * t / 4; }
+                for (var i = 1; i < 5; i++) {
+                    if (want >= m[i] || i === 4) {
+                        share = Math.round(((i - 1) + (m[i - 1] - want) / (m[i - 1] - m[i])) * 64);
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+        var x = off * 0.017453292519943295, x2 = x * x;                // tan(off), by its series: off ≤ 45°
+        var tan = x * (1 + x2 * (1 / 3 + x2 * (2 / 15 + x2 * (17 / 315 + x2 * 62 / 2835))));
+        plan.side = tau > 0 ? 1 : -1;
+        plan.reach = n;
+        plan.p = Math.max(0, Math.min(256, share));
+        plan.drift = Math.max(0, Math.min(256, Math.round(tan * 256)));
+        return plan;
+    }
+
     function tint(t) {
         t |= 0;
         if (t < 0 || t >= materials.SAND_COUNT) throw new RangeError('tint: ' + t + ' is not in [0, ' + materials.SAND_COUNT + ')');
@@ -112,6 +163,7 @@
         var n = width * height;
         var gridView = null, pixelView = null;
         var live = true;
+        var leanDegrees = 0;
         function alive() {
             if (!live) throw new Error('arcade-sim-sand: sim was disposed');
         }
@@ -186,6 +238,42 @@
                 ex.tilt(gx, gy);
             },
             gravity: function () { alive(); return [ex.gravityX(), ex.gravityY()]; },
+            // Lean the jar (R18): gravity at ANY angle, not only the ring's
+            // eight. `degrees` is how far gravity swings from straight down,
+            // positive towards +x (the jar's right): 0 upright, 90 is
+            // tilt(1, 0), ±180 upside down. The downhill face of a pile
+            // comes to rest at 45° less the lean, and what is poured falls at
+            // the lean — so ten degrees of tilt is ten degrees of slope,
+            // where tilt() alone gives nothing until 45 and then everything.
+            // It sets tilt() for you (the nearest AXIS direction; the lean
+            // does the rest, up to 45° either side) and the kernel's integer
+            // lean — leanPlan() is the whole mapping. A change wakes every
+            // chunk; the same angle again is a no-op, so calling it per
+            // sample from a sensor is free while the hand is still. WATER
+            // still lies across the axis gravity. Feature-detect with
+            // `typeof sim.lean === 'function'` (SDK 3.18.0+).
+            lean: function (degrees) {
+                alive();
+                var plan = leanPlan(degrees);
+                ex.tilt(plan.gx, plan.gy);
+                ex.lean(plan.side, plan.reach, plan.p, plan.drift);
+                leanDegrees = plan.degrees;
+            },
+            // The integer form (R18), for a host that must be bit-identical
+            // across devices and would rather send four integers than trust
+            // two engines to round one float alike.
+            leanRaw: function (side, reach, p, drift) {
+                alive();
+                var int = function (v, lo, hi) { return v === (v | 0) && v >= lo && v <= hi; };
+                if (!int(side, -1, 1) || !int(reach, 1, 16) || !int(p, 0, 256) || !int(drift, 0, 256)) {
+                    throw new RangeError('leanRaw: side -1..1, reach 1..16, p and drift 0..256');
+                }
+                ex.lean(side, reach, p, drift);
+            },
+            // The angle last given to lean() (0 after create(); tilt() and
+            // leanRaw() do not move it), and the kernel's four integers.
+            leaning: function () { alive(); return leanDegrees; },
+            leaningRaw: function () { alive(); return [ex.leanSideOf(), ex.leanReachOf(), ex.leanPOf(), ex.leanDriftOf()]; },
             get: function (x, y) { alive(); return ex.get(x | 0, y | 0); },
             quiet: function () { alive(); return ex.quiet() !== 0; },
             activeCells: function () { alive(); return ex.activeCells(); },
@@ -257,6 +345,7 @@
         preload: function () { return loadModule().then(function () { }); },
         materials: materials,
         tint: tint,
+        leanPlan: leanPlan,   // R18: degrees → { degrees, gx, gy, side, reach, p, drift }, pure
         binaryUrl: binaryUrl,
     };
 

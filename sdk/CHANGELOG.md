@@ -32,6 +32,37 @@ semver is for humans and URLs, never checked on the wire.
 
 ---
 
+## 3.18.0
+
+Additive, to the sand kernel companion (`arcade-sim-sand.js` + `.wasm`):
+**`sim.lean(degrees)`** — gravity at any angle, not only the ring's eight.
+`degrees` is how far gravity swings from straight down, positive towards the
+jar's right; `0` is upright, `90` is `tilt(1, 0)`. With `tilt()` alone a jar
+tilted by 10° does nothing and by 30° does everything; with a lean the
+downhill face of a pile comes to rest at 45° less the lean, what is poured
+falls at the lean, and a heap's shift grows smoothly with the angle (the unit
+tier measures 1.4, 2.9, 3.4, 5.1, 8.5, 12.2, 20.1, 39.9 cells for 5°…40°).
+Also **`sim.leanRaw(side, reach, p, drift)`** (the kernel's integers, for
+lockstep), **`sim.leaning()`**, **`sim.leaningRaw()`** and the pure
+**`sand.leanPlan(degrees)`** that maps one to the other with plain
+arithmetic. First consumer: Sand Art's phone and drag tilt.
+
+Rule **R18** in `tools/sim/sand-reference.mjs`: after R4's moves fail, a sand
+grain on the lean side takes one step across when, a few empty cells further
+along, there is a drop — how many cells it may look is a fixed per-cell
+dither, so the rest slope lands between 1/reach and 1/(reach+1); and a grain
+in the air drifts diagonally on a per-step hash. Two things were tried first
+and are recorded there as dead ends: mixing two ring gravities in time (the
+rest state is the same for every share — the whole pile against the wall) and
+stepping through the diagonal gravities (under one, everything slides along
+the floor into the corner). R18 applies under the four axis gravities only,
+where every move advances, so a pile always comes to rest. **No rng is
+drawn and nothing changes with no lean set: every pinned hash is unchanged**;
+`tools/sim-sand-unit.mjs` gains a `lean` script through Gates A–D and a Gate
+I (edges, rest at every angle, the promised slope within 3°, smoothness,
+drift). The binary grows 5.1 → 5.7 KB. No SDK surface changes; the SDK semver
+moves with the kernel it documents.
+
 ## 3.17.0
 
 Additive: **`Arcade.motion`** — which way is down, in the axes of the game's

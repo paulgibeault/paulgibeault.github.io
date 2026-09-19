@@ -108,6 +108,15 @@ let ax: i32 = 1, ay: i32 = 1;
 let bx: i32 = -1, by: i32 = 1;
 let px: i32 = 1, py: i32 = 0;
 
+// R18 — the lean: which side of gravity (the b diagonal when > 0, the a
+// diagonal when < 0; 0 = off), the tread every cell allows, the share of
+// cells (of 256) that allow one more, and the share of falls that drift.
+let leanSide: i32 = 0, leanReach: i32 = 1, leanP: i32 = 0, leanDrift: i32 = 0;
+// @ts-ignore: decorator
+@inline function cellHash(x: i32, y: i32, salt: i32): i32 {
+  return <i32>((<u32>((x * 73856093) ^ (y * 19349663) ^ salt) * 2654435761) >>> 24);
+}
+
 // The 8-ring, clockwise from (1,0) with y down. Index k = 2 is (0,1).
 const RING = memory.data<i8>([1, 0, 1, 1, 0, 1, -1, 1, -1, 0, -1, -1, 0, -1, 1, -1]);
 function ringX(k: i32): i32 { return <i32>load<i8>(RING + <usize>(((k & 7) << 1))); }
@@ -262,7 +271,15 @@ function stepOnce(): void {
         const ux = x + gx;
         if (belowRow && ux >= 0 && ux < w) {
           const j = uy * w + ux;
-          if (sandCanEnter(j)) { swap(i, j, x, y, ux, uy); x += dx; continue; }
+          if (sandCanEnter(j)) {
+            // R18 — a falling grain drifts towards the lean.
+            if (leanSide != 0 && leanDrift != 0 && (gx == 0 || gy == 0)
+                && cellHash(x, y, <i32>stepIndex * 83492791) < leanDrift) {
+              const qx = x + (leanSide > 0 ? bx : ax), qy = y + (leanSide > 0 ? by : ay);
+              if (inBounds(qx, qy) && sandCanEnter(qy * w + qx)) { swap(i, qy * w + qx, x, y, qx, qy); x += dx; continue; }
+            }
+            swap(i, j, x, y, ux, uy); x += dx; continue;
+          }
           const aFirst = bit() != 0;
           const f1x = aFirst ? ax : bx, f1y = aFirst ? ay : by;
           const f2x = aFirst ? bx : ax, f2y = aFirst ? by : ay;
@@ -270,6 +287,22 @@ function stepOnce(): void {
           if (inBounds(x1, y1) && sandCanEnter(y1 * w + x1)) { swap(i, y1 * w + x1, x, y, x1, y1); x += dx; continue; }
           const x2 = x + f2x, y2 = y + f2y;
           if (inBounds(x2, y2) && sandCanEnter(y2 * w + x2)) { swap(i, y2 * w + x2, x, y, x2, y2); x += dx; continue; }
+          // R18 — the longer look, on the lean side only.
+          if (leanSide != 0 && (gx == 0 || gy == 0)) {
+            const n = leanReach + (cellHash(x, y, 0) < leanP ? 1 : 0);
+            const cx = (leanSide > 0 ? bx : ax) - gx, cy = (leanSide > 0 ? by : ay) - gy;
+            const sx = x + cx, sy = y + cy;
+            if (n >= 2 && inBounds(sx, sy) && load<u8>(grid + <usize>(sy * w + sx)) == EMPTY) {
+              let ex = sx, ey = sy, found = false;
+              for (let r = 2; r <= n; r++) {
+                ex += cx; ey += cy;
+                if (!inBounds(ex, ey) || load<u8>(grid + <usize>(ey * w + ex)) != EMPTY) break;
+                const fx = ex + gx, fy = ey + gy;
+                if (inBounds(fx, fy) && load<u8>(grid + <usize>(fy * w + fx)) == EMPTY) { found = true; break; }
+              }
+              if (found) { swap(i, sy * w + sx, x, y, sx, sy); x += dx; continue; }
+            }
+          }
         }
       } else if (m == WATER && load<u8>(moved + <usize>i) == 0) {
         const ux = x + gx;
@@ -326,6 +359,7 @@ export function init(width: i32, height: i32, seed: u32): i32 {
   stepIndex = 0;
   lastMoves = 0;
   setGravity(2);                                         // R17: down
+  leanSide = 0; leanReach = 1; leanP = 0; leanDrift = 0; // R18: no lean
   for (let i = 0; i < n; i++) setPixel(i, EMPTY);
   return 1;
 }
@@ -341,6 +375,20 @@ export function tilt(x: i32, y: i32): void {
   }
   memory.fill(active, 1, <usize>nc);
 }
+
+// R18 — lean the jar between the ring's directions. Anything out of range is
+// a no-op (the wrapper throws first); the values already set are a no-op; a
+// change wakes every chunk.
+export function lean(side: i32, reach: i32, p: i32, drift: i32): void {
+  if (side < -1 || side > 1 || reach < 1 || reach > 16 || p < 0 || p > 256 || drift < 0 || drift > 256) return;
+  if (side == leanSide && reach == leanReach && p == leanP && drift == leanDrift) return;
+  leanSide = side; leanReach = reach; leanP = p; leanDrift = drift;
+  memory.fill(active, 1, <usize>nc);
+}
+export function leanSideOf(): i32 { return leanSide; }
+export function leanReachOf(): i32 { return leanReach; }
+export function leanPOf(): i32 { return leanP; }
+export function leanDriftOf(): i32 { return leanDrift; }
 
 export function gravityX(): i32 { return gx; }
 export function gravityY(): i32 { return gy; }
