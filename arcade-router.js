@@ -21,7 +21,7 @@
  * pool the POOL+ROUTER module block injects):
  *   pool                 — the arcade-pool.js API (frame identity,
  *                          postToIframe, hello bookkeeping, active-game)
- *   getP2P()/getStorage()/getUi()/getEnvelope() — live module handles;
+ *   getP2P()/getStorage()/getUi()/getEnvelope()/getMotion() — live module handles;
  *                          null until their module loads (storage/ui
  *                          messages queue, peer/toast messages drop —
  *                          exactly as the inline switch behaved)
@@ -41,7 +41,9 @@ import { KEY_PREFIX } from './arcade-storage-core.js';
 // the opaque-frame storage bridge (state.write / store.op / files.op /
 // storage.op + welcome.state snapshot). ui.bridge: this launcher services
 // arcade:ui.op (confirm/prompt/setTitle/quitHook/openFile/share — see
-// arcade-ui-bridge.js). peer.invite: this launcher services
+// arcade-ui-bridge.js). motion.bridge: this launcher brokers the motion
+// sensor — arcade:motion.op start/stop, arcade:motion.sample to the active
+// frame, per-game consent (arcade-motion-bridge.js). peer.invite: this launcher services
 // arcade:peer.invite — a game asks it to run the open-game invite flow
 // (plans/tables-2026-08.md D4). peer.party: RETIRED IN SUBSTANCE but still
 // advertised — arcade:peer.party.op now answers null/[]/null, which are the
@@ -52,7 +54,7 @@ import { KEY_PREFIX } from './arcade-storage-core.js';
 // and the pinned test literal deliberately, never casually.
 export const ARCADE_PEER_CAPS = Object.freeze(
     ['peer.sendTo', 'peer.roster', 'peer.meta', 'peer.party', 'peer.invite',
-     'storage.bridge', 'ui.bridge', 'configs.bridge']);
+     'storage.bridge', 'ui.bridge', 'configs.bridge', 'motion.bridge']);
 
 export function initMessageRouter(host) {
     const pool = host.pool;
@@ -201,7 +203,11 @@ export function initMessageRouter(host) {
                     // Opaque frames can't read localStorage — this seeds
                     // the SDK's state cache (its keys, global.*, and the
                     // shared _meta identity/dev literals).
-                    state: stateSnapshotFor(gameId)
+                    state: stateSnapshotFor(gameId),
+                    // Is motion offered to THIS game (sensor plausible, master
+                    // switch on, its row not Off)? Arcade.motion.available().
+                    motion: { enabled: !!(host.getMotion && host.getMotion()
+                        && host.getMotion().enabledFor(gameId)) }
                 });
                 // If this game is the active one, also send a resume hint
                 // (the game's SDK may have missed the showGame() resume if
@@ -277,6 +283,18 @@ export function initMessageRouter(host) {
                 const C = host.getConfigs && host.getConfigs();
                 if (!C || pool.getActiveGameId() !== gameId) { reply({ ok: false }); break; }
                 Promise.resolve(C.handleOp(gameId, data)).then(reply).catch(() => reply({ ok: false }));
+                break;
+            }
+            case 'arcade:motion.op': {
+                // Brokered motion sensing (cap 'motion.bridge'). Shape rules
+                // and the consent flow live in arcade-motion-bridge.js. If
+                // the module has not loaded, a start is answered rather than
+                // left to dangle until the SDK's RPC timeout.
+                const M = host.getMotion && host.getMotion();
+                if (M) { M.motionOp(gameId, data); break; }
+                if (data.op === 'start' && typeof data.id === 'string') {
+                    pool.postToIframe(gameId, { type: 'arcade:bridge.result', id: data.id, ok: true, value: 'unavailable' });
+                }
                 break;
             }
             case 'arcade:config.ack': {
