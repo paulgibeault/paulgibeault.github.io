@@ -31,7 +31,7 @@ game has started it).
 
 | WP | State |
 |---|---|
-| WP0 | **Probe built** (`/motion-probe.html`, linked from the Connection log dialog). **Running it needs Paul's phones** — findings table below is still to fill; issue #169 stays open. |
+| WP0 | Probe built and **run on iPhone Safari (2026-09-19)** — §0 table. Still owed: the grant's lifetime after Allow (reload / new tab), the installed PWA, angles 270/180, and an Android phone. #169 stays open for those. |
 | WP1 | Done — `arcade-motion-core.js`, `tools/motion-unit.mjs`. |
 | WP2 | Done — `arcade-motion-bridge.js`, router case + cap, *Motion* menu section, top-bar mark. |
 | WP3 | Done — SDK 3.17.0, GAME_INTEGRATION §7f/§5/§13/§14, ARCADE_PLATFORM, changelog. |
@@ -111,19 +111,51 @@ below):
   one red test is the landscape case — a wrong fixture (Status, item 1), now
   corrected in `tools/motion-unit.mjs`; WP0 confirms on hardware.
 
-**WP0 findings — to fill from `/motion-probe.html`:**
+**WP0 findings** (from `/motion-probe.html`; iPhone column measured
+2026-09-19, iOS 18.7 / Safari 27.0 — the rest still owed):
 
 | | iPhone Safari | iPhone installed PWA | Android Chrome |
 |---|---|---|---|
-| arrow points at the floor at angle 0 / 90 / 180 / 270 | | | |
-| `screen.orientation` present; `window.orientation` | | | |
-| `requestPermission()` on reload, no gesture | | | n/a |
-| …after closing the tab / relaunching | | | n/a |
-| `deviceorientation` / `devicemotion` events per second | | | |
-| sign of `accelerationIncludingGravity.z`, face up | | | |
-| `interval` units | | | |
-| sandboxed frame, no `allow`: events | | | |
-| sandboxed frame, with `allow`: events; ask from inside | | | |
+| arrow points at the floor at angle 0 / 90 / 180 / 270 | **0 ✓, 90 ✓** (top to the left: angle 90, γ ≈ −84 — the convention the unit tier pins); 270 and 180 not yet held | | |
+| `screen.orientation` present; `window.orientation` | both present (`portrait-primary`, 0) | | |
+| `requestPermission()` before any grant, no gesture | rejects `NotAllowedError` | | n/a |
+| …from a tap | `granted` (orientation and motion) | | n/a |
+| …in a **new tab** after a grant, no gesture | **both answers seen**: 11 min after the first grant → rejects `NotAllowedError`; 3 min after the second → `granted`, silently. Consistent with WebKit holding the grant in memory for the life of Safari's process, not on disk. | | n/a |
+| `deviceorientation` / `devicemotion` events per second | 59.8 / 59.8 | | |
+| sign of `accelerationIncludingGravity` | **gravity itself** (upright: y ≈ −9.5; on its left edge: x ≈ −9.7) — `aigSign +1` | | expected opposite |
+| `interval` units | **seconds** (0.01667) | | expected ms |
+| sandboxed frame, no `allow`: events | **0**; `requestPermission()` from inside → `denied` | | |
+| sandboxed frame, with `allow`: events; ask from inside | **0**; → `denied` — delegation does not work | | |
+
+What this settles:
+
+- **Brokering is not a preference on iOS, it is the only route.** Even with
+  `allow="accelerometer; gyroscope; magnetometer"` an opaque sandboxed frame
+  gets no events and its own `requestPermission()` is refused. §1's route A
+  is dead on iPhone regardless of the privacy argument.
+- **The maths is right on glass, and against a second sensor.**
+  `tools/fixtures/motion/ios-safari-18_7-landscapes.json` pairs the OS's
+  orientation angles with the raw accelerometer on a still hand;
+  `motion-unit.mjs` requires our formula's device-frame gravity to match
+  `accelerationIncludingGravity` within 0.08 per axis (worst seen: 0.047),
+  and pins angle 90 ↔ γ ≈ −84 ↔ "down the screen".
+- **Both of the bridge's paths for a remembered Allow are live, and the
+  order is right.** Run 3 shows a fresh page can get `granted` with no
+  gesture and no prompt (so the common case within a Safari session is
+  invisible: tap the chip, it works); run 2 shows it can also be refused (so
+  after Safari has been quit or evicted, the one-tap toast is what the
+  player sees, and its tap is where iOS shows its own prompt). Spending the
+  game tile's tap as the gesture was considered and dropped: in the first
+  case it is unnecessary, and in the second it would raise Apple's prompt
+  when a game opens rather than when the player reaches for motion.
+- Second run (04:42Z) also laid the phone flat: a.i.g. z = −10.77 face up —
+  gravity itself, confirming `aigSign +1`. Its frames again saw 0 events.
+- **For WP6:** iOS `interval` is in seconds and its a.i.g. is gravity itself;
+  the sample's own `timeStamp` is the only portable `dt`.
+- **The event stream stalls.** The 10 s trace has gaps of 0.9 s and 2.1 s in
+  portrait and ~0.5 s across the rotation animation. A consumer must not
+  treat a quiet second as "sensor gone"; the bridge's 1.5 s rule applies only
+  to the *first* event, which is right.
 
 ## 1. The decision: brokered, not delegated
 

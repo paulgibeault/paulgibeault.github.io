@@ -72,7 +72,7 @@
     <tr><td>rotationRate α β γ</td><td class="v" id="m-rot">…</td></tr>
     <tr><td>interval (reported)</td><td class="v" id="m-int">…</td></tr>
     <tr><td>events / s</td><td class="v" id="m-rate">…</td></tr>
-    <tr><td>sign of a.i.g. z, face up</td><td class="v" id="m-sign">lay the phone flat, face up</td></tr>
+    <tr><td>sign of a.i.g. vs gravity</td><td class="v" id="m-sign">hold still a moment</td></tr>
 </table>
 
 <h2>4 · Inside a sandboxed frame — the evidence for brokering</h2>
@@ -174,6 +174,7 @@ function draw(g) {
 }
 draw(null);
 const recorders = new Set();
+let lastDeviceGravity = null;   // from the orientation angles, device axes (y up)
 window.addEventListener('deviceorientation', (e) => {
     tickO();
     const a = angle(), g = screenGravity(e.beta, e.gamma, a);
@@ -184,6 +185,8 @@ window.addEventListener('deviceorientation', (e) => {
     $('o-vec').textContent = g ? [g.x, g.y, g.z].map(f2).join('  ') : 'null angles (no sensor behind the event)';
     $('o-len').textContent = g ? f2(Math.hypot(g.x, g.y)) + ' · ' + (isFlat(g.x, g.y) ? 'flat' : 'tilted') : '—';
     draw(g);
+    const dg = screenGravity(e.beta, e.gamma, 0);
+    lastDeviceGravity = dg ? { x: dg.x, y: -dg.y, z: dg.z } : null;
     findings.orientation.nullAngles = !g;
     findings.orientation.absolute = e.absolute;
     findings.orientation.screenAngleNow = a;
@@ -201,11 +204,15 @@ window.addEventListener('devicemotion', (e) => {
     findings.motion.interval = e.interval;
     findings.motion.hasRotationRate = !!(r && r.alpha !== null);
     findings.motion.hasAcceleration = !!(e.acceleration && e.acceleration.x !== null);
-    // Face up on a table the true gravity vector points INTO the glass (z = −1
-    // in our axes). Android reports a.i.g. z ≈ +9.8 there, iOS ≈ −9.8.
-    if (g && typeof g.z === 'number' && Math.abs(g.z) > 8.5 && Math.abs(g.x) < 2 && Math.abs(g.y) < 2) {
-        findings.motion.aigZFaceUp = Math.round(g.z * 100) / 100;
-        $('m-sign').textContent = f2(g.z) + (g.z > 0 ? '  → Android convention (reaction force)' : '  → iOS convention (gravity itself)');
+    // In ANY pose: does a.i.g. point with the gravity the orientation angles
+    // give (iOS: gravity itself) or against it (Android: the reaction force)?
+    // Only judged on a still hand, where a.i.g. is gravity and little else.
+    if (g && typeof g.x === 'number' && lastDeviceGravity && Math.abs(Math.hypot(g.x, g.y, g.z) - 9.81) < 0.6) {
+        const d = lastDeviceGravity, dot = (g.x * d.x + g.y * d.y + g.z * d.z) / 9.81;
+        if (Math.abs(dot) > 0.9) {
+            findings.motion.aigSign = dot > 0 ? 1 : -1;
+            $('m-sign').textContent = (dot > 0 ? '+1  → gravity itself (iOS convention)' : '−1  → reaction force (Android convention)');
+        }
     }
     recorders.forEach((rec) => rec.m.push([Math.round(e.timeStamp * 10) / 10,
         g && g.x, g && g.y, g && g.z,
