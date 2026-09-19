@@ -76,6 +76,9 @@
  *
  *   // Settings — pushed by launcher; SDK auto-applies CSS hooks
  *   Arcade.settings.fontScale | theme | reducedMotion | audioVolume | handedness
+ *   Arcade.settings.powerSaver
+ *   Arcade.motion.available() | start({hz}) | on(fn) | stop() | onChange(fn)
+ *   Arcade.motion.compass(n, opts)     (gravity in screen axes — §7f)
  *   Arcade.settings.snapshot()
  *   Arcade.onSettingsChange(fn)
  *
@@ -183,7 +186,7 @@
     // tools/sdk-version-unit.mjs enforces all three. Launcher↔SDK compat is
     // still negotiated by welcome.caps, never by this number; it exists for
     // humans (bug reports, CHANGELOG) and for the pinned-URL publish scheme.
-    var SDK_SEMVER = '3.16.0';
+    var SDK_SEMVER = '3.17.0';
     var HANDSHAKE_TIMEOUT_MS = 300;
     // Opaque-origin (sandboxed, no allow-same-origin) frames have no storage
     // to fall back to, so waiting longer for the launcher costs nothing and
@@ -1377,6 +1380,7 @@
                 refreshDevMode(); // snapshot may carry _meta.dev
                 applyRoster(data.peers);
                 if (applySettings(data.settings)) fire(listeners.settingsChange, snapshotSettings());
+                motionSetEnabled(!!(data.motion && data.motion.enabled === true));
                 if (!dupWelcome) resolveReady();
                 welcomedOnce = true;
                 if (lateWelcome && !dupWelcome) fire(listeners.framedChange, true);
@@ -1502,6 +1506,12 @@
             }
             case 'arcade:settings.changed':
                 if (applySettings(data.settings)) fire(listeners.settingsChange, snapshotSettings());
+                break;
+            case 'arcade:motion.sample':
+                motionDeliver(data.x, data.y, data.z, data.t);
+                break;
+            case 'arcade:motion.state':
+                motionSetEnabled(data.enabled === true);
                 break;
             case 'arcade:lifecycle.suspend':
                 launcherSuspended = true;
@@ -1953,6 +1963,233 @@
             globalApi.set('playerName', name.trim().slice(0, 32));
         },
         onChange: function (fn) { return globalApi.onChange('playerName', fn); }
+    };
+
+    // ─── Motion ───────────────────────────────────────────────────
+    // Which way is down, in the axes of the game's own screen. Framed, the
+    // launcher owns the sensor and the consent (cap 'motion.bridge': the frame
+    // has no accelerometer/gyroscope permission and gets no events of its
+    // own) and posts arcade:motion.sample to the ACTIVE frame only.
+    // Standalone, this listens to deviceorientation directly. One surface
+    // either way; a game never learns which it got.
+    //
+    // The block between the markers is a copy of arcade-motion-core.js (this
+    // file is a classic script and cannot import). tools/motion-unit.mjs
+    // evaluates the block as text and pins it against the core, so the two
+    // cannot drift.
+    // arcade:motion-maths-begin
+    var MOTION_FLAT = 0.2;
+    function motionScreenGravity(beta, gamma, screenAngle) {
+        if (typeof beta !== 'number' || typeof gamma !== 'number'
+                || !isFinite(beta) || !isFinite(gamma)) return null;
+        var RAD = Math.PI / 180;
+        var ang = Number(screenAngle);
+        ang = isFinite(ang) ? (((Math.round(ang / 90) * 90) % 360) + 360) % 360 : 0;
+        var b = beta * RAD, g = gamma * RAD, a = ang * RAD;
+        var dx = Math.cos(b) * Math.sin(g);
+        var dy = -Math.sin(b);
+        var dz = -Math.cos(b) * Math.cos(g);
+        var right = dx * Math.cos(a) - dy * Math.sin(a);
+        var up = dx * Math.sin(a) + dy * Math.cos(a);
+        return { x: right + 0, y: -up + 0, z: dz + 0 };
+    }
+    function motionCreateCompass(n, opts) {
+        n = Math.round(Number(n));
+        if (!(n >= 2 && n <= 360)) throw new RangeError('compass: n must be 2..360');
+        opts = opts || {};
+        var RAD = Math.PI / 180;
+        var sector = 360 / n;
+        var margin = (typeof opts.margin === 'number' && opts.margin >= 0)
+            ? Math.min(opts.margin, sector / 2) : sector / 5;
+        var flat = (typeof opts.flat === 'number' && opts.flat > 0) ? opts.flat : MOTION_FLAT;
+        var startDefault = (n % 4 === 0) ? n / 4 : null;
+        var start = (opts.start === null) ? null
+            : (typeof opts.start === 'number' && opts.start >= 0 && opts.start < n)
+                ? Math.round(opts.start) : startDefault;
+        var k = start;
+        var held = false;
+        function answer(dir) {
+            var a = dir * sector * RAD;
+            return { dir: dir, gx: Math.round(Math.cos(a)) + 0, gy: Math.round(Math.sin(a)) + 0 };
+        }
+        return {
+            get dir() { return k; },
+            get direction() { return k === null ? null : answer(k); },
+            reset: function (dir) { k = (dir === undefined) ? start : dir; held = false; },
+            update: function (m) {
+                if (!m || typeof m.x !== 'number' || typeof m.y !== 'number') return null;
+                var len = Math.hypot(m.x, m.y);
+                if (held ? len < flat * 1.5 : len < flat) { held = true; return null; }
+                held = false;
+                var angle = Math.atan2(m.y, m.x) / RAD;
+                if (k !== null) {
+                    var off = angle - k * sector;
+                    off = ((off + 180) % 360 + 360) % 360 - 180;
+                    if (Math.abs(off) <= sector / 2 + margin) return null;
+                }
+                var next = ((Math.round(angle / sector) % n) + n) % n;
+                if (next === k) return null;
+                k = next;
+                return answer(k);
+            }
+        };
+    }
+    // arcade:motion-maths-end
+
+    var MOTION_FIRST_EVENT_MS = 1500;
+    var motionEnabled = false;   // framed: welcome.motion.enabled / arcade:motion.state
+    var motionRunning = false;   // between a 'granted' start() and stop()
+    var motionHz = 30;
+    var motionListeners = [];
+    var motionChangeListeners = [];
+    var motionDirectOn = false;  // standalone: is our deviceorientation listener attached
+    var motionDirectLast = -Infinity;
+    var motionDirectFirst = null; // standalone: resolver waiting on the first real event
+
+    function motionBridged() { return framed && peerCaps.indexOf('motion.bridge') !== -1; }
+    function motionSensorPlausible() {
+        try {
+            var touch = (navigator.maxTouchPoints > 0)
+                || !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+            return typeof window.DeviceOrientationEvent !== 'undefined'
+                && window.isSecureContext !== false && touch;
+        } catch (e) { return false; }
+    }
+    function motionAvailable() {
+        if (!readyResolved) return false;
+        if (framed) return motionBridged() && motionEnabled;
+        // Standalone, top-level only: an unknown embedder's frame has no
+        // sensor permission, and asking would only produce a dead control.
+        return !inIframe() && motionSensorPlausible();
+    }
+    function motionFireChange() {
+        fire(motionChangeListeners, { available: motionAvailable(), running: motionRunning });
+    }
+    function motionSetEnabled(on) {
+        if (on === motionEnabled) return;
+        motionEnabled = on;
+        // The player switched this game (or all motion) off: the launcher has
+        // already stopped streaming; the game's control should follow.
+        if (!on && motionRunning) motionRunning = false;
+        motionFireChange();
+    }
+    function motionDeliver(x, y, z, t) {
+        if (!motionRunning || suspendedNow) return;
+        if (typeof x !== 'number' || typeof y !== 'number' || typeof z !== 'number') return;
+        fire(motionListeners, {
+            x: x, y: y, z: z,
+            flat: Math.hypot(x, y) < MOTION_FLAT,
+            t: (typeof t === 'number') ? t : nowMs()
+        });
+    }
+    function motionScreenAngle() {
+        try {
+            if (screen.orientation && typeof screen.orientation.angle === 'number') return screen.orientation.angle;
+            if (typeof window.orientation === 'number') return window.orientation; // older iOS
+        } catch (e) {}
+        return 0;
+    }
+    function motionOnOrientation(e) {
+        var g = motionScreenGravity(e.beta, e.gamma, motionScreenAngle());
+        if (!g) return;
+        if (motionDirectFirst) { var f = motionDirectFirst; motionDirectFirst = null; f(true); }
+        var t = (typeof e.timeStamp === 'number' && e.timeStamp > 0) ? e.timeStamp : nowMs();
+        if (t - motionDirectLast < (1000 / motionHz) * 0.75) return;
+        motionDirectLast = t;
+        motionDeliver(g.x, g.y, g.z, Math.round(t));
+    }
+    function motionDirectListen(on) {
+        if (on === motionDirectOn) return;
+        motionDirectOn = on;
+        try {
+            if (on) window.addEventListener('deviceorientation', motionOnOrientation);
+            else window.removeEventListener('deviceorientation', motionOnOrientation);
+        } catch (e) {}
+    }
+    function motionStartDirect() {
+        var E = window.DeviceOrientationEvent;
+        // Called synchronously from the game's tap: on iOS this IS the
+        // gesture requestPermission() needs.
+        var asked = 'granted';
+        if (E && typeof E.requestPermission === 'function') {
+            try { asked = E.requestPermission(); } catch (e) { asked = Promise.reject(e); }
+        }
+        return Promise.resolve(asked).then(function (r) {
+            if (r !== 'granted') return 'denied';
+            return new Promise(function (resolve) {
+                var timer = setTimeout(function () {
+                    motionDirectFirst = null;
+                    motionDirectListen(false);
+                    resolve('unavailable');
+                }, MOTION_FIRST_EVENT_MS);
+                motionDirectFirst = function () { clearTimeout(timer); resolve('granted'); };
+                motionDirectLast = -Infinity;
+                motionDirectListen(true);
+            });
+        }, function () { return 'denied'; });
+    }
+    function motionStart(opts) {
+        var hz = Number(opts && opts.hz);
+        motionHz = (isFinite(hz) && hz > 0) ? Math.max(1, Math.min(60, Math.round(hz))) : 30;
+        function go() {
+            if (framed) {
+                if (!motionBridged()) return Promise.resolve('unavailable');
+                if (!motionEnabled) return Promise.resolve('denied');
+                // No deadline: the launcher's consent dialog resolves on the
+                // player's answer.
+                return bridgeRpc('arcade:motion.op', { op: 'start', hz: motionHz }, 0).then(
+                    function (v) { return (v === 'granted' || v === 'denied') ? v : 'unavailable'; },
+                    function () { return 'unavailable'; });
+            }
+            if (!motionAvailable()) return Promise.resolve('unavailable');
+            return motionStartDirect();
+        }
+        // Stay synchronous with the tap whenever we can (standalone iOS).
+        var p = readyResolved ? go() : readyPromise.then(go);
+        return p.then(function (how) {
+            var was = motionRunning;
+            motionRunning = (how === 'granted');
+            if (!framed && motionRunning && suspendedNow) motionDirectListen(false);
+            // A re-start that was refused (asked from the background, say)
+            // ends the old stream here — so end it at the launcher too,
+            // rather than leave its listener running for samples we drop.
+            if (framed && was && !motionRunning && motionBridged()) {
+                postToParent({ type: 'arcade:motion.op', op: 'stop' });
+            }
+            if (was !== motionRunning) motionFireChange();
+            return how;
+        });
+    }
+    function motionStop() {
+        if (framed) { if (motionBridged()) postToParent({ type: 'arcade:motion.op', op: 'stop' }); }
+        else motionDirectListen(false);
+        if (motionRunning) { motionRunning = false; motionFireChange(); }
+    }
+    // Lifecycle is the SDK's. Framed, the launcher already streams to the
+    // active app only and motionDeliver drops anything that slips through;
+    // standalone, the sensor itself is released while hidden.
+    makeSubscriber(listeners.suspend)(function () {
+        if (!framed && motionRunning) motionDirectListen(false);
+    });
+    makeSubscriber(listeners.resume)(function () {
+        if (!framed && motionRunning) { motionDirectLast = -Infinity; motionDirectListen(true); }
+    });
+
+    var motionApi = {
+        // After Arcade.ready. False ⇒ do not offer the control at all.
+        available: motionAvailable,
+        running: function () { return motionRunning; },
+        // Call from a tap. → 'granted' | 'denied' | 'unavailable'
+        start: motionStart,
+        stop: motionStop,
+        // fn({ x, y, z, flat, t }) — gravity in screen axes, x right, y down.
+        on: makeSubscriber(motionListeners),
+        // fn({ available, running }) — the player flipped a Motion switch, or
+        // a stream started/ended.
+        onChange: makeSubscriber(motionChangeListeners),
+        // Pure helper: quantise samples to n directions with hysteresis and
+        // a flat-hold. c.update(m) → { dir, gx, gy } on a CHANGE, else null.
+        compass: function (n, opts) { return motionCreateCompass(n, opts); }
     };
 
     // ─── Settings ─────────────────────────────────────────────────
@@ -3603,6 +3840,7 @@
         daily: dailyApi, // dateStr() = device-LOCAL YYYY-MM-DD (the platform rule); seed(salt) per-game daily rng
         share: shareApi, // versioned base64url codes; decode validates, returns null on any garbage
         configs: configsApi, // share/receive named game-config payloads (codes/links + peer push)
+        motion: motionApi,   // gravity in the axes of the screen; brokered by the launcher (cap 'motion.bridge')
         loop: function (fn) { ensureGameId(); return createLoop(fn); },
         onSuspend: makeSubscriber(listeners.suspend),
         onResume: makeSubscriber(listeners.resume),

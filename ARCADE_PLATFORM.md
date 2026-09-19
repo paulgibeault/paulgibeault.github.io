@@ -180,6 +180,15 @@ Arcade.ui.openFile({ accept })            // → Promise<File|null>; consent-gat
 Arcade.ui.share({ title, text, url })     // → Promise<'shared'|'copied'|null>
 Arcade.ui.copy(text)                      // → Promise<boolean>; in-frame clipboard-write
 
+// MOTION — gravity in the axes of the screen (3.17.0+; needs the 'motion.bridge'
+// cap framed, listens directly standalone — GAME_INTEGRATION.md §7f)
+Arcade.motion.available()                 // after ready; false ⇒ don't offer the control
+Arcade.motion.start({ hz })               // from a tap → Promise<'granted'|'denied'|'unavailable'>
+Arcade.motion.on(fn)                      // fn({ x, y, z, flat, t }); returns unsubscribe
+Arcade.motion.stop()
+Arcade.motion.onChange(fn)                // fn({ available, running }) — a Motion switch flipped
+Arcade.motion.compass(n, opts)            // pure: n directions, hysteresis, flat-hold; update(m) on change
+
 // CONTEXT — so games can light up extras when framed
 Arcade.context                        // { framed: boolean, version: number, sdkVersion: string, gameId }
 ```
@@ -210,9 +219,11 @@ All messages namespaced `arcade:` to avoid collision.
 ```
 child → parent:  { type: 'arcade:hello',   gameId }
 parent → child:  { type: 'arcade:welcome', peerStatus: 'idle',
-                   caps: ['peer.sendTo', 'peer.roster', 'peer.meta', 'peer.party', 'peer.invite', 'storage.bridge', 'ui.bridge', 'configs.bridge'],  // capability flags (absent ⇒ [])
+                   caps: ['peer.sendTo', 'peer.roster', 'peer.meta', 'peer.party', 'peer.invite', 'storage.bridge', 'ui.bridge', 'configs.bridge', 'motion.bridge'],  // capability flags (absent ⇒ [])
                    peers: [{ deviceId, name, status, direct }, ...],   // live remote devices (roster seed)
                    settings: { fontScale, theme, reducedMotion, audioVolume, handedness, powerSaver },
+                   motion: { enabled },                                // is motion offered to THIS app (sensor plausible,
+                                                                       // master switch on, its Motion row not Off)
                    state: { '<fullKey>': '<raw string>', ... } }       // storage-bridge snapshot: the app's own
                                                                        // keys + global.* + _meta identity/dev
 ```
@@ -279,6 +290,29 @@ app to request the password-masked input the launcher's own passphrase
 dialogs use. `arcade-ui-bridge.js` services the ops behind the launcher's
 frame-identity boundary; dialogs render in the launcher's serialized
 focus-trap modal, prefixed with the app's catalog name.
+
+**Motion** (cap `motion.bridge`) is brokered the same way, and for a sharper
+reason. The game frame's `allow` list has no `accelerometer`/`gyroscope`, so
+a game receives no `deviceorientation` events; delegating them would let any
+game read the sensor silently on Android, and motion is a known side channel
+(tap inference, fingerprinting). Instead a game asks
+(`arcade:motion.op { op: 'start', id, hz }`), the player answers once per game
+in the launcher's attributed dialog — whose **Allow** click is also the
+top-level gesture iOS's `requestPermission()` needs — and
+`arcade-motion-bridge.js` then posts `arcade:motion.sample { x, y, z, t }`
+(gravity in screen axes) to the **active** frame only, from **one** top-level
+listener that exists only while the active game has started and the page is
+visible. Answers live in `arcade.v1._meta.motion`
+(`{ enabled, games: { <gameId>: { allowed, at } } }`), launcher-owned and
+unreachable through the storage bridge; the launcher menu's **Motion**
+section is the master switch plus a toggle per game that has asked, and a
+top-bar mark shows while a game streams. *Not now* is never stored; a row set
+Off answers `'denied'` without a dialog. The pure half
+(`arcade-motion-core.js`: the orientation → screen-gravity maths for all four
+screen angles, throttle, compass, consent rules, `validateMotionOp`) is
+pinned by `tools/motion-unit.mjs`, which also evaluates the SDK's own copy of
+the maths and requires it bit-identical. Plan:
+`plans/motion-sensing-2026-09.md`.
 
 GAME_INTEGRATION.md §14 carries the full summary table. Peer messages are routed by `gameId`, and several games really do multiplex one connection: a link can carry a different **open-game scope** for each game the two devices agreed to play, and closing one leaves the others alone. `gameId` selects among a link's open scopes — it never grants access to one, which is why an inbound frame naming a game that isn't open on its arrival link is dropped rather than delivered (`p2p/PROTOCOL.md` §5.6). A scope lives exactly as long as its game stays mounted in the frame pool and the link stays up: backgrounding a game keeps it, while quitting or an LRU eviction closes it, so a peer can never be left sending into a game that is no longer there. Between launchers, presence frames (`{arcade:1, kind:'presence'|'presence-ack', gameId}`) announce that a game is mounted and listening; the receiving launcher surfaces them to the matching game as `arcade:peer.ready`.
 

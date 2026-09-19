@@ -478,6 +478,18 @@
                 <span class="launcher-menu__item-label" id="menu-power-saver-label">Power Saver Off</span>
             </button>
         </div>
+        <!-- Motion (plans/motion-sensing-2026-09.md §6): the master switch,
+             then a row per game that has ever asked. Rendered by
+             arcade-motion-bridge.js; hidden on a device with no sensor and
+             no history. data-menu-stay keeps the menu open on a flip. -->
+        <div class="launcher-menu__section" id="menu-motion-section" hidden>
+            <div class="launcher-menu__heading">Motion</div>
+            <button type="button" class="launcher-menu__item" id="menu-motion-master" role="switch" aria-checked="true" data-menu-stay title="Let games you have allowed sense how you tilt this device">
+                <span class="launcher-menu__item-icon" aria-hidden="true">📱</span>
+                <span class="launcher-menu__item-label" id="menu-motion-master-label">Motion On</span>
+            </button>
+            <div id="menu-motion-games"></div>
+        </div>
         <div class="launcher-menu__section">
             <label class="launcher-menu__inline" for="menu-pool-cap-input" title="How many recently-played games stay loaded in memory. Lower saves battery; higher gives instant relaunch.">
                 <span>Open games:</span>
@@ -635,6 +647,10 @@
         <div class="diag-log__actions">
             <button type="button" class="diag-log__btn diag-log__btn--primary" id="diag-log-copy">📋 Copy to clipboard</button>
             <button type="button" class="diag-log__btn" id="diag-log-share" hidden>📤 Share…</button>
+            <!-- The motion hardware probe (plans/motion-sensing-2026-09.md
+                 WP0). A new top-level tab: iOS grants sensor permission to a
+                 top-level page's own gesture only. -->
+            <a class="diag-log__btn" id="diag-motion-probe" href="motion-probe.html" target="_blank" rel="noopener">📱 Motion probe</a>
         </div>
     </div>
 </div>
@@ -812,6 +828,16 @@
                  clicking any other = instant switch. -->
             <div class="game-topbar__tabs" id="game-topbar-tabs" aria-label="Open games"></div>
             <div class="game-topbar__actions">
+                <!-- Shown only while the running game is receiving motion
+                     samples; one tap from the Motion section that turns it
+                     off (arcade-motion-bridge.js). -->
+                <button type="button" class="topbar-btn topbar-btn--motion" id="game-motion-mark" hidden aria-label="This game is using motion" title="This game is using motion">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <rect x="8" y="4" width="8" height="16" rx="1.5" transform="rotate(18 12 12)"/>
+                        <path d="M3.5 9a9 9 0 0 1 3-4.5"/>
+                        <path d="M20.5 15a9 9 0 0 1-3 4.5"/>
+                    </svg>
+                </button>
                 <!-- The host-side invite door (plans/tables-2026-08.md D4). A
                      scope needs both ends to agree and SOMETHING has to propose
                      first; before this button the only proposer in the product
@@ -1267,11 +1293,14 @@
         // Close after taking an action inside the panel.
         panel.addEventListener('click', (e) => {
             const item = e.target.closest('.launcher-menu__item');
-            if (item && !item.disabled) close();
+            // data-menu-stay: a switch the player may flip more than once
+            // (the Motion rows) leaves the menu open.
+            if (item && !item.disabled && !item.hasAttribute('data-menu-stay')) close();
         });
 
         window.__arcade.launcherMenu = menu;
         window.__arcade.closeLauncherMenu = close;
+        window.__arcade.openLauncherMenu = open;
     })();
 
     // ==========================================
@@ -2067,7 +2096,12 @@
             arcadeDialogEl.classList.add('hidden');
             r(result);
         }
+        let arcadeDialogOnOk = null;
         arcadeDialogOk.addEventListener('click', () => {
+            // opts.onOk runs INSIDE the click — for callers whose next step
+            // needs the user gesture itself, not a microtask after it (iOS
+            // DeviceOrientationEvent.requestPermission, arcade-motion-bridge).
+            if (arcadeDialogResolve && arcadeDialogOnOk) { try { arcadeDialogOnOk(); } catch (e) {} }
             arcadeDialogFinish(arcadeDialogInput.classList.contains('hidden') ? true : arcadeDialogInput.value);
         });
         arcadeDialogCancel.addEventListener('click', () => arcadeDialogFinish(null));
@@ -2077,6 +2111,7 @@
             opts = opts || {};
             const run = () => new Promise((resolve) => {
                 arcadeDialogResolve = resolve;
+                arcadeDialogOnOk = (typeof opts.onOk === 'function') ? opts.onOk : null;
                 arcadeDialogMsg.textContent = opts.message || '';
                 const hasInput = !!opts.input;
                 arcadeDialogInput.classList.toggle('hidden', !hasInput);
@@ -2149,7 +2184,10 @@
             // UI bridge state (quit hook, custom title) dies with a frame —
             // a fresh mount re-registers after its handshake. Lazy read: the
             // ui bridge module loads after the pool.
-            clearGameUi: (gid) => { if (window.__arcade.ui) window.__arcade.ui.clearGame(gid); },
+            clearGameUi: (gid) => {
+                if (window.__arcade.ui) window.__arcade.ui.clearGame(gid);
+                if (window.__arcade.motion) window.__arcade.motion.clearGame(gid);
+            },
             closeLauncherMenu: () => { if (window.__arcade.closeLauncherMenu) window.__arcade.closeLauncherMenu(); }
         };
 
@@ -2167,6 +2205,7 @@
             getStorage: () => window.__arcade.storage,
             getUi: () => window.__arcade.ui,
             getConfigs: () => window.__arcade.configs,
+            getMotion: () => window.__arcade.motion,
             getEnvelope: () => window.__arcade.envelope
         };
     })();
@@ -2618,6 +2657,7 @@
     import { initLocalBackupEngine } from './arcade-local-backup.js';
     import { initBackupDialog } from './arcade-backup-ui.js';
     import { initUiBridge } from './arcade-ui-bridge.js';
+    import { initMotionBridge } from './arcade-motion-bridge.js';
     import { validateToast, validateUiOp } from './arcade-envelope.js';
 
     const storageHost = window.__arcade.storageHost;
@@ -2633,6 +2673,31 @@
     window.__arcade.ui = initUiBridge(
         Object.assign({ validateUiOp }, window.__arcade.uiHost));
     window.__arcade.uiHost.replayPendingUiMessages();
+
+    // MOTION — the brokered sensor (cap 'motion.bridge'). Same capability-
+    // injection contract as the UI bridge; the names come from the catalog so
+    // the Motion section can list games that are not mounted right now.
+    const motionName = (gid) => {
+        const g = (window.__arcade.catalog || []).find((c) => c.id === gid);
+        return (g && g.name) || window.__arcade.pool.getGameName(gid) || gid;
+    };
+    window.__arcade.motion = initMotionBridge({
+        postToIframe: window.__arcade.pool.postToIframe,
+        dialog: (opts) => window.__arcade.dialog(opts),
+        showToast: window.__arcade.showToast,
+        getActiveGameId: window.__arcade.pool.getActiveGameId,
+        getMountedGameIds: window.__arcade.pool.mountedGameIds,
+        getGameName: motionName,
+        onPoolChanged: window.__arcade.pool.onPoolChanged,
+        openSettings: () => { if (window.__arcade.openLauncherMenu) window.__arcade.openLauncherMenu(); },
+        els: {
+            section: document.getElementById('menu-motion-section'),
+            master: document.getElementById('menu-motion-master'),
+            masterLabel: document.getElementById('menu-motion-master-label'),
+            list: document.getElementById('menu-motion-games'),
+            mark: document.getElementById('game-motion-mark')
+        }
+    });
     window.__arcade.save = initSaveLoad(storageHost);
     window.__arcade.sync = initSyncEngine(storageHost);
     // Shared leaderboards (#leaderboards): union-merges peer score boards into

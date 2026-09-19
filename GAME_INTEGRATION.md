@@ -857,7 +857,8 @@ Arcade.peer.onStatus(s => ...);    // gate multiplayer UI on this — it reflect
                                    // scopes, not the device's links (see below)
 Arcade.peer.caps();                // launcher capability flags: feature-detect additive features
                                    // ('peer.sendTo', 'peer.roster', 'peer.meta', 'peer.invite',
-                                   // 'peer.party', 'storage.bridge', 'ui.bridge', 'configs.bridge');
+                                   // 'peer.party', 'storage.bridge', 'ui.bridge', 'configs.bridge',
+                                   // 'motion.bridge');
                                    // [] standalone
 Arcade.peer.send({ move: 'e4' });  // broadcast; JSON-safe payload; false unless connected/interrupted
 Arcade.peer.send(hand, { to });    // targeted: only deviceId `to` receives it (cap 'peer.sendTo')
@@ -1304,6 +1305,82 @@ frames cross by `postMessage` transfer. The main-thread route inside
 
 ---
 
+## 7f. Motion — `Arcade.motion` (SDK 3.17.0+)
+
+A phone knows which way down is. `Arcade.motion` hands a game one small
+stream — **gravity in the axes of its own screen** — without Euler angles,
+iOS permission rituals, or the sandbox. Framed, the launcher owns the sensor
+and the consent (cap `motion.bridge`: a game frame has no
+`accelerometer`/`gyroscope` permission and receives no `deviceorientation`
+events of its own); standalone, the SDK listens directly. One surface either
+way.
+
+```js
+await Arcade.ready;
+if (Arcade.motion && Arcade.motion.available()) showTiltControl();
+
+// From a tap. Framed: the launcher asks the player once per game, then
+// remembers. Standalone on iOS: this IS the gesture requestPermission needs.
+const how = await Arcade.motion.start({ hz: 30 });   // 'granted' | 'denied' | 'unavailable'
+
+const off = Arcade.motion.on((m) => {
+  m.x, m.y      // gravity in the plane of the SCREEN: x right, y down.
+                // Length ≈ 1 held upright in any roll, → 0 lying flat.
+  m.z           // out of the glass, towards the player (−1 face up on a table)
+  m.flat        // true when x,y are too short (< 0.2) to mean a direction
+  m.t           // ms, monotonic — for dt between samples, not a wall clock
+});
+Arcade.motion.stop();                                 // and off() to unsubscribe
+```
+
+- **The vector is already in screen axes.** The device's rotation
+  (`screen.orientation.angle`) is taken out for you: held upright in
+  portrait or either landscape, `(x, y)` is `(0, 1)`.
+- **`Arcade.motion.compass(n, opts)`** quantises samples to `n` directions
+  with hysteresis and a flat-hold, and answers **only on a change** — for
+  games where each change is expensive. `c.update(m)` → `{ dir, gx, gy }` or
+  `null`. The ring runs clockwise from screen-right with y down, so
+  `compass(8)` starts at index 2 (straight down) and `gx, gy` are exactly
+  what `Arcade.sim.sand`'s `tilt(gx, gy)` takes; `compass(4)` suits a menu;
+  a marble wants the raw vector. `opts`: `margin` (degrees past a boundary
+  before flipping; default a fifth of a sector), `flat`, `start` (`null` =
+  no direction until the first real sample). `c.dir`, `c.direction`,
+  `c.reset()`.
+- **`available()`** is false when the launcher lacks the cap, the device
+  has no plausible sensor (no touch screen, insecure context), the player
+  turned the launcher's **Motion** master switch off, or turned *your* row
+  off there. Read it after
+  `Arcade.ready`; **`Arcade.motion.onChange(fn)`** fires `{ available,
+  running }` when a switch flips or a stream starts or ends — a row turned
+  off mid-stream ends your stream at once, so follow it rather than showing
+  a control that has gone dead.
+- **`start()` answers** `'granted'`; `'denied'` (the player said *Not now* —
+  which is not remembered, you may ask again from their next tap — or the
+  row is off, or iOS refused, or your frame is not the active app); or
+  `'unavailable'` (no sensor answered within ~1.5 s: a touch laptop).
+- **Lifecycle is the SDK's.** Samples stop while your game is suspended and
+  resume with it; you write nothing. The launcher streams only to the active
+  app, from one listener for the whole launcher, at your `hz` (1–60,
+  default 30).
+- While you stream, the launcher shows a motion mark in its top bar; tapping
+  it opens the Motion section with your game's toggle.
+
+**The contract:**
+
+- [ ] **Motion is never the only way.** Every motion-driven control has a
+  touch or keyboard equivalent.
+- [ ] **Ask from a tap, for a reason the player can see.** `start()` on load
+  is a denied prompt on iOS and a surprise everywhere.
+- [ ] **Stop when you are not using it.** The sensor costs battery; §6d
+  applies to inputs too. A game resting at 0 fps should not hold a 30 Hz
+  stream it ignores — drive from `compass()` changes, or `stop()`.
+- [ ] **Replays record what motion decided, not the samples.** Motion is
+  outside the deterministic core; a recorded tilt is an input like a stroke.
+- [ ] **Guard the surface if you vendor the SDK:** `Arcade.motion` is
+  `undefined` before 3.17.0.
+
+---
+
 ## 8. Standalone mode must keep working
 
 The launcher is one of two ways to run the game; the GitHub Pages URL is the other.
@@ -1548,6 +1625,7 @@ A game is considered integrated when all of the following pass:
 - [ ] Service worker (if any) does not intercept requests for the SDK (`/sdk/v3/arcade-sdk.js` / `/arcade-sdk.js`) or other launcher assets (no `[Arcade SDK]` warning in console).
 - [ ] `Arcade.peer.caps()` inside the launcher frame reports the full documented capability list (§14) — the caps contract arrived intact.
 - [ ] The game keeps working when a cap is absent: gate every capability-backed feature on `Arcade.peer.caps()`, never assume the full list.
+- [ ] If the game uses `Arcade.motion` (§7f): every motion-driven control also works by touch or keyboard; `start()` is only ever called from a tap; the control is hidden when `available()` is false and follows `onChange`; the stream is stopped when the game is not using it.
 
 ### Automated check
 
@@ -1902,6 +1980,16 @@ child  → parent: arcade:configs.op         { op: 'share', id, code } | { op: '
 parent → child:  arcade:config             { t, v, d }               // a config the launcher accepted +
                                                                     // prompted the user about — data is HOSTILE
 child  → parent: arcade:config.ack         { t, ok }                 // your handler accepted it (cancels a toast)
+
+— motion (§7f; cap 'motion.bridge'; the SDK speaks this for you) —
+child  → parent: arcade:motion.op          { op: 'start', id, hz }   // RPC; answered via arcade:bridge.result
+                                           // (value: 'granted' | 'denied' | 'unavailable'); may
+                                           // raise the launcher's consent dialog (active app only)
+child  → parent: arcade:motion.op          { op: 'stop' }
+parent → child:  arcade:motion.sample      { x, y, z, t }            // gravity in screen axes; ≤ hz, to the
+                                                                    // ACTIVE app only, between start and stop
+parent → child:  arcade:motion.state       { enabled }               // a Motion switch flipped; also
+                                                                    // welcome.motion.enabled at handshake
 
 — ui chrome bridge (§7; the SDK speaks this for you) —
 child  → parent: arcade:ui.op              { op: 'confirm'|'openFile'|'share', id, ... }

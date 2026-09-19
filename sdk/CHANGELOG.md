@@ -32,6 +32,38 @@ semver is for humans and URLs, never checked on the wire.
 
 ---
 
+## 3.17.0
+
+Additive: **`Arcade.motion`** — which way is down, in the axes of the game's
+own screen (GAME_INTEGRATION.md §7f; plan `plans/motion-sensing-2026-09.md`).
+`available()`, `await start({ hz })` from a tap → `'granted' | 'denied' |
+'unavailable'`, `on(fn)` with `{ x, y, z, flat, t }` (gravity in the plane of
+the screen: x right, y down, the screen's rotation already taken out; z out
+of the glass), `stop()`, `running()`, `onChange(fn)` for `{ available,
+running }`, and the pure helper `compass(n, opts)` — `n` directions with
+hysteresis and a flat-hold, answering only on a change, on the sand kernel's
+ring so `compass(8)`'s `gx, gy` go straight into `sim.tilt()`.
+
+Framed, motion is **brokered by the launcher** behind the new cap
+**`motion.bridge`**: a game frame has no `accelerometer`/`gyroscope`
+permission, so the launcher owns the one `deviceorientation` listener and the
+consent (asked once per game, remembered, revocable in the launcher menu's
+new *Motion* section, which also holds a master switch), and streams samples
+to the active app only. Both switches reach a game as `available()` and
+`onChange` — there is deliberately no separate settings accessor.
+Wire: `arcade:motion.op { op: 'start'|'stop', id, hz }` →
+`arcade:bridge.result`; `arcade:motion.sample { x, y, z, t }`;
+`arcade:motion.state { enabled }` and `welcome.motion.enabled`. Standalone,
+the SDK listens directly (and `start()` is the gesture iOS's
+`requestPermission()` needs). Samples stop on suspend and resume on resume
+without the game doing anything. Absent the cap (older launcher) or a
+plausible sensor (no touch screen, insecure context), `available()` is false
+and nothing prompts. v1 is gravity; rotation rate, fused attitude and shake
+are scheduled (launcher issue #170) as extra fields on the same sample.
+
+A game that vendors an older SDK must guard: `Arcade.motion` is `undefined`
+before 3.17.0.
+
 ## 3.16.0
 
 Additive, to the sand kernel companion (`arcade-sim-sand.js` + `.wasm`):

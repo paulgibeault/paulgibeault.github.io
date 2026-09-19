@@ -32,6 +32,8 @@
     "store-acceptance": "node tools/store-acceptance.mjs",
     "bridge-acceptance": "node tools/bridge-acceptance.mjs",
     "ui-acceptance": "node tools/ui-acceptance.mjs",
+    "motion-acceptance": "node tools/motion-acceptance.mjs",
+    "motion-unit": "node tools/motion-unit.mjs",
     "export-roundtrip": "node tools/export-roundtrip-acceptance.mjs",
     "export-advanced-acceptance": "node tools/export-advanced-acceptance.mjs",
     "backup-dialog-acceptance": "node tools/backup-dialog-acceptance.mjs",

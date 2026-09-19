@@ -347,6 +347,16 @@ body.app-in-game .launcher-menu__panel {
     opacity: 0.85;
     flex-shrink: 0;
 }
+/* Switch rows (Motion): the state reads from the label and tag text, never
+   colour alone. */
+.launcher-menu__item[role="switch"][aria-checked="false"] { color: var(--text-secondary); }
+.launcher-menu__item[role="switch"]:disabled { opacity: 0.45; cursor: not-allowed; }
+.launcher-menu__item--sub { padding-left: 36px; }
+.launcher-menu__item[role="switch"][aria-checked="true"] .launcher-menu__item-tag {
+    color: var(--field-gold);
+    border-color: var(--field-gold);
+}
+.topbar-btn--motion { color: var(--field-gold); }
 .launcher-menu__item-label { flex: 1; }
 .launcher-menu__item-tag {
     font-size: 0.6rem;
@@ -748,6 +758,7 @@ body.app-in-game .launcher-menu__panel {
     cursor: pointer;
     transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
+a.diag-log__btn { text-align: center; text-decoration: none; }
 .diag-log__btn--primary {
     border-color: var(--field-gold-dim);
     color: var(--field-gold);

@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Motion probe — Paul's Arcade</title>
+<!-- WP0 of plans/motion-sensing-2026-09.md (issue #169): what real phones do.
+     A diagnostic, not part of the arcade: open it TOP-LEVEL over HTTPS on an
+     iPhone (Safari, and again from the installed PWA) and an Android phone.
+     It answers the three things a desk cannot: the landscape sign convention,
+     the lifetime of iOS's permission grant, and real event rates and signs —
+     and it records traces for the known-answer tests. Nothing leaves the
+     device unless you copy, share or save it yourself. -->
+<style>
+    :root { color-scheme: dark; }
+    body { margin: 0; padding: 14px 16px 60px; background: #0d1117; color: #e6edf3;
+           font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    h1 { font-size: 1.1rem; margin: 0 0 4px; }
+    h2 { font-size: 0.8rem; letter-spacing: 1.5px; text-transform: uppercase; color: #d4af37;
+         margin: 22px 0 8px; border-bottom: 1px solid #30363d; padding-bottom: 4px; }
+    p { margin: 6px 0; color: #9aa4af; }
+    table { border-collapse: collapse; width: 100%; }
+    td { padding: 2px 8px 2px 0; vertical-align: top; }
+    td:first-child { color: #9aa4af; white-space: nowrap; width: 1%; }
+    td.v { font-variant-numeric: tabular-nums; word-break: break-word; }
+    button, select { font: inherit; color: #e6edf3; background: #21262d; border: 1px solid #d4af37;
+             border-radius: 6px; padding: 9px 12px; margin: 4px 6px 4px 0; }
+    button:disabled { opacity: 0.45; }
+    .row { display: flex; gap: 14px; flex-wrap: wrap; align-items: flex-start; }
+    canvas { background: #161b22; border: 1px solid #30363d; border-radius: 8px; max-width: 100%; }
+    iframe { width: 100%; height: 118px; border: 1px solid #30363d; border-radius: 6px; background: #161b22; }
+    textarea { width: 100%; box-sizing: border-box; height: 170px; background: #161b22; color: #e6edf3;
+               border: 1px solid #30363d; border-radius: 6px; font: inherit; font-size: 12px; }
+    .ok { color: #5cb85c; } .bad { color: #ff7b72; } .warn { color: #d4a843; }
+</style>
+</head>
+<body>
+<h1>Motion probe</h1>
+<p>Hold the phone as each section asks. Everything stays on this device until you copy or share it.</p>
+
+<h2>1 · Permission</h2>
+<table>
+    <tr><td>requestPermission exists</td><td class="v" id="p-exists">…</td></tr>
+    <tr><td>on load, no gesture</td><td class="v" id="p-load">…</td></tr>
+    <tr><td>from the button (orientation)</td><td class="v" id="p-tap-o">not asked yet</td></tr>
+    <tr><td>from the button (motion)</td><td class="v" id="p-tap-m">not asked yet</td></tr>
+    <tr><td>this page load is visit #</td><td class="v" id="p-visit">…</td></tr>
+</table>
+<button id="ask">Ask for permission</button>
+<p><b>Permission lifetime:</b> after Allow, reload this page and read “on load, no gesture”. <span class="ok">granted</span> means Safari kept the grant; a rejection means a remembered Allow still needs one tap per launch. Repeat after closing the tab, and in the installed PWA.</p>
+
+<h2>2 · deviceorientation</h2>
+<div class="row">
+    <canvas id="arrow" width="180" height="180" aria-label="Derived gravity on screen"></canvas>
+    <table style="flex:1; min-width: 210px">
+        <tr><td>alpha β gamma</td><td class="v" id="o-angles">no event yet</td></tr>
+        <tr><td>absolute</td><td class="v" id="o-abs">…</td></tr>
+        <tr><td>screen.orientation</td><td class="v" id="o-screen">…</td></tr>
+        <tr><td>window.orientation</td><td class="v" id="o-win">…</td></tr>
+        <tr><td>derived x y z</td><td class="v" id="o-vec">…</td></tr>
+        <tr><td>|xy| · flat</td><td class="v" id="o-len">…</td></tr>
+        <tr><td>events / s</td><td class="v" id="o-rate">…</td></tr>
+    </table>
+</div>
+<p><b>The landscape check:</b> hold the phone upright and turn it to each landscape. The arrow must keep pointing at the floor. If it points at the ceiling or sideways in a landscape, note which one and the <i>screen.orientation</i> line — that is the convention the unit tests must pin.</p>
+
+<h2>3 · devicemotion</h2>
+<table>
+    <tr><td>accel incl. gravity</td><td class="v" id="m-aig">no event yet</td></tr>
+    <tr><td>acceleration</td><td class="v" id="m-acc">…</td></tr>
+    <tr><td>rotationRate α β γ</td><td class="v" id="m-rot">…</td></tr>
+    <tr><td>interval (reported)</td><td class="v" id="m-int">…</td></tr>
+    <tr><td>events / s</td><td class="v" id="m-rate">…</td></tr>
+    <tr><td>sign of a.i.g. z, face up</td><td class="v" id="m-sign">lay the phone flat, face up</td></tr>
+</table>
+
+<h2>4 · Inside a sandboxed frame — the evidence for brokering</h2>
+<p>Two opaque-origin frames, as the launcher mounts games. The first has no sensor permission (today's game frame); the second is delegated <i>accelerometer; gyroscope; magnetometer</i>.</p>
+<iframe id="f-plain" title="Sandboxed frame without allow" sandbox="allow-scripts"></iframe>
+<iframe id="f-allow" title="Sandboxed frame with allow" sandbox="allow-scripts" allow="accelerometer; gyroscope; magnetometer"></iframe>
+
+<h2>5 · Record a trace (10 s)</h2>
+<select id="move" aria-label="Which scripted move">
+    <option value="roll">upright, roll left then right</option>
+    <option value="flat">upright → lay flat → upright</option>
+    <option value="landscapes">portrait → landscape left → landscape right</option>
+    <option value="shake">shake</option>
+    <option value="still">still on a table (60 s drift reference: record 6×)</option>
+</select>
+<button id="rec">Record 10 s</button>
+<span id="rec-status"></span>
+
+<h2>6 · Findings</h2>
+<p>Copy this into §0 of the plan (or share it to yourself). Traces go in <i>tools/fixtures/motion/</i>.</p>
+<textarea id="out" readonly spellcheck="false" aria-label="Findings and last trace"></textarea>
+<button id="copy">Copy findings + trace</button>
+<button id="share" hidden>Share…</button>
+<button id="save">Save as file</button>
+
+<script type="module">
+import { screenGravity, isFlat } from './arcade-motion-core.js';
+
+const $ = (id) => document.getElementById(id);
+const f2 = (v) => (typeof v === 'number' && isFinite(v)) ? v.toFixed(2) : String(v);
+const tri = (o) => (o && typeof o.x === 'number') ? [o.x, o.y, o.z].map(f2).join('  ') : 'null';
+
+const findings = {
+    when: new Date().toISOString(),
+    ua: navigator.userAgent,
+    displayMode: ['standalone', 'fullscreen', 'minimal-ui', 'browser'].find((m) => matchMedia(`(display-mode: ${m})`).matches) || '?',
+    iosStandalone: navigator.standalone === true,
+    secure: isSecureContext,
+    touchPoints: navigator.maxTouchPoints,
+    permission: {}, orientation: {}, motion: {}, frames: {}
+};
+let lastTrace = null;
+
+// ── 1. permission ──
+const OE = window.DeviceOrientationEvent, ME = window.DeviceMotionEvent;
+const hasReq = !!(OE && typeof OE.requestPermission === 'function');
+findings.permission.exists = hasReq;
+$('p-exists').textContent = hasReq ? 'yes (iOS-style)' : 'no — events flow without asking';
+let visit = 1;
+try { visit = (parseInt(sessionStorage.getItem('probe.visit'), 10) || 0) + 1; sessionStorage.setItem('probe.visit', String(visit)); } catch (e) {}
+findings.permission.visitInTab = visit;
+$('p-visit').textContent = visit + ' in this tab';
+function show(el, key, p) {
+    // p() runs synchronously: from the button this IS the user gesture.
+    let asked;
+    try { asked = p(); } catch (e) { asked = Promise.reject(e); }
+    return Promise.resolve(asked).then(
+        (r) => { findings.permission[key] = r; el.textContent = r; el.className = 'v ' + (r === 'granted' ? 'ok' : 'bad'); },
+        (e) => { findings.permission[key] = 'rejected: ' + (e && e.name || e); el.textContent = findings.permission[key]; el.className = 'v warn'; });
+}
+if (hasReq) show($('p-load'), 'onLoadNoGesture', () => OE.requestPermission());
+else { $('p-load').textContent = 'n/a'; $('ask').disabled = true; }
+$('ask').addEventListener('click', () => {
+    show($('p-tap-o'), 'fromTapOrientation', () => OE.requestPermission());
+    if (ME && typeof ME.requestPermission === 'function') show($('p-tap-m'), 'fromTapMotion', () => ME.requestPermission());
+    else $('p-tap-m').textContent = 'n/a';
+});
+
+// ── 2/3. live readouts ──
+function angle() {
+    const so = screen.orientation;
+    return (so && typeof so.angle === 'number') ? so.angle : (typeof window.orientation === 'number' ? window.orientation : 0);
+}
+function rateMeter(el, key, into) {
+    let n = 0, t0 = performance.now();
+    setInterval(() => {
+        const now = performance.now(), hz = n * 1000 / (now - t0);
+        el.textContent = hz.toFixed(1);
+        into[key] = Math.round(hz * 10) / 10;
+        n = 0; t0 = now;
+    }, 1000);
+    return () => { n++; };
+}
+const tickO = rateMeter($('o-rate'), 'hz', findings.orientation);
+const tickM = rateMeter($('m-rate'), 'hz', findings.motion);
+const ctx = $('arrow').getContext('2d');
+function draw(g) {
+    const W = 180, c = W / 2, R = 70;
+    ctx.clearRect(0, 0, W, W);
+    ctx.strokeStyle = '#30363d'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(c, c, R, 0, 7); ctx.stroke();
+    ctx.beginPath(); ctx.arc(c, c, R * 0.2, 0, 7); ctx.stroke(); // the flat disc
+    if (!g) return;
+    const flat = isFlat(g.x, g.y);
+    ctx.strokeStyle = ctx.fillStyle = flat ? '#9aa4af' : '#d4af37'; ctx.lineWidth = 4;
+    const x = c + g.x * R, y = c + g.y * R;
+    ctx.beginPath(); ctx.moveTo(c, c); ctx.lineTo(x, y); ctx.stroke();
+    ctx.beginPath(); ctx.arc(x, y, 7, 0, 7); ctx.fill();
+}
+draw(null);
+const recorders = new Set();
+window.addEventListener('deviceorientation', (e) => {
+    tickO();
+    const a = angle(), g = screenGravity(e.beta, e.gamma, a);
+    $('o-angles').textContent = [e.alpha, e.beta, e.gamma].map(f2).join('  ');
+    $('o-abs').textContent = String(e.absolute) + (typeof e.webkitCompassHeading === 'number' ? '  (webkitCompassHeading ' + f2(e.webkitCompassHeading) + ')' : '');
+    $('o-screen').textContent = screen.orientation ? screen.orientation.angle + '°  ' + screen.orientation.type : 'unsupported';
+    $('o-win').textContent = String(window.orientation);
+    $('o-vec').textContent = g ? [g.x, g.y, g.z].map(f2).join('  ') : 'null angles (no sensor behind the event)';
+    $('o-len').textContent = g ? f2(Math.hypot(g.x, g.y)) + ' · ' + (isFlat(g.x, g.y) ? 'flat' : 'tilted') : '—';
+    draw(g);
+    findings.orientation.nullAngles = !g;
+    findings.orientation.absolute = e.absolute;
+    findings.orientation.screenAngleNow = a;
+    findings.orientation.screenType = screen.orientation ? screen.orientation.type : null;
+    findings.orientation.windowOrientation = typeof window.orientation === 'number' ? window.orientation : null;
+    recorders.forEach((r) => r.o.push([Math.round(e.timeStamp * 10) / 10, e.alpha, e.beta, e.gamma, a]));
+});
+window.addEventListener('devicemotion', (e) => {
+    tickM();
+    const g = e.accelerationIncludingGravity, r = e.rotationRate;
+    $('m-aig').textContent = tri(g);
+    $('m-acc').textContent = tri(e.acceleration);
+    $('m-rot').textContent = r ? [r.alpha, r.beta, r.gamma].map(f2).join('  ') : 'null';
+    $('m-int').textContent = f2(e.interval) + ' (ms on most; s on some iOS)';
+    findings.motion.interval = e.interval;
+    findings.motion.hasRotationRate = !!(r && r.alpha !== null);
+    findings.motion.hasAcceleration = !!(e.acceleration && e.acceleration.x !== null);
+    // Face up on a table the true gravity vector points INTO the glass (z = −1
+    // in our axes). Android reports a.i.g. z ≈ +9.8 there, iOS ≈ −9.8.
+    if (g && typeof g.z === 'number' && Math.abs(g.z) > 8.5 && Math.abs(g.x) < 2 && Math.abs(g.y) < 2) {
+        findings.motion.aigZFaceUp = Math.round(g.z * 100) / 100;
+        $('m-sign').textContent = f2(g.z) + (g.z > 0 ? '  → Android convention (reaction force)' : '  → iOS convention (gravity itself)');
+    }
+    recorders.forEach((rec) => rec.m.push([Math.round(e.timeStamp * 10) / 10,
+        g && g.x, g && g.y, g && g.z,
+        e.acceleration && e.acceleration.x, e.acceleration && e.acceleration.y, e.acceleration && e.acceleration.z,
+        r && r.alpha, r && r.beta, r && r.gamma]));
+});
+
+// ── 4. sandboxed frames ──
+const FRAME_DOC = (label) => `<!doctype html><meta name="viewport" content="width=device-width">
+<body style="margin:8px;background:#161b22;color:#e6edf3;font:12px ui-monospace,Menlo,monospace">
+<b>${label}</b> <button id="b" style="font:inherit">ask from inside</button><div id="s">listening…</div>
+<script>
+var o=0,on=0,m=0,req='n/a',t0=Date.now();
+addEventListener('deviceorientation',function(e){o++; if(typeof e.beta==='number') on++;});
+addEventListener('devicemotion',function(){m++;});
+var E=window.DeviceOrientationEvent, has=!!(E&&typeof E.requestPermission==='function');
+document.getElementById('b').onclick=function(){ if(!has){req='no requestPermission';return;}
+  try{E.requestPermission().then(function(r){req=r;},function(e){req='rejected: '+(e&&e.name);});}catch(e){req='threw: '+e.name;} };
+setInterval(function(){ var s={origin:location.origin,hasRequestPermission:has,orientationEvents:o,withNumbers:on,motionEvents:m,askedFromInside:req,seconds:Math.round((Date.now()-t0)/1000)};
+  document.getElementById('s').textContent=JSON.stringify(s); parent.postMessage({probe:'${label}',s:s},'*'); },1000);
+<\/script>`;
+$('f-plain').srcdoc = FRAME_DOC('no allow');
+$('f-allow').srcdoc = FRAME_DOC('allow sensors');
+window.addEventListener('message', (e) => {
+    if (e.data && typeof e.data.probe === 'string' && e.data.s) { findings.frames[e.data.probe] = e.data.s; }
+});
+
+// ── 5. trace ──
+$('rec').addEventListener('click', () => {
+    const rec = { o: [], m: [] };
+    const move = $('move').value, t0 = performance.now();
+    recorders.add(rec);
+    $('rec').disabled = true;
+    const timer = setInterval(() => { $('rec-status').textContent = ' recording… ' + Math.max(0, 10 - (performance.now() - t0) / 1000).toFixed(0) + ' s'; }, 250);
+    setTimeout(() => {
+        clearInterval(timer);
+        recorders.delete(rec);
+        $('rec').disabled = false;
+        lastTrace = {
+            move, ua: navigator.userAgent, startedAt: new Date().toISOString(), durationMs: 10000,
+            orientationColumns: ['t', 'alpha', 'beta', 'gamma', 'screenAngle'],
+            motionColumns: ['t', 'aigX', 'aigY', 'aigZ', 'accX', 'accY', 'accZ', 'rotAlpha', 'rotBeta', 'rotGamma'],
+            orientation: rec.o, motion: rec.m
+        };
+        $('rec-status').textContent = ` ${rec.o.length} orientation + ${rec.m.length} motion samples`;
+        render();
+    }, 10000);
+});
+
+// ── 6. findings ──
+function payload() { return JSON.stringify({ findings, trace: lastTrace }, null, 1); }
+function render() {
+    const t = lastTrace;
+    $('out').value = JSON.stringify(findings, null, 1)
+        + (t ? `\n\n// trace "${t.move}": ${t.orientation.length} orientation + ${t.motion.length} motion samples (in the copied/saved JSON)` : '\n\n// no trace recorded yet');
+}
+setInterval(render, 1500);
+$('copy').addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(payload()); $('copy').textContent = 'Copied'; }
+    catch (e) { $('out').value = payload(); $('out').select(); $('copy').textContent = 'Select-all shown — copy by hand'; }
+});
+if (navigator.share) {
+    $('share').hidden = false;
+    $('share').addEventListener('click', () => { navigator.share({ title: 'motion probe', text: payload() }).catch(() => {}); });
+}
+$('save').addEventListener('click', () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([payload()], { type: 'application/json' }));
+    const os = /iPhone|iPad/.test(navigator.userAgent) ? 'ios' : /Android/.test(navigator.userAgent) ? 'android' : 'other';
+    a.download = `motion-${os}-${lastTrace ? lastTrace.move : 'findings'}-${Date.now()}.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+});
+</script>
+</body>
+</html>

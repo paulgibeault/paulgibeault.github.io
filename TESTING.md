@@ -151,6 +151,7 @@ source of truth):
 | Sync + leaderboards | `sync-acceptance`, `leaderboard-acceptance` (+ `-unit` pairs) |
 | Records | `records-acceptance` |
 | Storage bridge / store / UI bridge | `bridge-acceptance`, `store-acceptance`, `ui-acceptance` |
+| Motion sensing (cap `motion.bridge`) | `motion-unit` (maths for all four screen angles, compass, consent, the bridge through fakes, the SDK's copy pinned to the core), `motion-acceptance` (CDP sensor override: consent dialog, active-app-only streaming, suspend/stop/switch silence, desktop, older launcher, standalone) |
 | P2P transport | `p2p-acceptance`, `p2p-multiseat`, `p2p-multiparty` (open-game scopes — the name is historical), `p2p-invite-ux`, `p2p-reconnect`, `p2p-crosssign` |
 | Identity | `user-identity-acceptance` (+ `-unit`) |
 | Catalog / configs / SDK | `catalog-acceptance` (grid render, deep links, MRU sort), `configs-acceptance`, `configs-p2p-acceptance`, `sdk-helpers` |
