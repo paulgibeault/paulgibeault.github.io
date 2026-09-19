@@ -120,7 +120,7 @@ below):
 | `screen.orientation` present; `window.orientation` | both present (`portrait-primary`, 0) | | |
 | `requestPermission()` before any grant, no gesture | rejects `NotAllowedError` | | n/a |
 | …from a tap | `granted` (orientation and motion) | | n/a |
-| …in a **new tab**, 11 min after a grant, no gesture | **rejects `NotAllowedError`** — the grant does not carry a gesture-less call; from a tap it is `granted` again (whether iOS re-shows its own prompt: to confirm). Same-tab reload still untested. | | n/a |
+| …in a **new tab** after a grant, no gesture | **both answers seen**: 11 min after the first grant → rejects `NotAllowedError`; 3 min after the second → `granted`, silently. Consistent with WebKit holding the grant in memory for the life of Safari's process, not on disk. | | n/a |
 | `deviceorientation` / `devicemotion` events per second | 59.8 / 59.8 | | |
 | sign of `accelerationIncludingGravity` | **gravity itself** (upright: y ≈ −9.5; on its left edge: x ≈ −9.7) — `aigSign +1` | | expected opposite |
 | `interval` units | **seconds** (0.01667) | | expected ms |
@@ -139,14 +139,15 @@ What this settles:
   `motion-unit.mjs` requires our formula's device-frame gravity to match
   `accelerationIncludingGravity` within 0.08 per axis (worst seen: 0.047),
   and pins angle 90 ↔ γ ≈ −84 ↔ "down the screen".
-- **The §8 lifetime risk is real, so the one-tap path is live code.** A
-  remembered Allow still needs a top-level gesture on each fresh page: the
-  game's tap happens inside the frame and does not count, so the bridge's
-  gesture-less `requestPermission()` rejects and the "Tap to enable motion"
-  toast is what a returning iPhone player actually sees. Candidate
-  improvement, pending one observation (does iOS re-show its system prompt
-  on that tap?): spend the *tile tap that launches the game* as the gesture
-  for games whose row is Allowed, so the chip works first time.
+- **Both of the bridge's paths for a remembered Allow are live, and the
+  order is right.** Run 3 shows a fresh page can get `granted` with no
+  gesture and no prompt (so the common case within a Safari session is
+  invisible: tap the chip, it works); run 2 shows it can also be refused (so
+  after Safari has been quit or evicted, the one-tap toast is what the
+  player sees, and its tap is where iOS shows its own prompt). Spending the
+  game tile's tap as the gesture was considered and dropped: in the first
+  case it is unnecessary, and in the second it would raise Apple's prompt
+  when a game opens rather than when the player reaches for motion.
 - Second run (04:42Z) also laid the phone flat: a.i.g. z = −10.77 face up —
   gravity itself, confirming `aigSign +1`. Its frames again saw 0 events.
 - **For WP6:** iOS `interval` is in seconds and its a.i.g. is gravity itself;
