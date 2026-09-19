@@ -165,17 +165,17 @@ console.log('\nconsent');
 {
     const c0 = normalizeConsent(null);
     ok(c0.enabled === true && Object.keys(c0.games).length === 0, 'default: master on, no rows');
-    ok(decideStart(c0, 'sand-art') === 'ask', 'no answer on record → ask');
-    const c1 = withAnswer(c0, 'sand-art', true, 1000);
-    ok(decideStart(c1, 'sand-art') === 'allow' && decideStart(c0, 'sand-art') === 'ask', 'Allow is remembered (and the input untouched)');
+    ok(decideStart(c0, 'tilt-game') === 'ask', 'no answer on record → ask');
+    const c1 = withAnswer(c0, 'tilt-game', true, 1000);
+    ok(decideStart(c1, 'tilt-game') === 'allow' && decideStart(c0, 'tilt-game') === 'ask', 'Allow is remembered (and the input untouched)');
     ok(decideStart(c1, 'other') === 'ask', '…per game');
-    const c2 = withAnswer(c1, 'sand-art', false, 2000);
-    ok(decideStart(c2, 'sand-art') === 'off' && !enabledFor(c2, 'sand-art'), 'a row set Off: denied without a dialog, not offered');
+    const c2 = withAnswer(c1, 'tilt-game', false, 2000);
+    ok(decideStart(c2, 'tilt-game') === 'off' && !enabledFor(c2, 'tilt-game'), 'a row set Off: denied without a dialog, not offered');
     const c3 = withMaster(c1, false);
-    ok(decideStart(c3, 'sand-art') === 'off' && decideStart(c3, 'never-asked') === 'off', 'master off: off for every game');
-    ok(decideStart(withMaster(c3, true), 'sand-art') === 'allow', 'master back on re-arms the dialog-free path');
-    ok(withUse(c1, 'sand-art', 5000).games['sand-art'].at === 5000, 'withUse stamps last-used');
-    ok(withUse(c2, 'sand-art', 5000).games['sand-art'].at === 2000, '…but not on an Off row');
+    ok(decideStart(c3, 'tilt-game') === 'off' && decideStart(c3, 'never-asked') === 'off', 'master off: off for every game');
+    ok(decideStart(withMaster(c3, true), 'tilt-game') === 'allow', 'master back on re-arms the dialog-free path');
+    ok(withUse(c1, 'tilt-game', 5000).games['tilt-game'].at === 5000, 'withUse stamps last-used');
+    ok(withUse(c2, 'tilt-game', 5000).games['tilt-game'].at === 2000, '…but not on an Off row');
     ok(Object.keys(withAnswer(c0, '../evil', true, 1).games).length === 0, 'a malformed gameId is never stored');
     const dirty = normalizeConsent({ enabled: 'no', games: { ok: { allowed: true, at: 'x' }, bad: { allowed: 'yes' }, '__proto__': { allowed: true }, 'a b': { allowed: true } } });
     ok(dirty.enabled === true && JSON.stringify(dirty.games) === '{"ok":{"allowed":true,"at":0}}', 'normalizeConsent drops malformed rows, keeps good ones');
@@ -195,7 +195,7 @@ function makeWorld(opts) {
     const handlers = {};
     const data = {};
     const world = {
-        posts: [], dialogs: [], toasts: [], active: 'sand-art', dialogAnswer: true,
+        posts: [], dialogs: [], toasts: [], active: 'tilt-game', dialogAnswer: true,
         poolListeners: [],
         win: {
             DeviceOrientationEvent: opts.noEvent ? undefined : function () {},
@@ -235,7 +235,7 @@ function makeWorld(opts) {
         },
         showToast: (msg, o) => world.toasts.push([msg, o]),
         getActiveGameId: () => world.active,
-        getGameName: (gid) => (gid === 'sand-art' ? 'Sand Art' : gid),
+        getGameName: (gid) => (gid === 'tilt-game' ? 'Tilt Game' : gid),
         onPoolChanged: (fn) => world.poolListeners.push(fn)
     });
     return world;
@@ -252,44 +252,44 @@ async function startAndFeed(w, gid, id, hz) {
 console.log('\nbridge — consent, then a stream');
 {
     const w = makeWorld();
-    ok(w.bridge.enabledFor('sand-art') === true, 'a phone, no history: motion is offered');
+    ok(w.bridge.enabledFor('tilt-game') === true, 'a phone, no history: motion is offered');
     ok(w.listenerCount() === 0, 'idle: the sensor is not listened to');
-    await startAndFeed(w, 'sand-art', 'r1', 30);
-    ok(w.dialogs.length === 1 && /“Sand Art” would like to use your device’s motion/.test(w.dialogs[0].message)
+    await startAndFeed(w, 'tilt-game', 'r1', 30);
+    ok(w.dialogs.length === 1 && /“Tilt Game” would like to use your device’s motion/.test(w.dialogs[0].message)
         && w.dialogs[0].okLabel === 'Allow' && w.dialogs[0].cancelLabel === 'Not now',
         'first start raises the attributed dialog: Allow / Not now');
     ok(/Menu → Motion/.test(w.dialogs[0].message), '…which says where to change it later');
     ok(w.result('r1') === 'granted', 'Allow + a first event → granted');
-    ok(w.consent().games['sand-art'].allowed === true, 'the answer is remembered');
+    ok(w.consent().games['tilt-game'].allowed === true, 'the answer is remembered');
     ok(w.listenerCount() === 1, 'exactly one listener while streaming');
     w.orient(90, 0, 100);
-    const s = w.samples('sand-art');
+    const s = w.samples('tilt-game');
     ok(s.length >= 1 && s[s.length - 1][1].x === 0 && s[s.length - 1][1].y === 1 && s[s.length - 1][1].z === 0
         && typeof s[s.length - 1][1].t === 'number', 'samples carry { x, y, z, t } in screen axes');
     w.win.screen.orientation.angle = 90;
     w.orient(0, -90, 200);
-    ok(w.samples('sand-art').slice(-1)[0][1].y === 1, 'the screen angle is read per event');
+    ok(w.samples('tilt-game').slice(-1)[0][1].y === 1, 'the screen angle is read per event');
     w.win.screen.orientation.angle = 0;
-    const before = w.samples('sand-art').length;
+    const before = w.samples('tilt-game').length;
     for (let i = 0; i < 60; i++) w.orient(90, 0, 1000 + i * (1000 / 60));
-    ok(w.samples('sand-art').length - before === 30, 'throttled to the requested 30 Hz');
+    ok(w.samples('tilt-game').length - before === 30, 'throttled to the requested 30 Hz');
     w.orient(null, null, 5000);
-    ok(w.samples('sand-art').length - before === 30, 'an all-null event sends nothing');
+    ok(w.samples('tilt-game').length - before === 30, 'an all-null event sends nothing');
 
     // dialog-free next time
-    w.bridge.motionOp('sand-art', { op: 'stop' });
+    w.bridge.motionOp('tilt-game', { op: 'stop' });
     ok(w.listenerCount() === 0, 'stop: the listener is removed');
-    w.bridge.motionOp('sand-art', { op: 'start', id: 'r2', hz: 30 });
+    w.bridge.motionOp('tilt-game', { op: 'start', id: 'r2', hz: 30 });
     await tick(5);
     ok(w.dialogs.length === 1 && w.result('r2') === 'granted', 'a remembered Allow starts without a dialog (sensor already seen: at once)');
 
     // active app only
-    const n0 = w.samples('sand-art').length;
+    const n0 = w.samples('tilt-game').length;
     w.setActive('other-game');
     ok(w.listenerCount() === 0, 'another app becomes active: the listener is removed');
     w.orient(90, 0, 9000);
-    ok(w.samples('sand-art').length === n0 && w.samples('other-game').length === 0, '…and nobody receives samples');
-    w.setActive('sand-art');
+    ok(w.samples('tilt-game').length === n0 && w.samples('other-game').length === 0, '…and nobody receives samples');
+    w.setActive('tilt-game');
     ok(w.listenerCount() === 1, 'back to the started game: listening again, no new start needed');
     w.setHidden(true);
     ok(w.listenerCount() === 0, 'page hidden: not listening');
@@ -306,26 +306,26 @@ console.log('\nbridge — consent, then a stream');
 console.log('\nbridge — a switch flipped mid-stream stops it at once');
 {
     const w = makeWorld();
-    await startAndFeed(w, 'sand-art', 'r1', 60);
+    await startAndFeed(w, 'tilt-game', 'r1', 60);
     ok(w.result('r1') === 'granted' && w.listenerCount() === 1, '(stream up)');
     // The Motion row flipped Off in another launcher tab: write + storage event
     // (the menu's own click runs the same consentChanged()).
-    w.store.setItem('arcade.v1._meta.motion', JSON.stringify(withAnswer(w.consent(), 'sand-art', false, 1)));
+    w.store.setItem('arcade.v1._meta.motion', JSON.stringify(withAnswer(w.consent(), 'tilt-game', false, 1)));
     w.posts.length = 0;
     w.fire('storage', { key: 'arcade.v1._meta.motion' });
     ok(w.listenerCount() === 0, 'row Off: the listener is gone');
-    ok(w.posts.some((p) => p[0] === 'sand-art' && p[1].type === 'arcade:motion.state' && p[1].enabled === false),
+    ok(w.posts.some((p) => p[0] === 'tilt-game' && p[1].type === 'arcade:motion.state' && p[1].enabled === false),
         'the frame is told (arcade:motion.state enabled:false → available() false)');
     w.orient(90, 0, 50000);
-    ok(w.samples('sand-art').length === 0, 'no sample after the flip');
-    ok(w.bridge.enabledFor('sand-art') === false, 'not offered while Off');
-    w.bridge.motionOp('sand-art', { op: 'start', id: 'r2', hz: 30 });
+    ok(w.samples('tilt-game').length === 0, 'no sample after the flip');
+    ok(w.bridge.enabledFor('tilt-game') === false, 'not offered while Off');
+    w.bridge.motionOp('tilt-game', { op: 'start', id: 'r2', hz: 30 });
     await tick(5);
     ok(w.result('r2') === 'denied' && w.dialogs.length === 1, 'start while Off → denied without a dialog');
     // master switch
-    w.store.setItem('arcade.v1._meta.motion', JSON.stringify(withMaster(withAnswer(w.consent(), 'sand-art', true, 2), false)));
+    w.store.setItem('arcade.v1._meta.motion', JSON.stringify(withMaster(withAnswer(w.consent(), 'tilt-game', true, 2), false)));
     w.fire('storage', { key: 'arcade.v1._meta.motion' });
-    ok(w.bridge.enabledFor('sand-art') === false && w.bridge.enabledFor('never-asked') === false, 'master off: offered to nobody');
+    ok(w.bridge.enabledFor('tilt-game') === false && w.bridge.enabledFor('never-asked') === false, 'master off: offered to nobody');
     w.fire('storage', { key: 'some.other.key' });
     ok(true, 'unrelated storage events are ignored');
 }
@@ -334,36 +334,36 @@ console.log('\nbridge — Not now, eviction, unavailable');
 {
     const w = makeWorld();
     w.dialogAnswer = null;
-    w.bridge.motionOp('sand-art', { op: 'start', id: 'r1', hz: 30 });
+    w.bridge.motionOp('tilt-game', { op: 'start', id: 'r1', hz: 30 });
     await tick(5);
     ok(w.result('r1') === 'denied' && w.consent() === null, '"Not now" → denied and NOTHING is remembered');
     ok(w.listenerCount() === 0, '…and the sensor was never touched');
-    w.bridge.motionOp('sand-art', { op: 'start', id: 'r2', hz: 30 });
+    w.bridge.motionOp('tilt-game', { op: 'start', id: 'r2', hz: 30 });
     await tick(5);
     ok(w.dialogs.length === 2, 'the game may ask again from the next tap');
 
     w.dialogAnswer = true;
-    await startAndFeed(w, 'sand-art', 'r3', 30);
+    await startAndFeed(w, 'tilt-game', 'r3', 30);
     ok(w.result('r3') === 'granted', '(allowed this time)');
-    w.bridge.clearGame('sand-art');
+    w.bridge.clearGame('tilt-game');
     ok(w.listenerCount() === 0 && w.bridge.snapshot().started.length === 0, 'an evicted frame\'s stream dies with it');
-    w.bridge.motionOp('sand-art', { bogus: true });
-    w.bridge.motionOp('sand-art', { op: 'start' });
+    w.bridge.motionOp('tilt-game', { bogus: true });
+    w.bridge.motionOp('tilt-game', { op: 'start' });
     ok(w.bridge.snapshot().started.length === 0, 'malformed ops are dropped');
 }
 {
     const desk = makeWorld({ noTouch: true });
-    ok(desk.bridge.enabledFor('sand-art') === false, 'a desktop (no touch): not offered');
-    desk.bridge.motionOp('sand-art', { op: 'start', id: 'r1', hz: 30 });
+    ok(desk.bridge.enabledFor('tilt-game') === false, 'a desktop (no touch): not offered');
+    desk.bridge.motionOp('tilt-game', { op: 'start', id: 'r1', hz: 30 });
     await tick(5);
     ok(desk.result('r1') === 'unavailable' && desk.dialogs.length === 0, '…and a start answers unavailable, no dialog');
     const none = makeWorld({ noEvent: true });
-    none.bridge.motionOp('sand-art', { op: 'start', id: 'r1', hz: 30 });
+    none.bridge.motionOp('tilt-game', { op: 'start', id: 'r1', hz: 30 });
     await tick(5);
     ok(none.result('r1') === 'unavailable', 'no DeviceOrientationEvent → unavailable');
 
     const mute = makeWorld();
-    mute.bridge.motionOp('sand-art', { op: 'start', id: 'r1', hz: 30 });
+    mute.bridge.motionOp('tilt-game', { op: 'start', id: 'r1', hz: 30 });
     await tick(20);
     ok(mute.result('r1') === undefined && mute.listenerCount() === 1, 'a touch device with a silent sensor: listening, waiting');
     mute.orient(null, null, 5);
@@ -375,30 +375,30 @@ console.log('\nbridge — Not now, eviction, unavailable');
 console.log('\nbridge — iOS permission');
 {
     const w = makeWorld({ ios: 'granted' });
-    await startAndFeed(w, 'sand-art', 'r1', 30);
+    await startAndFeed(w, 'tilt-game', 'r1', 30);
     ok(w.permissionCalls === 1 && w.result('r1') === 'granted', 'Allow\'s click calls requestPermission() (synchronously, via onOk)');
-    w.bridge.motionOp('sand-art', { op: 'stop' });
-    w.bridge.motionOp('sand-art', { op: 'start', id: 'r2', hz: 30 });
+    w.bridge.motionOp('tilt-game', { op: 'stop' });
+    w.bridge.motionOp('tilt-game', { op: 'start', id: 'r2', hz: 30 });
     await tick(5);
     ok(w.permissionCalls === 1 && w.result('r2') === 'granted', 'granted once per page load — not asked again');
 
     const no = makeWorld({ ios: 'denied' });
-    no.bridge.motionOp('sand-art', { op: 'start', id: 'r1', hz: 30 });
+    no.bridge.motionOp('tilt-game', { op: 'start', id: 'r1', hz: 30 });
     await tick(5);
     ok(no.result('r1') === 'denied' && no.consent() === null, 'iOS says no → denied, and the launcher remembers nothing');
 
     // A remembered Allow on a fresh page load where Safari wants a gesture.
     const again = makeWorld({ ios: 'granted' });
-    again.store.setItem('arcade.v1._meta.motion', JSON.stringify(withAnswer(normalizeConsent(null), 'sand-art', true, 1)));
+    again.store.setItem('arcade.v1._meta.motion', JSON.stringify(withAnswer(normalizeConsent(null), 'tilt-game', true, 1)));
     let gestureless = true;
     again.win.DeviceOrientationEvent.requestPermission = () => {
         again.permissionCalls++;
         if (gestureless) return Promise.reject(new Error('NotAllowedError'));
         return Promise.resolve('granted');
     };
-    again.bridge.motionOp('sand-art', { op: 'start', id: 'r1', hz: 30 });
+    again.bridge.motionOp('tilt-game', { op: 'start', id: 'r1', hz: 30 });
     await tick(5);
-    ok(again.dialogs.length === 0 && again.toasts.length === 1 && /Tap to enable motion for Sand Art/.test(again.toasts[0][0]),
+    ok(again.dialogs.length === 0 && again.toasts.length === 1 && /Tap to enable motion for Tilt Game/.test(again.toasts[0][0]),
         'remembered Allow + gesture needed → a one-tap toast, not the full dialog');
     gestureless = false;
     again.toasts[0][1].onClick();

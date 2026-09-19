@@ -76,6 +76,9 @@
  *
  *   // Settings — pushed by launcher; SDK auto-applies CSS hooks
  *   Arcade.settings.fontScale | theme | reducedMotion | audioVolume | handedness
+ *   Arcade.settings.powerSaver | motion
+ *   Arcade.motion.available() | start({hz}) | on(fn) | stop() | onChange(fn)
+ *   Arcade.motion.compass(n, opts)     (gravity in screen axes — §7f)
  *   Arcade.settings.snapshot()
  *   Arcade.onSettingsChange(fn)
  *
