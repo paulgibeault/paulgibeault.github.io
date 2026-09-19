@@ -36,7 +36,7 @@ game has started it).
 | WP2 | Done — `arcade-motion-bridge.js`, router case + cap, *Motion* menu section, top-bar mark. |
 | WP3 | Done — SDK 3.17.0, GAME_INTEGRATION §7f/§5/§13/§14, ARCADE_PLATFORM, changelog. |
 | WP4 | Done — `tools/motion-acceptance.mjs` (auto-discovered by `run-ci.mjs`). |
-| WP5 | Sand Art repo; after this deploys. |
+| WP5 | Done as a draft — [sand-art#13](https://github.com/paulgibeault/sand-art/pull/13), gated on `available()`; merge after this deploys. On-phone check owed. |
 | WP6 | Not started, by design: its KATs are the traces WP0 records (#170). |
 
 **What the review of this plan changed** (each is reflected in the sections

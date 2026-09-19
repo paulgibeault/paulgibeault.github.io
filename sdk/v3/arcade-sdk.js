@@ -2158,6 +2158,12 @@
             var was = motionRunning;
             motionRunning = (how === 'granted');
             if (!framed && motionRunning && suspendedNow) motionDirectListen(false);
+            // A re-start that was refused (asked from the background, say)
+            // ends the old stream here — so end it at the launcher too,
+            // rather than leave its listener running for samples we drop.
+            if (framed && was && !motionRunning && motionBridged()) {
+                postToParent({ type: 'arcade:motion.op', op: 'stop' });
+            }
             if (was !== motionRunning) motionFireChange();
             return how;
         });
