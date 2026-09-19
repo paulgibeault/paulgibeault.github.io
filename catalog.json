@@ -198,6 +198,28 @@
         "tags": ["WebAssembly", "HTML5 Canvas", "JS", "PWA", "Arcade SDK"],
         "codeUrl": "https://github.com/paulgibeault/sand-art"
       }
+    },
+    {
+      "id": "mr-pepper",
+      "name": "Mr Pepper",
+      "subtitle": "Season the Pot",
+      "icon": "/mr-pepper/icon.png",
+      "url": "/mr-pepper/",
+      "inDevelopment": true,
+      "profile": {
+        "subtitle": "A Falling-Spice Puzzle",
+        "alt": "Mr Pepper — two bowls of spice tied with twine, tumbling into a steel pot over a flame",
+        "descLead": "Order up, Mr Pepper: throw pairs of spices into the pot and season every ingredient.",
+        "descBody": "Line up four of a flavor and they dissolve into the broth; cut a pair's string and the loose half falls, which is where chains come from. Three kitchens add flavors as they get harder, the flame sets the pace, and a good chain fills your mill for a peppercorn that matches anything. Every flavor is a colour and a shape, and the whole screen is the control surface.",
+        "kicker": "The rules are a seeded, fixed-tick state machine with no DOM in it.",
+        "tags": [
+          "HTML5 Canvas",
+          "JS",
+          "PWA",
+          "Arcade SDK"
+        ],
+        "codeUrl": "https://github.com/paulgibeault/mr-pepper"
+      }
     }
   ]
 }
