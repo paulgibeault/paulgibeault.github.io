@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>motion acceptance fixture</title>
+<!-- Minimal page: load the SDK and init. tools/motion-acceptance.mjs mounts
+     this inside the launcher's sandboxed iframe pool (and once top-level, for
+     the standalone path) and drives Arcade.motion through frame.evaluate. -->
+<script src="/arcade-sdk.js"></script>
+<script>
+  Arcade.init({ gameId: new URLSearchParams(location.search).get('gid') || 'motion-test' });
+  window.motion = { samples: [], changes: [], results: {} };
+  Arcade.motion.on(function (m) { window.motion.samples.push(m); });
+  Arcade.motion.onChange(function (c) { window.motion.changes.push(c); });
+</script>
+<body>motion-test</body>

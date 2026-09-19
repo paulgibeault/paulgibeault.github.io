@@ -235,6 +235,7 @@ function makeWorld(opts) {
         },
         showToast: (msg, o) => world.toasts.push([msg, o]),
         getActiveGameId: () => world.active,
+        getMountedGameIds: () => ['tilt-game', 'never-asked'],
         getGameName: (gid) => (gid === 'tilt-game' ? 'Tilt Game' : gid),
         onPoolChanged: (fn) => world.poolListeners.push(fn)
     });
@@ -326,6 +327,8 @@ console.log('\nbridge — a switch flipped mid-stream stops it at once');
     w.store.setItem('arcade.v1._meta.motion', JSON.stringify(withMaster(withAnswer(w.consent(), 'tilt-game', true, 2), false)));
     w.fire('storage', { key: 'arcade.v1._meta.motion' });
     ok(w.bridge.enabledFor('tilt-game') === false && w.bridge.enabledFor('never-asked') === false, 'master off: offered to nobody');
+    ok(w.posts.some((p) => p[0] === 'never-asked' && p[1].type === 'arcade:motion.state' && p[1].enabled === false),
+        '…and every mounted frame is told, including one that never asked');
     w.fire('storage', { key: 'some.other.key' });
     ok(true, 'unrelated storage events are ignored');
 }

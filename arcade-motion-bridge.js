@@ -24,7 +24,8 @@
  * initMotionBridge(host) — host supplies launcher-owned glue:
  *   postToIframe(gameId, msg), dialog(opts) [opts.onOk runs synchronously in
  *   the OK click — the gesture iOS's requestPermission() needs], showToast,
- *   getActiveGameId(), getGameName(gameId) [catalog name], onPoolChanged(fn),
+ *   getActiveGameId(), getMountedGameIds(), getGameName(gameId) [catalog
+ *   name], onPoolChanged(fn),
  *   openSettings() [open the menu], onMasterChanged() [re-broadcast
  *   settings — the master switch is Arcade.settings.motion()], and `els`
  *   { section, master, masterLabel, list, mark } for the menu section and the
@@ -245,7 +246,10 @@ export function initMotionBridge(host) {
     // longer allowed AT ONCE, then tell every frame that could care.
     function consentChanged() {
         const consent = readConsent();
-        const ids = new Set([...started.keys(), ...Object.keys(consent.games)]);
+        // Every mounted frame: the master switch changes available() even
+        // for a game that has never asked.
+        const ids = new Set([...started.keys(), ...Object.keys(consent.games),
+            ...(host.getMountedGameIds ? host.getMountedGameIds() : [])]);
         const active = host.getActiveGameId();
         if (active) ids.add(active);
         for (const gid of started.keys()) {
@@ -275,6 +279,7 @@ export function initMotionBridge(host) {
     }
 
     let scrollTarget = null;
+    const rows = new Map(); // gameId → its switch button
     function render() {
         const consent = readConsent();
         const active = host.getActiveGameId();
@@ -297,31 +302,43 @@ export function initMotionBridge(host) {
             if (els.masterLabel) els.masterLabel.textContent = consent.enabled ? 'Motion On' : 'Motion Off';
         }
         if (!els.list) return;
-        els.list.textContent = '';
+        // Rows are updated IN PLACE, never rebuilt: a rebuilt row is detached
+        // mid-click, and the menu's outside-click closer then reads the tap
+        // as "outside" and shuts the menu under the player's finger.
         ids.sort((a, b) => (host.getGameName(a) || a).localeCompare(host.getGameName(b) || b));
+        for (const [gid, btn] of rows) {
+            if (!consent.games[gid]) { btn.remove(); rows.delete(gid); }
+        }
         for (const gid of ids) {
             const row = consent.games[gid];
-            const btn = doc.createElement('button');
-            btn.type = 'button';
-            btn.className = 'launcher-menu__item launcher-menu__item--sub';
-            btn.setAttribute('role', 'switch');
-            btn.setAttribute('data-menu-stay', '');
-            btn.setAttribute('data-motion-game', gid);
+            let btn = rows.get(gid);
+            if (!btn) {
+                btn = doc.createElement('button');
+                btn.type = 'button';
+                btn.className = 'launcher-menu__item launcher-menu__item--sub';
+                btn.setAttribute('role', 'switch');
+                btn.setAttribute('data-menu-stay', '');
+                btn.setAttribute('data-motion-game', gid);
+                const name = doc.createElement('span');
+                name.className = 'launcher-menu__item-label';
+                const tag = doc.createElement('span');
+                tag.className = 'launcher-menu__item-tag';
+                btn.appendChild(name);
+                btn.appendChild(tag);
+                btn.addEventListener('click', () => {
+                    const now = readConsent().games[gid];
+                    setGame(gid, !(now && now.allowed));
+                });
+                rows.set(gid, btn);
+            }
             btn.setAttribute('aria-checked', row.allowed ? 'true' : 'false');
             btn.disabled = !consent.enabled;
-            const name = doc.createElement('span');
-            name.className = 'launcher-menu__item-label';
-            name.textContent = host.getGameName(gid) || gid;
-            const tag = doc.createElement('span');
-            tag.className = 'launcher-menu__item-tag';
-            tag.textContent = row.allowed ? 'Allowed' : 'Off';
+            btn.firstChild.textContent = host.getGameName(gid) || gid;
+            btn.lastChild.textContent = row.allowed ? 'Allowed' : 'Off';
             btn.title = row.allowed
                 ? ('Motion allowed' + (row.at ? ' — ' + lastUsed(row.at) : '') + '. Tap to turn off.')
                 : 'Motion off for this game. Tap to allow.';
-            btn.appendChild(name);
-            btn.appendChild(tag);
-            btn.addEventListener('click', () => setGame(gid, !row.allowed));
-            els.list.appendChild(btn);
+            els.list.appendChild(btn); // (re)append in sorted order; a no-op move when already there
             if (scrollTarget === gid) {
                 scrollTarget = null;
                 try { btn.scrollIntoView({ block: 'nearest' }); btn.focus(); } catch (e) {}
