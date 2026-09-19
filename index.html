@@ -408,6 +408,8 @@
             font-family: var(--font-display); font-size: 0.8rem; cursor: pointer;
             transition: all 0.2s ease; display: flex; align-items: center; justify-content: center;
         }
+        /* display:flex above beats the UA's [hidden] rule — say it again. */
+        .topbar-btn[hidden] { display: none; }
         .topbar-btn:hover,
         .topbar-btn[aria-expanded="true"] {
             background: var(--field-gold); color: #000;

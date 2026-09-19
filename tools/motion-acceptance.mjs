@@ -98,7 +98,7 @@ try {
         hello.available === true && hello.running === false, JSON.stringify(hello));
     check('idle: the launcher is not listening to the sensor',
         await page.evaluate(() => window.__arcade.motion.snapshot().listening === false));
-    check('idle: no top-bar mark', await page.evaluate(() => document.getElementById('game-motion-mark').hidden));
+    check('idle: no top-bar mark', await page.evaluate(() => (getComputedStyle(document.getElementById('game-motion-mark')).display === 'none')));
 
     // 2. Not now
     await startIn(frame, 'notnow');
@@ -146,7 +146,7 @@ try {
     check('compass(8): null while unchanged, { dir, gx, gy } on a change',
         dirs[0] === null && dirs[1] && dirs[1].gx === 1 && dirs[1].gy === 1 && dirs[1].dir === 1 && dirs[2] === null, JSON.stringify(dirs));
     check('streaming: exactly the top-bar mark shows',
-        await page.evaluate(() => document.getElementById('game-motion-mark').hidden === false));
+        await page.evaluate(() => (getComputedStyle(document.getElementById('game-motion-mark')).display !== 'none')));
     const n30 = await sampleCount(frame);
     await orient(cdp, 80, 0, 20); // ~22 events/s for ~0.9 s
     const got = (await sampleCount(frame)) - n30;
@@ -160,7 +160,7 @@ try {
     check('a backgrounded game receives nothing', (await sampleCount(frame)) === frozen);
     check('…nor does an active game that never started', (await sampleCount(frame2)) === 0);
     check('…and the launcher stopped listening + hid the mark', await page.evaluate(() =>
-        window.__arcade.motion.snapshot().listening === false && document.getElementById('game-motion-mark').hidden));
+        window.__arcade.motion.snapshot().listening === false && (getComputedStyle(document.getElementById('game-motion-mark')).display === 'none')));
     await startIn(frame, 'background');
     check('a background frame\'s start() → denied, no dialog',
         (await resultOf(frame, 'background')) === 'denied' && await page.evaluate((sel) => !document.querySelector(sel), DIALOG_OPEN));
@@ -191,7 +191,7 @@ try {
     await orient(cdp, 40, 0, 5);
     check('stop(): silence, listener released, mark gone', (await sampleCount(frame)) === stoppedAt
         && await page.evaluate(() => window.__arcade.motion.snapshot().listening === false
-            && document.getElementById('game-motion-mark').hidden));
+            && (getComputedStyle(document.getElementById('game-motion-mark')).display === 'none')));
 
     // 8. the Motion section: a row flipped Off mid-stream
     await startIn(frame, 'forflip');

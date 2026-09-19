@@ -28,6 +28,10 @@
  *            settles a floating pile, rejects bad input before touching
  *            memory; replace() erases and recolours; batch setPalette()
  *            equals the sequential form with one repaint.
+ *   Gate I — lean (R18): the 'lean' script rides Gates A–D; here the edges,
+ *            that a pile always comes to rest, that the rest slope is the
+ *            one the wrapper's leanPlan() promises, and that the heap's
+ *            shift grows smoothly with the angle — the whole point.
  *   Gate H — tilt (R17): the 'tilt' script above rides Gates A–D like any
  *            other (parity under every gravity, settles, pinned); here the
  *            edges: bad directions, the same direction twice, a settled
@@ -74,6 +78,8 @@ async function createWasm({ width, height, seed }) {
         get: (x, y) => ex.get(x, y),
         tilt: (gx, gy) => ex.tilt(gx, gy),
         gravity: () => [ex.gravityX(), ex.gravityY()],
+        lean: (side, reach, p, drift) => ex.lean(side, reach, p, drift),
+        leaning: () => [ex.leanSideOf(), ex.leanReachOf(), ex.leanPOf(), ex.leanDriftOf()],
         quiet: () => ex.quiet() !== 0,
         activeCells: () => ex.activeCells(),
         get grid() { return new Uint8Array(ex.memory.buffer, ex.gridPtr(), n); },
@@ -148,6 +154,21 @@ const SCRIPTS = {
             if (k === 300) sim.tilt(0, 1);
         },
     },
+    // R18: a pour into a jar leaning right (drift + the longer look), then
+    // leaning hard left, then onto its side with a lean back, water in the
+    // middle of it, and upright with no lean to settle.
+    'lean': {
+        pourUntil: 300, steps: 400, settleWithin: 600,
+        paint(sim, k) {
+            if (k === 0) sim.lean(-1, 1, 139, 45);                       // ≈ 12° to the right
+            if (k < 120 && k % 2 === 0) sim.paint(SAND_BASE + 5, 50, 4, 2);
+            if (k === 120) sim.lean(1, 3, 200, 148);                     // ≈ 30° to the left
+            if (k >= 120 && k < 220 && k % 3 === 0) sim.paint(SAND_BASE + 11, 90, 4, 2);
+            if (k === 220) { sim.tilt(1, 0); sim.lean(1, 2, 49, 93); }   // on its side, leaning back
+            if (k >= 230 && k < 300 && k % 2 === 0) sim.paint(WATER, 30, 40, 2);
+            if (k === 300) { sim.tilt(0, 1); sim.lean(0, 1, 0, 0); }
+        },
+    },
 };
 const SEEDS = [1, 7, 0xdeadbeef, 42];
 const CHECKPOINTS = [1, 2, 3, 10, 50, 100, 150, 190, 200, 210, 230, 240, 245, 250, 251, 300, 400];
@@ -160,6 +181,7 @@ const PINNED = {
     'wall shelf': { 1: 3918263654, 7: 1327368378, 3735928559: 2403979590, 42: 3789155266 },
     'tints, nudge, stir, clear': { 1: 3716367102, 7: 3781409420, 3735928559: 3966140336, 42: 2484319428 },
     'tilt': { 1: 4020397336, 7: 637478940, 3735928559: 3189969290, 42: 3687178696 },
+    'lean': { 1: 4002531875, 7: 1242730287, 3735928559: 1647381476, 42: 2249066899 },
 };
 
 function sameBytes(a, b) {
@@ -476,6 +498,105 @@ console.log('\nGate H — tilt');
     let wet = 0, wetRows = new Set(); for (let y = 0; y < 48; y++) for (let x = 0; x < 64; x++) if (rw.get(x, y) === WATER) { wet++; wetRows.add(y); }
     ok(rw.quiet() && ww.quiet() && sameBytes(rw.grid, ww.grid), `water settles under gravity (1,0) identically (${n} steps)`);
     ok(wet > 0 && wetRows.size > 8, `water spreads across gravity (${wetRows.size} rows wet)`);
+}
+
+console.log('\nGate I — lean');
+{
+    // The browser wrapper, evaluated here for its pure half (leanPlan).
+    globalThis.location = globalThis.location || { href: 'http://localhost/' };
+    new Function(readFileSync(join(ROOT, 'arcade-sim-sand.js'), 'utf8'))();
+    const leanPlan = globalThis.ArcadeSimSand.leanPlan;
+
+    const p0 = leanPlan(0), p10 = leanPlan(10), m10 = leanPlan(-10), p45 = leanPlan(44.9), p60 = leanPlan(60), p90 = leanPlan(90), p180 = leanPlan(180);
+    ok(p0.side === 0 && p0.gx === 0 && p0.gy === 1 && p0.reach === 1 && p0.p === 0 && p0.drift === 0, 'leanPlan(0) is upright with no lean');
+    ok(p10.gx === 0 && p10.gy === 1 && p10.side === -1 && p10.reach === 1 && p10.p === 116 && p10.drift === 45,
+        'leanPlan(10): still gravity (0,1), leaning to the a side (+x), reach 1 + 116/256, drift 45', JSON.stringify(p10));
+    ok(m10.side === 1 && m10.p === p10.p && m10.drift === p10.drift, 'leanPlan(−10) mirrors it');
+    ok(p45.gx === 0 && p45.gy === 1 && p45.reach >= 15, 'just under 45° is still the down axis, with the longest look');
+    ok(p60.gx === 1 && p60.gy === 0 && p60.side === 1 && p60.reach === leanPlan(30).reach && p60.p === leanPlan(30).p,
+        'leanPlan(60): the right wall is the floor now, leaning back 30°');
+    ok(p90.gx === 1 && p90.gy === 0 && p90.side === 0 && p180.gx === 0 && p180.gy === -1 && leanPlan(-180).gy === -1 && leanPlan(540).gy === -1,
+        '90 is tilt(1,0); ±180 and 540 are upside down');
+    let mono = true, last = -1;
+    for (let d = 0; d <= 44; d += 0.5) { const q = leanPlan(d); const v = q.reach * 256 + q.p; if (v < last) mono = false; last = v; }
+    ok(mono, 'the look only lengthens as the lean grows (0 → 44°, every half degree)');
+    let threwPlan = 0; for (const bad of [NaN, Infinity, 'x']) { try { leanPlan(bad); } catch (e) { if (e instanceof RangeError) threwPlan++; } }
+    ok(threwPlan === 3, 'leanPlan rejects what is not a finite number');
+
+    // edges
+    const ref = createSandReference({ width: 96, height: 64, seed: 5 });
+    const wasm = await createWasm({ width: 96, height: 64, seed: 5 });
+    ok(String(ref.leaning()) === '0,1,0,0' && String(wasm.leaning()) === '0,1,0,0', 'leaning() starts [0,1,0,0]');
+    let threw = 0;
+    const BAD = [[2, 1, 0, 0], [-2, 1, 0, 0], [1, 0, 0, 0], [1, 17, 0, 0], [1, 1, 257, 0], [1, 1, -1, 0], [1, 1, 0, 257], [1, 1.5, 0, 0]];
+    for (const b of BAD) { try { ref.lean(...b); } catch (e) { if (e instanceof RangeError) threw++; } }
+    for (const b of BAD) wasm.lean(...b);
+    ok(threw === BAD.length && String(ref.leaning()) === '0,1,0,0', 'reference lean() rejects every out-of-range value with RangeError');
+    ok(String(wasm.leaning()) === '0,1,0,0' || String(wasm.leaning()) === '1,1,0,0', 'WASM lean() ignores them');
+    wasm.lean(0, 1, 0, 0);
+    for (const sim of [ref, wasm]) { for (let i = 0; i < 30; i++) for (let x = 40 - i; x <= 40 + i; x++) sim.paint(SAND, x, 34 + i, 0); for (let k = 0; k < 50 && !sim.quiet(); k++) sim.step(); }
+    ok(ref.quiet() && wasm.quiet() && sameBytes(ref.grid, wasm.grid), 'a 45° heap is at rest with no lean');
+    ref.lean(0, 1, 0, 0); wasm.lean(0, 1, 0, 0);
+    ok(ref.quiet() && wasm.quiet(), 'lean() to the values already set is a no-op: nothing wakes');
+    const grains = ref.grid.filter(isSand).length;
+    ref.lean(-1, 2, 0, 0); wasm.lean(-1, 2, 0, 0);
+    ok(!ref.quiet() && !wasm.quiet(), 'a new lean wakes every chunk');
+    let n = 0;
+    while (n < 5000 && !(ref.quiet() && wasm.quiet())) { ref.step(); wasm.step(); n++; }
+    ok(ref.quiet() && wasm.quiet() && sameBytes(ref.grid, wasm.grid), `the heap re-settles under the lean, identically (${n} steps)`);
+    ok(ref.grid.filter(isSand).length === grains, 'leaning conserves grains');
+    ref.tilt(1, 1); wasm.tilt(1, 1);
+    n = 0;
+    while (n < 5000 && !(ref.quiet() && wasm.quiet())) { ref.step(); wasm.step(); n++; }
+    ok(ref.quiet() && wasm.quiet() && sameBytes(ref.grid, wasm.grid) && String(ref.leaning()) === '-1,2,0,0',
+        `under a DIAGONAL gravity the lean is kept but ignored, and the pile still rests (${n} steps)`);
+
+    // the rest slope is the one leanPlan() promises; the shift is smooth
+    const FW = 320, FH = 112;
+    function settle(deg, make) {
+        const sim = make({ width: FW, height: FH, seed: 3 });
+        for (let i = 0; i < 50; i++) for (let x = 80 - i; x <= 80 + i; x++) sim.paint(SAND, x, FH - 50 + i, 0);
+        const q = leanPlan(deg);
+        sim.tilt(q.gx, q.gy); sim.lean(q.side, q.reach, q.p, q.drift);
+        let k = 0; while (k < 20000 && !sim.quiet()) { sim.step(); k++; }
+        const hs = []; let sx = 0, cnt = 0;
+        for (let x = 0; x < FW; x++) { let y = 0; while (y < FH && sim.get(x, y) === EMPTY) y++; hs.push(y); sx += x * (FH - y); cnt += FH - y; }
+        const peak = hs.indexOf(Math.min(...hs));
+        const xs = []; for (let x = peak + 4; x < FW; x++) if (hs[x] < FH) xs.push(x);
+        const core = xs.slice(4, -4);
+        const mx = core.reduce((a, b) => a + b, 0) / core.length, my = core.reduce((a, x) => a + hs[x], 0) / core.length;
+        let nu = 0, de = 0; core.forEach((x) => { nu += (x - mx) * (hs[x] - my); de += (x - mx) ** 2; });
+        return { rested: k < 20000, face: Math.atan(Math.abs(nu / de)) * 180 / Math.PI, com: sx / cnt, grid: sim.grid };
+    }
+    const makeRef = (o) => createSandReference(o);
+    let worst = 0, allRest = true, shifts = [];
+    const faces = [];
+    const base = settle(0, makeRef).com;
+    for (const deg of [5, 10, 15, 20, 25, 30, 35, 40]) {
+        const r = settle(deg, makeRef);
+        allRest = allRest && r.rested;
+        worst = Math.max(worst, Math.abs(r.face - (45 - deg))); faces.push(`${deg}°→${r.face.toFixed(1)}`);
+        shifts.push(r.com - base);
+    }
+    ok(allRest, 'a heap comes to rest at every lean from 5° to 40°');
+    ok(worst < 3, `its downhill face rests at 45° less the lean (worst error ${worst.toFixed(2)}°: ${faces.join(' ')})`);
+    ok(shifts.every((v, i) => v > (i ? shifts[i - 1] : 0)) && shifts[0] < 3 && shifts[1] < 6,
+        `the heap's shift grows smoothly with the angle — no cliff (${shifts.map((v) => v.toFixed(1)).join(', ')})`);
+    const w20 = await (async () => { const sims = []; const r = settle(20, (o) => { const s = createSandReference(o); sims.push(s); return s; }); return r; })();
+    const wasmSims = [];
+    const mk = await createWasm({ width: FW, height: FH, seed: 3 });
+    const rW = settle(20, () => mk);
+    ok(sameBytes(w20.grid, rW.grid), 'WASM settles the same heap to the same grid at 20°');
+
+    // drift: what is poured falls at the lean
+    const dr = createSandReference({ width: 128, height: 96, seed: 2 });
+    const q30 = leanPlan(30);
+    dr.lean(q30.side, q30.reach, q30.p, q30.drift);
+    dr.paint(SAND, 20, 2, 0);
+    let fx = 20, fy = 2, steps = 0;
+    while (steps < 60) { dr.step(); steps++; let found = false; for (let y = 0; y < 96 && !found; y++) for (let x = 0; x < 128; x++) if (dr.get(x, y) !== EMPTY) { fx = x; fy = y; found = true; break; } }
+    const fallDeg = Math.atan((fx - 20) / (fy - 2)) * 180 / Math.PI;
+    ok(Math.abs(fallDeg - 30) < 8, `a single grain falls at about the lean (${fallDeg.toFixed(1)}° for 30°)`);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

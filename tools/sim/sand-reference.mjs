@@ -154,6 +154,48 @@
  *      throws, kernel ignores, wrapper throws). init() resets gravity;
  *      clear() and reseed() leave it — it is part of the picture, like the
  *      grid, and a replay sets it as it goes.
+ *
+ *  R18 lean(side, reach, p, drift) — the angles between the ring's. R17 alone
+ *      gives a jar eight gravities 45° apart, and a pile at rest under any of
+ *      them has faces at exactly 45° to it: tilt a phone by 10° and nothing
+ *      happens, by 30° and everything does. Mixing two ring gravities in time
+ *      does not help — whatever share the second has, the rest state is the
+ *      same, the whole pile against the wall — and a diagonal gravity is no
+ *      stepping stone either: under it everything slides along the floor into
+ *      the corner. What a lean changes instead is the ANGLE OF REPOSE on the
+ *      downhill side. With true gravity leaning τ from an AXIS gravity
+ *      towards one of its diagonals, that face may stand at only 45°−τ; on a
+ *      grid that is a staircase with longer treads, and a grain finds it with
+ *      a longer look. After R4's three moves have failed, a SAND grain at p —
+ *      with D the diagonal on the lean side (b when side>0, a when side<0)
+ *      and c = D − gravity, the step across — takes ONE step to p+c when p+c
+ *      is EMPTY and, walking on along c through EMPTY cells only, some cell
+ *      p+r·c with 2 ≤ r ≤ n has an EMPTY cell below it (R17's below). n is
+ *      per CELL, not per step: n = reach + 1 where h < p, else reach, with
+ *      h = the top 8 bits of ((x·73856093) ^ (y·19349663)) · 2654435761 in
+ *      32-bit wrapping arithmetic; n < 2 means the rule does not apply
+ *      there. So reach (1..16) is the tread every cell allows and p (0..256)
+ *      the share that allow one more — a fixed dither over the grid — and
+ *      the face rests between slope 1/reach and 1/(reach+1): 45° at (1, 0)
+ *      down to 3.4° at (16, 256).
+ *        drift is the same idea for a grain in the AIR: when the cell below
+ *      is free and h' < drift — h' as h but with stepIndex·83492791 xored in,
+ *      so it changes every step — the grain tries D first and falls
+ *      diagonally; a stream poured into a leaning jar falls at the lean.
+ *        The whole rule applies under the four axis gravities only (gx = 0
+ *      or gy = 0). There every R4 move advances along gravity and every R18
+ *      move advances along c without retreating along gravity, so a pile
+ *      always comes to rest; under a diagonal gravity c runs against the
+ *      other diagonal and the two would trade a grain forever, so there
+ *      lean() is stored and ignored. No rng is drawn: with side = 0 (the
+ *      state after init()) every earlier rule and every pinned hash reads
+ *      exactly as before. WATER is untouched: it lies across the ring's
+ *      gravity, and still does. lean() to the values already set is a no-op;
+ *      a change wakes every chunk. side is -1, 0 or 1, reach an integer in
+ *      1..16, p and drift integers in 0..256 (reference throws, kernel
+ *      ignores, wrapper throws). tilt() leaves the lean alone, as do clear()
+ *      and reseed(); init() resets it. The wrapper's lean(degrees) turns an
+ *      angle into a tilt() and a lean() — leanPlan() there is the mapping.
  */
 
 export const EMPTY = 0, SAND = 1, WATER = 2, WALL = 3;
@@ -235,6 +277,10 @@ export function createSandReference({ width, height, seed = 1 }) {
     let lastMoves = 0;                    // R10
     // R17 — gravity and the directions that hang off it.
     let gx = 0, gy = 1, ax = 1, ay = 1, bx = -1, by = 1, px = 1, py = 0;
+    // R18 — the lean: which side, the tread every cell allows, the share of
+    // cells (of 256) that allow one more, and the share of falls that drift.
+    let leanSide = 0, leanReach = 1, leanP = 0, leanDrift = 0;
+    const cellHash = (x, y, salt) => Math.imul(Math.imul(x, 73856093) ^ Math.imul(y, 19349663) ^ salt, 2654435761) >>> 24;
     function setGravity(k) {
         [gx, gy] = RING[k & 7];
         [ax, ay] = RING[(k + 7) & 7];
@@ -327,7 +373,15 @@ export function createSandReference({ width, height, seed = 1 }) {
                     const ux = x + gx;
                     if (belowRow && ux >= 0 && ux < w) {
                         const j = uy * w + ux;
-                        if (sandCanEnter(j)) { swap(i, j, x, y, ux, uy); x += dx; continue; }
+                        if (sandCanEnter(j)) {
+                            // R18 — a falling grain drifts towards the lean.
+                            if (leanSide !== 0 && leanDrift !== 0 && (gx === 0 || gy === 0)
+                                    && cellHash(x, y, Math.imul(stepIndex, 83492791)) < leanDrift) {
+                                const qx = x + (leanSide > 0 ? bx : ax), qy = y + (leanSide > 0 ? by : ay);
+                                if (inBounds(qx, qy) && sandCanEnter(qy * w + qx)) { swap(i, qy * w + qx, x, y, qx, qy); x += dx; continue; }
+                            }
+                            swap(i, j, x, y, ux, uy); x += dx; continue;
+                        }
                         const aFirst = bit() !== 0;
                         const f1x = aFirst ? ax : bx, f1y = aFirst ? ay : by;
                         const f2x = aFirst ? bx : ax, f2y = aFirst ? by : ay;
@@ -335,6 +389,22 @@ export function createSandReference({ width, height, seed = 1 }) {
                         if (inBounds(x1, y1) && sandCanEnter(y1 * w + x1)) { swap(i, y1 * w + x1, x, y, x1, y1); x += dx; continue; }
                         const x2 = x + f2x, y2 = y + f2y;
                         if (inBounds(x2, y2) && sandCanEnter(y2 * w + x2)) { swap(i, y2 * w + x2, x, y, x2, y2); x += dx; continue; }
+                        // R18 — the longer look, on the lean side only.
+                        if (leanSide !== 0 && (gx === 0 || gy === 0)) {
+                            const n = leanReach + (cellHash(x, y, 0) < leanP ? 1 : 0);
+                            const cx = (leanSide > 0 ? bx : ax) - gx, cy = (leanSide > 0 ? by : ay) - gy;
+                            const sx = x + cx, sy = y + cy;
+                            if (n >= 2 && inBounds(sx, sy) && grid[sy * w + sx] === EMPTY) {
+                                let ex = sx, ey = sy, found = false;
+                                for (let r = 2; r <= n; r++) {
+                                    ex += cx; ey += cy;
+                                    if (!inBounds(ex, ey) || grid[ey * w + ex] !== EMPTY) break;
+                                    const fx = ex + gx, fy = ey + gy;
+                                    if (inBounds(fx, fy) && grid[fy * w + fx] === EMPTY) { found = true; break; }
+                                }
+                                if (found) { swap(i, sy * w + sx, x, y, sx, sy); x += dx; continue; }
+                            }
+                        }
                     }
                 } else if (m === WATER && moved[i] === 0) {
                     const ux = x + gx;
@@ -547,6 +617,17 @@ export function createSandReference({ width, height, seed = 1 }) {
             active.fill(1);
         },
         gravity() { return [gx, gy]; },
+        // R18
+        lean(side, reach, p, drift) {
+            const int = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
+            if (!int(side, -1, 1) || !int(reach, 1, 16) || !int(p, 0, 256) || !int(drift, 0, 256)) {
+                throw new RangeError('lean: side -1..1, reach 1..16, p and drift 0..256, got ' + [side, reach, p, drift].join(','));
+            }
+            if (side === leanSide && reach === leanReach && p === leanP && drift === leanDrift) return;
+            leanSide = side; leanReach = reach; leanP = p; leanDrift = drift;
+            active.fill(1);
+        },
+        leaning() { return [leanSide, leanReach, leanP, leanDrift]; },
         get(x, y) {
             x |= 0; y |= 0;
             if (x < 0 || y < 0 || x >= w || y >= h) return EMPTY;

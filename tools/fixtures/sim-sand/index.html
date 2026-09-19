@@ -131,6 +131,32 @@ window.__run = async function () {
     out.independent = other.grid.buffer !== sim.grid.buffer && fnv1a(sim.grid) !== 0;
 
     // Bad input is rejected the way the reference rejects it.
+    // R18 through the real wrapper: lean(degrees) sets an axis tilt + the
+    // kernel's integers, wakes, a heap re-settles shifted a little (not at
+    // all, not against the wall), and the bad values are refused.
+    {
+        const ls = await api.create({ width: 160, height: 96, seed: 4 });
+        for (let i = 0; i < 40; i++) for (let x = 60 - i; x <= 60 + i; x++) ls.paint(M.SAND, x, 56 + i, 0);
+        for (let k = 0; k < 40 && !ls.quiet(); k++) ls.step();
+        const com = () => { let sx = 0, n = 0; const g = ls.grid; for (let i = 0; i < g.length; i++) if (g[i]) { sx += i % 160; n++; } return sx / n; };
+        const x0 = com();
+        ls.lean(15);
+        out.leanWoke = !ls.quiet();
+        out.leanState = [ls.leaning(), ls.gravity().join(), ls.leaningRaw().join()];
+        let k = 0; while (k < 5000 && !ls.quiet()) { ls.step(); k++; }
+        out.leanRested = ls.quiet();
+        out.leanShift = com() - x0;
+        ls.lean(15);
+        out.leanSameIsNoop = ls.quiet();
+        ls.lean(120);
+        out.leanPast45 = ls.gravity().join();
+        out.leanPlan = JSON.stringify(api.leanPlan(15));
+        let bad = 0;
+        for (const f of [() => ls.lean(NaN), () => ls.leanRaw(2, 1, 0, 0), () => ls.leanRaw(1, 0, 0, 0), () => ls.leanRaw(1, 1, 300, 0)]) { try { f(); } catch (e) { if (e instanceof RangeError) bad++; } }
+        out.leanRejects = bad === 4;
+        ls.dispose();
+    }
+
     try { sim.paint(9, 1, 1, 1); out.badMaterialThrows = false; } catch (e) { out.badMaterialThrows = e instanceof RangeError; }
     try { await api.create({ width: 0, height: 5 }); out.badDimsReject = false; } catch (e) { out.badDimsReject = e instanceof RangeError; }
 
