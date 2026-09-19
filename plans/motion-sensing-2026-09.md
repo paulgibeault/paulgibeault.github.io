@@ -27,6 +27,64 @@ game has started it).
    WebAssembly for the processing was offered; §7 says when it would and
    would not earn its place.
 
+## Status — 2026-09-18, implementation pass (same PR)
+
+| WP | State |
+|---|---|
+| WP0 | **Probe built** (`/motion-probe.html`, linked from the Connection log dialog). **Running it needs Paul's phones** — findings table below is still to fill; issue #169 stays open. |
+| WP1 | Done — `arcade-motion-core.js`, `tools/motion-unit.mjs`. |
+| WP2 | Done — `arcade-motion-bridge.js`, router case + cap, *Motion* menu section, top-bar mark. |
+| WP3 | Done — SDK 3.17.0, GAME_INTEGRATION §7f/§5/§13/§14, ARCADE_PLATFORM, changelog. |
+| WP4 | Done — `tools/motion-acceptance.mjs` (auto-discovered by `run-ci.mjs`). |
+| WP5 | Sand Art repo; after this deploys. |
+| WP6 | Not started, by design: its KATs are the traces WP0 records (#170). |
+
+**What the review of this plan changed** (each is reflected in the sections
+below):
+
+1. **The parked red test was a wrong fixture, not an open convention.** It
+   fed `γ = +90` at angle 90, i.e. "the device's right edge is down" — but at
+   angle 90 the device's top points to the player's *left*, so its right edge
+   is *up* and the device reports `γ = −90`. The spec, Android's
+   `Surface.ROTATION_90` and iOS's `window.orientation = 90` all agree on
+   that. The maths was right; the unit tier now pins the corrected cases for
+   all four angles. WP0 still confirms it on glass, but it is no longer a
+   blocker for WP1.
+2. **§3 and §6 disagreed about storage** (`_meta.motion.<gameId>` vs one
+   `_meta.motion` record). One record, §6's shape.
+3. **The wire needed a third message.** "A row flipped Off ⇒ `available()`
+   false at once" cannot ride `settings.changed` (that is global, the row is
+   per game): `arcade:motion.state { enabled }`, plus `welcome.motion.enabled`
+   at handshake. It goes to *every mounted frame*, since the master switch
+   changes `available()` for a game that has never asked.
+4. **Suspend is not on the wire.** The launcher already knows the active app
+   and the page's visibility, so it attaches and detaches its one listener
+   itself; the SDK additionally drops any sample that arrives while
+   suspended. No stop/start round-trip per app switch, and no race with one.
+5. **The gesture must be the click itself.** `host.dialog` resolves in a
+   microtask after the OK click; iOS wants `requestPermission()` inside the
+   gesture. The launcher dialog gained `opts.onOk`, run synchronously in the
+   click handler. (The probe had the same bug in its first draft.)
+6. **The §8 iOS-lifetime risk is handled both ways, not deferred to WP0:**
+   a remembered Allow first tries `requestPermission()` with no gesture; if
+   Safari rejects, a one-tap toast is the gesture. WP0 only tells us which
+   path iOS users will actually see.
+7. **`available()` needs a sensor heuristic.** Desktop Chrome defines
+   `DeviceOrientationEvent` and never fires it, and #168 requires
+   `available()` false on a desktop. Rule: event defined ∧ secure context ∧
+   a touch screen. A touch laptop passes it and gets `'unavailable'` from
+   `start()` after the 1.5 s wait.
+8. **Games need to hear about a revocation:** `Arcade.motion.onChange(fn)` →
+   `{ available, running }`, and `running()`.
+9. **Shape rules live in the core** (`validateMotionOp`) rather than
+   `arcade-envelope.js`, so the whole feature's pure half is one file with
+   one unit suite.
+10. **Desk findings worth keeping** (Chromium 147, headless): an opaque
+    sandboxed frame *without* `allow` receives zero orientation events; with
+    `allow="accelerometer; gyroscope; magnetometer"` but no granted
+    permission it receives exactly one all-null event. The bridge and SDK
+    therefore treat null angles as "no sensor", never as a sample.
+
 ## 0. What is true today (code-verified)
 
 - The game frame is `sandbox="allow-scripts allow-downloads"` with
@@ -45,8 +103,22 @@ game has started it).
   upright on the *screen*, not the device.
 - A parked Sand Art branch (`phone-tilt`, local) already has this maths and
   an 8-direction follower with hysteresis as a pure module with tests; its
-  one red test is the landscape case, which is exactly the convention WP0
-  must settle on hardware.
+  one red test is the landscape case — a wrong fixture (Status, item 1), now
+  corrected in `tools/motion-unit.mjs`; WP0 confirms on hardware.
+
+**WP0 findings — to fill from `/motion-probe.html`:**
+
+| | iPhone Safari | iPhone installed PWA | Android Chrome |
+|---|---|---|---|
+| arrow points at the floor at angle 0 / 90 / 180 / 270 | | | |
+| `screen.orientation` present; `window.orientation` | | | |
+| `requestPermission()` on reload, no gesture | | | n/a |
+| …after closing the tab / relaunching | | | n/a |
+| `deviceorientation` / `devicemotion` events per second | | | |
+| sign of `accelerationIncludingGravity.z`, face up | | | |
+| `interval` units | | | |
+| sandboxed frame, no `allow`: events | | | |
+| sandboxed frame, with `allow`: events; ask from inside | | | |
 
 ## 1. The decision: brokered, not delegated
 
@@ -87,6 +159,8 @@ const off = Arcade.motion.on((m) => {
   m.t           // ms, monotonic
 });
 Arcade.motion.stop();                                 // and `off()` to unsubscribe
+Arcade.motion.running();                              // between a granted start() and stop()
+Arcade.motion.onChange(({ available, running }) => …); // a Motion switch flipped, a stream began/ended
 ```
 
 - **One vector, already in screen axes.** The Euler maths and the four
@@ -94,7 +168,9 @@ Arcade.motion.stop();                                 // and `off()` to unsubscr
   game (it has already bitten one).
 - **`Arcade.motion.compass(n, opts)`** — a small pure helper that quantises
   `x,y` to `n` directions with hysteresis and a flat-hold, answering only on
-  a change. Sand Art needs `n = 8` (the kernel's ring); a marble game wants
+  a change: `c.update(m)` → `{ dir, gx, gy }` or `null`, on the sand
+  kernel's ring (clockwise from screen-right, y down; `compass(8)` starts at
+  index 2, straight down). Sand Art needs `n = 8` (the kernel's ring); a marble game wants
   the raw vector; a menu wants `n = 4`. Hysteresis is easy to get wrong and
   each change can be expensive for the game (Sand Art wakes every chunk).
 - **Lifecycle is the SDK's.** Samples stop on `onSuspend` and resume on
@@ -120,6 +196,8 @@ Arcade.motion.stop();                                 // and `off()` to unsubscr
 child  → parent: arcade:motion.op      { op: 'start', id, hz }   // RPC → bridge.result: 'granted'|'denied'|'unavailable'
 child  → parent: arcade:motion.op      { op: 'stop' }
 parent → child:  arcade:motion.sample  { x, y, z, t }            // ≤ hz, active app only, only between start and stop
+parent → child:  arcade:motion.state   { enabled }               // a Motion switch flipped (every mounted frame)
+welcome gains:   motion: { enabled }                             // sensor plausible ∧ master on ∧ this game's row not Off
 ```
 
 Launcher side (`arcade-motion-core.js` pure + `arcade-motion-bridge.js`):
@@ -127,8 +205,9 @@ Launcher side (`arcade-motion-core.js` pure + `arcade-motion-bridge.js`):
 1. `start` from a game with no remembered answer → `host.dialog`:
    *"Sand Art would like to use your device's motion."* **Allow** /
    **Not now**. Allow's click calls `requestPermission()` where it exists.
-   The answer is remembered per game (`_meta.motion.<gameId>`), listed and
-   revocable in the launcher menu beside the other per-app controls.
+   (synchronously, via the dialog's `onOk`). The answer is remembered per
+   game in the one `_meta.motion` record (§6), listed and revocable in the
+   launcher menu's *Motion* section.
 2. One top-level `deviceorientation` listener while ≥ 1 active game has
    started; removed otherwise. Convert to screen-frame gravity, throttle to
    the requested `hz` (cap 60, default 30), post to the active frame.
@@ -156,7 +235,7 @@ Launcher side (`arcade-motion-core.js` pure + `arcade-motion-bridge.js`):
 |---|---|---|---|---|
 | **WP0** | **Hardware probe.** A page in the launcher's diag view that shows raw `beta/gamma`, `screen.orientation.angle`, the derived vector, event rate, and the result of `requestPermission()` — top level, and from a sandboxed frame with and without `allow`. Run on an iPhone (Safari, installed PWA) and an Android phone. Settles: the landscape sign convention (the parked red test), whether iOS re-prompts per page load, real event rates, and records *why* we broker. | launcher | S | findings written into §0 here; needs Paul's phones, HTTPS (deployed diag page) |
 | WP1 | Pure core: orientation → screen gravity for all four angles; throttle; `compass()`; consent state machine. | `arcade-motion-core.js`, `tools/motion-unit.mjs` | S | unit tier |
-| WP2 | Launcher bridge, consent dialog, remembered + revocable answers, *Motion controls* setting, cap `motion.bridge`. | `arcade-motion-bridge.js`, `arcade-router.js`, `index.html` | M | caps-contract unit (`tools/caps-contract-unit.mjs:29`), repo gates |
+| WP2 | Launcher bridge, consent dialog, remembered + revocable answers, the *Motion* menu section + top-bar mark, cap `motion.bridge`. | `arcade-motion-bridge.js`, `arcade-router.js`, `index.html` | M | caps-contract unit (`tools/caps-contract-unit.mjs:29`), repo gates |
 | WP3 | SDK `Arcade.motion` — framed via bridge, standalone direct, suspend/resume, `settings.motion()`; 3.17.0 changelog; GAME_INTEGRATION §7f, §14 wire table, §13 checklist line; ARCADE_PLATFORM caps list. | `arcade-sdk.js` + `sdk/v3/` | M | sdk-version unit |
 | WP4 | `tools/motion-acceptance.mjs`: Playwright + CDP `DeviceOrientation.setDeviceOrientationOverride` — cap advertised; dialog allow/deny; samples reach only the active frame; silence after suspend/stop; settings switch; standalone path. `tools/acceptance.mjs` check 11 learns the new cap. | launcher | M | CI acceptance step |
 | WP5 | **Sand Art: a "Phone" state on the Tilt chip** using `Arcade.motion.compass(8)` → `sim.tilt()`. The parked `phone-tilt` branch's maths moves to WP1; the game keeps only the chip. README "The hand" and the Library's Petra entry gain a sentence. | sand-art | S | its tests; on-phone check |
