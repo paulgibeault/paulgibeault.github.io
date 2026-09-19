@@ -758,6 +758,7 @@ body.app-in-game .launcher-menu__panel {
     cursor: pointer;
     transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
+a.diag-log__btn { text-align: center; text-decoration: none; }
 .diag-log__btn--primary {
     border-color: var(--field-gold-dim);
     color: var(--field-gold);

@@ -24,7 +24,10 @@ export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 // documentation, so prose ships and is linked — but a player offline wants the
 // arcade to boot, not the self-hosting guide, and precaching every doc would
 // spend their cache budget on reading material. Prose is fetched live.
-export const PRECACHE_EXCLUDE = ["*.md", "plans/", "docs/", "LICENSE", "NOTICE"];
+// motion-probe.html is the hardware probe (plans/motion-sensing-2026-09.md
+// WP0): a diagnostic the arcade ships but never boots.
+export const PRECACHE_EXCLUDE = ["*.md", "plans/", "docs/", "LICENSE", "NOTICE",
+  "motion-probe.html"];
 
 // "assembly" is AssemblyScript source (assembly/sand.ts): the compiled .wasm
 // next to the SDK is what ships, the source is a dev file like tools/.
