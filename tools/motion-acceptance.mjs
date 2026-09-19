@@ -3,8 +3,9 @@
 // tools/motion-acceptance.mjs — proves brokered motion sensing end to end
 // (plans/motion-sensing-2026-09.md WP4; cap 'motion.bridge'): the cap and
 // welcome.motion arrive, the consent dialog's Allow / Not now, samples reach
-// only the ACTIVE frame in screen axes, silence after suspend, stop, and a
-// Motion switch flipped mid-stream, the master switch, a sensorless desktop,
+// only the ACTIVE frame in screen axes, silence after suspend, stop, and the
+// fleet-wide motion switch (the menu's Settings row) flipped mid-stream, a
+// second game needing no dialog of its own, a sensorless desktop,
 // an older launcher without the cap, and the SDK's standalone path.
 //
 //   node tools/motion-acceptance.mjs
@@ -98,7 +99,12 @@ try {
         hello.available === true && hello.running === false, JSON.stringify(hello));
     check('idle: the launcher is not listening to the sensor',
         await page.evaluate(() => window.__arcade.motion.snapshot().listening === false));
-    check('idle: no top-bar mark', await page.evaluate(() => (getComputedStyle(document.getElementById('game-motion-mark')).display === 'none')));
+    check('there is no motion mark in the top bar at all', await page.evaluate(() => !document.getElementById('game-motion-mark')));
+    check('the Settings row shows three icon switches on a touch device: sound, power saver, motion', await page.evaluate(() => {
+        const ids = ['menu-mute', 'menu-power-saver', 'menu-motion'];
+        return ids.every((id) => { const b = document.getElementById(id); return b && b.getAttribute('role') === 'switch' && getComputedStyle(b).display !== 'none' && /: (on|off)$/.test(b.getAttribute('aria-label')); })
+            && document.getElementById('menu-motion').getAttribute('aria-checked') === 'true';
+    }));
 
     // 2. Not now
     await startIn(frame, 'notnow');
@@ -110,8 +116,8 @@ try {
     }));
     check('start() raises the launcher dialog, attributed to the app',
         dlg.msg.startsWith('“Motion Test” would like to use your device’s motion'), dlg.msg);
-    check('dialog offers Allow / Not now and says where to change it',
-        dlg.ok === 'Allow' && dlg.cancel === 'Not now' && dlg.msg.includes('Menu → Motion'), JSON.stringify(dlg));
+    check('dialog offers Allow / Not now, says it is for every game, and where to change it',
+        dlg.ok === 'Allow' && dlg.cancel === 'Not now' && dlg.msg.includes('every game in the arcade') && dlg.msg.includes('Settings row'), JSON.stringify(dlg));
     await page.click('#arcade-dialog-cancel');
     check('Not now → denied', (await resultOf(frame, 'notnow')) === 'denied');
     check('Not now is not remembered', await page.evaluate((k) => localStorage.getItem(k) === null, CONSENT_KEY));
@@ -124,7 +130,7 @@ try {
     await orient(cdp, 90, 0, 3);
     check('Allow + a live sensor → granted', (await resultOf(frame, 'allow')) === 'granted');
     const consent = await page.evaluate((k) => JSON.parse(localStorage.getItem(k)), CONSENT_KEY);
-    check('the answer is remembered per game', consent && consent.games['motion-test'] && consent.games['motion-test'].allowed === true, JSON.stringify(consent));
+    check('the answer is remembered once, for the fleet', consent && consent.asked === true && consent.enabled === true && !consent.games, JSON.stringify(consent));
     check('running() true and onChange fired', await frame.evaluate(() =>
         Arcade.motion.running() === true && window.motion.changes.some(c => c.running === true)));
 
@@ -145,8 +151,6 @@ try {
     });
     check('compass(8): null while unchanged, { dir, gx, gy } on a change',
         dirs[0] === null && dirs[1] && dirs[1].gx === 1 && dirs[1].gy === 1 && dirs[1].dir === 1 && dirs[2] === null, JSON.stringify(dirs));
-    check('streaming: exactly the top-bar mark shows',
-        await page.evaluate(() => (getComputedStyle(document.getElementById('game-motion-mark')).display !== 'none')));
     const n30 = await sampleCount(frame);
     await orient(cdp, 80, 0, 20); // ~22 events/s for ~0.9 s
     const got = (await sampleCount(frame)) - n30;
@@ -159,8 +163,12 @@ try {
     await orient(cdp, 70, 10, 6);
     check('a backgrounded game receives nothing', (await sampleCount(frame)) === frozen);
     check('…nor does an active game that never started', (await sampleCount(frame2)) === 0);
-    check('…and the launcher stopped listening + hid the mark', await page.evaluate(() =>
-        window.__arcade.motion.snapshot().listening === false && (getComputedStyle(document.getElementById('game-motion-mark')).display === 'none')));
+    check('…and the launcher stopped listening', await page.evaluate(() => window.__arcade.motion.snapshot().listening === false));
+    await startIn(frame2, 'second');
+    await orient(cdp, 70, 10, 3);
+    check('a SECOND game starts with no dialog of its own — consent is the fleet\'s',
+        (await resultOf(frame2, 'second')) === 'granted' && await page.evaluate((sel) => !document.querySelector(sel), DIALOG_OPEN));
+    await frame2.evaluate(() => Arcade.motion.stop());
     await startIn(frame, 'background');
     check('a background frame\'s start() → denied, no dialog',
         (await resultOf(frame, 'background')) === 'denied' && await page.evaluate((sel) => !document.querySelector(sel), DIALOG_OPEN));
@@ -189,54 +197,51 @@ try {
     await page.waitForTimeout(150);
     const stoppedAt = await sampleCount(frame);
     await orient(cdp, 40, 0, 5);
-    check('stop(): silence, listener released, mark gone', (await sampleCount(frame)) === stoppedAt
-        && await page.evaluate(() => window.__arcade.motion.snapshot().listening === false
-            && (getComputedStyle(document.getElementById('game-motion-mark')).display === 'none')));
+    check('stop(): silence, listener released', (await sampleCount(frame)) === stoppedAt
+        && await page.evaluate(() => window.__arcade.motion.snapshot().listening === false));
 
-    // 8. the Motion section: a row flipped Off mid-stream
+    // 8. the Settings row's motion switch, flipped Off mid-stream
     await startIn(frame, 'forflip');
     await resultOf(frame, 'forflip');
     await orient(cdp, 45, 0, 3);
-    await page.click('#game-motion-mark');
-    check('the top-bar mark opens the menu at the Motion section', await page.evaluate(() =>
-        document.getElementById('launcher-menu').dataset.open === 'true'
-        && !document.getElementById('menu-motion-section').hidden));
-    const row = '[data-motion-game="motion-test"]';
-    check('the section lists the game as Allowed', await page.evaluate((sel) => {
-        const b = document.querySelector(sel);
-        return !!b && b.getAttribute('aria-checked') === 'true' && /Motion Test/.test(b.textContent) && /Allowed/.test(b.textContent);
-    }, row));
-    await page.click(row);
-    check('flipping a row leaves the menu open', await page.evaluate(() => document.getElementById('launcher-menu').dataset.open === 'true'));
+    await page.click('#topbar-menu-toggle');
+    await page.click('#menu-motion');
+    const flip = await page.evaluate(() => ({
+        toast: document.getElementById('launcher-toast').textContent.trim(),
+        checked: document.getElementById('menu-motion').getAttribute('aria-checked'),
+        label: document.getElementById('menu-motion').getAttribute('aria-label'),
+        menuOpen: document.getElementById('launcher-menu').dataset.open === 'true',
+        greyed: getComputedStyle(document.querySelector('#menu-motion > span')).filter.includes('grayscale')
+    }));
+    check('one tap: a toast says "Motion off", the switch reads off (name + greyed glyph), the menu closes',
+        flip.toast === 'Motion off' && flip.checked === 'false' && flip.label === 'Motion: off' && flip.menuOpen === false && flip.greyed, JSON.stringify(flip));
     await poll(frame, () => Arcade.motion.available() === false);
     const flippedAt = await sampleCount(frame);
     await orient(cdp, 30, 0, 5);
-    const afterFlip = await frame.evaluate(() => ({
-        available: Arcade.motion.available(), running: Arcade.motion.running(),
-        told: window.motion.changes.some(c => c.available === false && c.running === false)
-    }));
-    check('row Off: the stream stops at once', (await sampleCount(frame)) === flippedAt);
-    check('row Off: available() false, running() false, onChange told the game',
-        afterFlip.available === false && afterFlip.running === false && afterFlip.told, JSON.stringify(afterFlip));
-    check('row Off: the other game is untouched', await frame2.evaluate(() => Arcade.motion.available() === true));
+    const off = await Promise.all([frame, frame2].map(f => f.evaluate(() => ({
+        a: Arcade.motion.available(), r: Arcade.motion.running(),
+        told: window.motion.changes.some(c => c.available === false)
+    }))));
+    check('switch Off: the stream stops at once', (await sampleCount(frame)) === flippedAt);
+    check('switch Off: available() false and running() false for EVERY game, and onChange told them',
+        off.every(o => o.a === false && o.r === false && o.told), JSON.stringify(off));
     await startIn(frame, 'whileoff');
-    check('row Off: start() → denied without a dialog',
+    check('switch Off: start() → denied without a dialog',
         (await resultOf(frame, 'whileoff')) === 'denied' && await page.evaluate((sel) => !document.querySelector(sel), DIALOG_OPEN));
-    await page.click(row);
-    check('row back on: available() true again', (await poll(frame, () => Arcade.motion.available())) === true);
+    await page.click('#topbar-menu-toggle');
+    await page.click('#menu-motion');
+    check('switch back On: toast "Motion on", available() returns for every game',
+        (await page.evaluate(() => document.getElementById('launcher-toast').textContent.trim())) === 'Motion on'
+        && (await poll(frame, () => Arcade.motion.available())) === true && (await poll(frame2, () => Arcade.motion.available())) === true);
 
-    // 9. the master switch
-    await page.click('#menu-motion-master');
-    await poll(frame, () => Arcade.motion.available() === false);
-    const off = await Promise.all([frame, frame2].map(f => f.evaluate(() => ({ a: Arcade.motion.available() }))));
-    check('master Off: available() false for every game',
-        off.every(o => o.a === false), JSON.stringify(off));
-    check('master Off: label says so and the rows are disabled', await page.evaluate((sel) =>
-        document.getElementById('menu-motion-master-label').textContent === 'Motion Off'
-        && document.querySelector(sel).disabled === true, row));
-    await page.click('#menu-motion-master');
-    check('master back On: available() returns', (await poll(frame, () => Arcade.motion.available())) === true);
-    await page.keyboard.press('Escape');
+    // 9. sound keeps its one tap, and says so
+    await page.click('#topbar-menu-toggle');
+    await page.click('#menu-mute');
+    const mute = await page.evaluate(() => ({ toast: document.getElementById('launcher-toast').textContent.trim(), label: document.getElementById('menu-mute').getAttribute('aria-label'), icon: document.getElementById('menu-mute-icon').textContent }));
+    check('sound: one tap mutes, the glyph changes shape, a toast says "Sound off"',
+        mute.toast === 'Sound off' && mute.label === 'Sound: off' && mute.icon === '🔇', JSON.stringify(mute));
+    await page.click('#topbar-menu-toggle');
+    await page.click('#menu-mute');
 
     // 10. a reloaded launcher remembers; a fresh frame starts dialog-free
     await page.reload({ waitUntil: 'load' });
@@ -255,7 +260,10 @@ try {
         const f = await mount(p, 'motion-test', GAME_PATH, 'Motion Test');
         check('desktop: cap present but available() false', await f.evaluate(() =>
             Arcade.peer.caps().includes('motion.bridge') && Arcade.motion.available() === false));
-        check('desktop: the Motion section is hidden', await p.evaluate(() => document.getElementById('menu-motion-section').hidden));
+        check('desktop: the motion switch is hidden; sound and power saver remain', await p.evaluate(() =>
+            getComputedStyle(document.getElementById('menu-motion')).display === 'none'
+            && getComputedStyle(document.getElementById('menu-mute')).display !== 'none'
+            && getComputedStyle(document.getElementById('menu-power-saver')).display !== 'none'));
         await startIn(f, 'desk');
         check('desktop: start() → denied/unavailable, no dialog',
             ['denied', 'unavailable'].includes(await resultOf(f, 'desk')) && await p.evaluate((sel) => !document.querySelector(sel), DIALOG_OPEN));

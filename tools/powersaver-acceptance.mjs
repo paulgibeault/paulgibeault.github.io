@@ -35,8 +35,9 @@ try {
     await page.click('#menu-power-saver');
     ok(await page.getAttribute('html', 'data-power-saver') === 'true', 'launcher html gets data-power-saver=true');
     ok(await page.evaluate(() => localStorage.getItem('arcade.v1.global.powerSaver')) === 'true', 'arcade.v1.global.powerSaver persisted as true');
-    ok(await page.textContent('#menu-power-saver-label') === 'Power Saver On', 'menu label flips to On');
-    ok(await page.getAttribute('#menu-power-saver', 'aria-pressed') === 'true', 'aria-pressed true');
+    ok(await page.getAttribute('#menu-power-saver', 'aria-label') === 'Power saver: on', 'the switch names its state (aria-label)');
+    ok(await page.getAttribute('#menu-power-saver', 'aria-checked') === 'true', 'aria-checked true');
+    ok((await page.textContent('#launcher-toast')).trim() === 'Power saver on', 'a toast says the new state in words');
     ok(await page.evaluate(() => getComputedStyle(document.getElementById('starfield')).display) === 'none', 'starfield display:none under power saver');
 
     // -- SDK standalone on the same origin: hydrates the setting pre-welcome --

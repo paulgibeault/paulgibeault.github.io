@@ -4,7 +4,8 @@
  * A game frame is sandboxed with no accelerometer/gyroscope in its `allow`
  * list, so it gets no deviceorientation events at all. Motion is BROKERED
  * instead of delegated: the frame asks (arcade:motion.op), the player
- * answers once per game in a launcher dialog, and from then on the launcher
+ * answers ONCE, for the whole arcade, in a launcher dialog (one switch in the
+ * menu's Settings row turns it off again), and from then on the launcher
  * streams one small sample — gravity in the axes of the screen — to the
  * ACTIVE frame only (arcade:motion.sample). Delegating the sensors would let
  * any game read them silently on Android; motion is a known side channel
@@ -25,16 +26,15 @@
  *   postToIframe(gameId, msg), dialog(opts) [opts.onOk runs synchronously in
  *   the OK click — the gesture iOS's requestPermission() needs], showToast,
  *   getActiveGameId(), getMountedGameIds(), getGameName(gameId) [catalog
- *   name], onPoolChanged(fn),
- *   openSettings() [open the menu], and `els`
- *   { section, master, masterLabel, list, mark } for the menu section and the
- *   top-bar mark. `env` (optional) overrides window/document/navigator/
- *   localStorage for tests.
+ *   name], onPoolChanged(fn), onChange() [the switch's state may have
+ *   changed: re-render it]. `env` (optional) overrides window/document/
+ *   navigator/localStorage for tests. The switch itself lives in the menu's
+ *   Settings row (index.html) and drives isEnabled()/setEnabled().
  */
 import { KEY_PREFIX } from './arcade-storage-core.js';
 import {
     screenGravity, createThrottle, sensorPlausible, validateMotionOp,
-    normalizeConsent, decideStart, enabledFor, withAnswer, withMaster,
+    normalizeConsent, decideStart, withAllowed, withMaster,
     FIRST_EVENT_TIMEOUT_MS
 } from './arcade-motion-core.js';
 
@@ -49,7 +49,6 @@ export function initMotionBridge(host) {
     const doc = env.document || document;
     const nav = env.navigator || navigator;
     const store = env.localStorage || localStorage;
-    const els = host.els || {};
 
     // gameId → { throttle } for every frame between its start and its stop.
     const started = new Map();
@@ -83,7 +82,7 @@ export function initMotionBridge(host) {
     }
 
     function isEnabledFor(gameId) {
-        return plausible() && enabledFor(readConsent(), gameId);
+        return plausible() && readConsent().enabled;
     }
 
     function reply(gameId, id, value) {
@@ -187,7 +186,7 @@ export function initMotionBridge(host) {
         if (!plausible()) return reply(gameId, op.id, 'unavailable');
         // Anything that interrupts belongs to the active app only.
         if (host.getActiveGameId() !== gameId) return reply(gameId, op.id, 'denied');
-        const decision = decideStart(readConsent(), gameId);
+        const decision = decideStart(readConsent());
         if (decision === 'off') return reply(gameId, op.id, 'denied');
 
         if (decision === 'ask') {
@@ -195,7 +194,8 @@ export function initMotionBridge(host) {
             const name = host.getGameName(gameId) || gameId;
             const answer = await host.dialog({
                 message: '“' + name + '” would like to use your device’s motion.\n\n'
-                    + 'You can turn this off any time in Menu → Motion.',
+                    + 'This allows motion for every game in the arcade. You can turn it off '
+                    + 'any time with the motion switch in the menu’s Settings row.',
                 okLabel: 'Allow',
                 cancelLabel: 'Not now',
                 // Synchronous in the click: the top-level gesture iOS wants.
@@ -204,15 +204,15 @@ export function initMotionBridge(host) {
             // "Not now" is not a refusal — nothing is remembered.
             if (answer === null) return reply(gameId, op.id, 'denied');
             if (asked && (await asked) !== 'granted') return reply(gameId, op.id, 'denied');
-            writeConsent(withAnswer(readConsent(), gameId, true, Date.now()));
-            notifyGame(gameId);
+            writeConsent(withAllowed(readConsent()));
+            render();
         } else if (needsPermissionCall()) {
             if ((await regrant(gameId)) !== 'granted') return reply(gameId, op.id, 'denied');
         }
 
         // The dialog took human time: re-check everything it could outlive.
         if (host.getActiveGameId() !== gameId
-                || decideStart(readConsent(), gameId) !== 'allow') {
+                || decideStart(readConsent()) !== 'allow') {
             return reply(gameId, op.id, 'denied');
         }
         started.set(gameId, { throttle: createThrottle(op.hz) });
@@ -240,112 +240,27 @@ export function initMotionBridge(host) {
         host.postToIframe(gameId, { type: 'arcade:motion.state', enabled: isEnabledFor(gameId) });
     }
 
-    // A switch flipped (here or in another launcher tab): stop what is no
-    // longer allowed AT ONCE, then tell every frame that could care.
+    // The switch flipped (here or in another launcher tab): stop every
+    // stream AT ONCE when it went off, then tell every mounted frame — it
+    // changes available() even for a game that has never asked.
     function consentChanged() {
-        const consent = readConsent();
-        // Every mounted frame: the master switch changes available() even
-        // for a game that has never asked.
-        const ids = new Set([...started.keys(), ...Object.keys(consent.games),
-            ...(host.getMountedGameIds ? host.getMountedGameIds() : [])]);
+        if (!readConsent().enabled) started.clear();
+        const ids = new Set([...started.keys(), ...(host.getMountedGameIds ? host.getMountedGameIds() : [])]);
         const active = host.getActiveGameId();
         if (active) ids.add(active);
-        for (const gid of started.keys()) {
-            if (!enabledFor(consent, gid)) started.delete(gid);
-        }
         ids.forEach(notifyGame);
         reevaluate();
     }
 
-    function setMaster(enabled) {
+    // The Settings switch. Called from its click, so turning it ON is also
+    // the top-level gesture iOS's requestPermission() wants.
+    function setEnabled(enabled) {
+        if (enabled && needsPermissionCall()) requestPermission().catch(() => {});
         writeConsent(withMaster(readConsent(), enabled));
         consentChanged();
     }
-    function setGame(gameId, allowed) {
-        writeConsent(withAnswer(readConsent(), gameId, allowed, Date.now()));
-        consentChanged();
-    }
 
-    // ─── The Motion section + the top-bar mark ─────────────────────────
-    let scrollTarget = null;
-    const rows = new Map(); // gameId → its switch button
-    function render() {
-        const consent = readConsent();
-        const active = host.getActiveGameId();
-        const streaming = !!active && started.has(active) && listening;
-        if (els.mark) {
-            els.mark.hidden = !streaming;
-            if (streaming) {
-                const label = (host.getGameName(active) || 'This game')
-                    + ' is using motion — tap to change';
-                els.mark.title = label;
-                els.mark.setAttribute('aria-label', label);
-            }
-        }
-        if (!els.section) return;
-        const ids = Object.keys(consent.games);
-        // A device with no sensor and no history has nothing to show here.
-        els.section.hidden = !plausible() && ids.length === 0;
-        if (els.master) {
-            els.master.setAttribute('aria-checked', consent.enabled ? 'true' : 'false');
-            if (els.masterLabel) els.masterLabel.textContent = consent.enabled ? 'Motion On' : 'Motion Off';
-        }
-        if (!els.list) return;
-        // Rows are updated IN PLACE, never rebuilt: a rebuilt row is detached
-        // mid-click, and the menu's outside-click closer then reads the tap
-        // as "outside" and shuts the menu under the player's finger.
-        ids.sort((a, b) => (host.getGameName(a) || a).localeCompare(host.getGameName(b) || b));
-        for (const [gid, btn] of rows) {
-            if (!consent.games[gid]) { btn.remove(); rows.delete(gid); }
-        }
-        for (const gid of ids) {
-            const row = consent.games[gid];
-            let btn = rows.get(gid);
-            if (!btn) {
-                btn = doc.createElement('button');
-                btn.type = 'button';
-                btn.className = 'launcher-menu__item launcher-menu__item--sub';
-                btn.setAttribute('role', 'switch');
-                btn.setAttribute('data-menu-stay', '');
-                btn.setAttribute('data-motion-game', gid);
-                const name = doc.createElement('span');
-                name.className = 'launcher-menu__item-label';
-                const tag = doc.createElement('span');
-                tag.className = 'launcher-menu__item-tag';
-                btn.appendChild(name);
-                btn.appendChild(tag);
-                btn.addEventListener('click', () => {
-                    const now = readConsent().games[gid];
-                    setGame(gid, !(now && now.allowed));
-                });
-                rows.set(gid, btn);
-            }
-            btn.setAttribute('aria-checked', row.allowed ? 'true' : 'false');
-            btn.disabled = !consent.enabled;
-            btn.firstChild.textContent = host.getGameName(gid) || gid;
-            btn.lastChild.textContent = row.allowed ? 'Allowed' : 'Off';
-            btn.title = row.allowed
-                ? 'Motion allowed for this game. Tap to turn off.'
-                : 'Motion off for this game. Tap to allow.';
-            els.list.appendChild(btn); // (re)append in sorted order; a no-op move when already there
-            if (scrollTarget === gid) {
-                scrollTarget = null;
-                try { btn.scrollIntoView({ block: 'nearest' }); btn.focus(); } catch (e) {}
-            }
-        }
-    }
-
-    if (els.master) {
-        els.master.addEventListener('click', () => setMaster(!readConsent().enabled));
-    }
-    if (els.mark) {
-        els.mark.addEventListener('click', (e) => {
-            e.stopPropagation(); // the menu's outside-click closer must not see this
-            scrollTarget = host.getActiveGameId();
-            if (host.openSettings) host.openSettings();
-            render();
-        });
-    }
+    function render() { if (host.onChange) { try { host.onChange(); } catch (e) {} } }
 
     doc.addEventListener('visibilitychange', reevaluate);
     if (host.onPoolChanged) host.onPoolChanged(reevaluate);
@@ -356,6 +271,10 @@ export function initMotionBridge(host) {
     return {
         motionOp: dispatch,
         enabledFor: isEnabledFor,
+        // For the launcher's Settings row.
+        plausible: plausible,
+        isEnabled: () => readConsent().enabled,
+        setEnabled: setEnabled,
         // A frame evicted or reloaded: its stream dies with it; a fresh mount
         // must start() again (dialog-free once allowed).
         clearGame: (gameId) => { if (started.delete(gameId)) reevaluate(); },

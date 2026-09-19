@@ -347,16 +347,28 @@ body.app-in-game .launcher-menu__panel {
     opacity: 0.85;
     flex-shrink: 0;
 }
-/* Switch rows (Motion): the state reads from the label and tag text, never
-   colour alone. */
-.launcher-menu__item[role="switch"][aria-checked="false"] { color: var(--text-secondary); }
-.launcher-menu__item[role="switch"]:disabled { opacity: 0.45; cursor: not-allowed; }
-.launcher-menu__item--sub { padding-left: 36px; }
-.launcher-menu__item[role="switch"][aria-checked="true"] .launcher-menu__item-tag {
-    color: var(--field-gold);
-    border-color: var(--field-gold);
+/* The Settings row: icon switches. Off is greyed AND the glyph changes
+   shape (🔊/🔇, 🔋/🪫, a struck-through phone), so state never rests on
+   colour alone; names and states live in aria-label / title / the toast. */
+.launcher-menu__row--switches { gap: 6px; }
+.launcher-menu__switch {
+    flex: 1;
+    width: auto;
+    justify-content: center;
+    min-height: 44px;                 /* a thumb-sized target */
+    font-size: 1.25rem;
+    border: 1px solid var(--card-border);
 }
-.topbar-btn--motion { color: var(--field-gold); }
+.launcher-menu__switch[hidden] { display: none; }
+.launcher-menu__switch[aria-checked="true"] { border-color: var(--field-gold); background: var(--field-gold-dim); }
+.launcher-menu__switch[aria-checked="false"] > span { filter: grayscale(1); opacity: 0.45; }
+.launcher-menu__switch-glyph { position: relative; display: inline-block; }
+.launcher-menu__switch[aria-checked="false"] > .launcher-menu__switch-glyph::after {
+    content: '';
+    position: absolute; left: -15%; right: -15%; top: 50%;
+    border-top: 2px solid var(--snow-white);
+    transform: rotate(-45deg);
+}
 .launcher-menu__item-label { flex: 1; }
 .launcher-menu__item-tag {
     font-size: 0.6rem;

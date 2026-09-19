@@ -1334,7 +1334,7 @@ way.
 await Arcade.ready;
 if (Arcade.motion && Arcade.motion.available()) showTiltControl();
 
-// From a tap. Framed: the launcher asks the player once per game, then
+// From a tap. Framed: the launcher asks the player once (for every game), then
 // remembers. Standalone on iOS: this IS the gesture requestPermission needs.
 const how = await Arcade.motion.start({ hz: 30 });   // 'granted' | 'denied' | 'unavailable'
 
@@ -1363,23 +1363,24 @@ Arcade.motion.stop();                                 // and off() to unsubscrib
   no direction until the first real sample). `c.dir`, `c.direction`,
   `c.reset()`.
 - **`available()`** is false when the launcher lacks the cap, the device
-  has no plausible sensor (no touch screen, insecure context), the player
-  turned the launcher's **Motion** master switch off, or turned *your* row
-  off there. Read it after
+  has no plausible sensor (no touch screen, insecure context), or the player
+  turned motion off — one switch for the whole arcade, in the launcher
+  menu's Settings row beside sound and power saver. Read it after
   `Arcade.ready`; **`Arcade.motion.onChange(fn)`** fires `{ available,
-  running }` when a switch flips or a stream starts or ends — a row turned
-  off mid-stream ends your stream at once, so follow it rather than showing
-  a control that has gone dead.
+  running }` when the switch flips or a stream starts or ends — switched off
+  mid-stream, your stream ends at once, so follow it rather than showing a
+  control that has gone dead.
 - **`start()` answers** `'granted'`; `'denied'` (the player said *Not now* —
   which is not remembered, you may ask again from their next tap — or the
-  row is off, or iOS refused, or your frame is not the active app); or
+  switch is off, or iOS refused, or your frame is not the active app); or
   `'unavailable'` (no sensor answered within ~1.5 s: a touch laptop).
 - **Lifecycle is the SDK's.** Samples stop while your game is suspended and
   resume with it; you write nothing. The launcher streams only to the active
   app, from one listener for the whole launcher, at your `hz` (1–60,
   default 30).
-- While you stream, the launcher shows a motion mark in its top bar; tapping
-  it opens the Motion section with your game's toggle.
+- The launcher asks the player **once, for every game** — the first
+  `start()` any game makes raises its dialog; after an Allow, yours starts
+  silently.
 
 **The contract:**
 
