@@ -120,7 +120,7 @@ below):
 | `screen.orientation` present; `window.orientation` | both present (`portrait-primary`, 0) | | |
 | `requestPermission()` before any grant, no gesture | rejects `NotAllowedError` | | n/a |
 | …from a tap | `granted` (orientation and motion) | | n/a |
-| …on reload / new tab **after** a grant | **not yet tested** (the run was visit 1) | | n/a |
+| …in a **new tab**, 11 min after a grant, no gesture | **rejects `NotAllowedError`** — the grant does not carry a gesture-less call; from a tap it is `granted` again (whether iOS re-shows its own prompt: to confirm). Same-tab reload still untested. | | n/a |
 | `deviceorientation` / `devicemotion` events per second | 59.8 / 59.8 | | |
 | sign of `accelerationIncludingGravity` | **gravity itself** (upright: y ≈ −9.5; on its left edge: x ≈ −9.7) — `aigSign +1` | | expected opposite |
 | `interval` units | **seconds** (0.01667) | | expected ms |
@@ -139,6 +139,16 @@ What this settles:
   `motion-unit.mjs` requires our formula's device-frame gravity to match
   `accelerationIncludingGravity` within 0.08 per axis (worst seen: 0.047),
   and pins angle 90 ↔ γ ≈ −84 ↔ "down the screen".
+- **The §8 lifetime risk is real, so the one-tap path is live code.** A
+  remembered Allow still needs a top-level gesture on each fresh page: the
+  game's tap happens inside the frame and does not count, so the bridge's
+  gesture-less `requestPermission()` rejects and the "Tap to enable motion"
+  toast is what a returning iPhone player actually sees. Candidate
+  improvement, pending one observation (does iOS re-show its system prompt
+  on that tap?): spend the *tile tap that launches the game* as the gesture
+  for games whose row is Allowed, so the chip works first time.
+- Second run (04:42Z) also laid the phone flat: a.i.g. z = −10.77 face up —
+  gravity itself, confirming `aigSign +1`. Its frames again saw 0 events.
 - **For WP6:** iOS `interval` is in seconds and its a.i.g. is gravity itself;
   the sample's own `timeStamp` is the only portable `dt`.
 - **The event stream stalls.** The 10 s trace has gaps of 0.9 s and 2.1 s in
