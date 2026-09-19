@@ -60,6 +60,28 @@ for (const a of [0, 90, 180, 270]) {
 ok(normalizeScreenAngle(-90) === 270 && normalizeScreenAngle(360) === 0
     && normalizeScreenAngle(91) === 90 && normalizeScreenAngle('x') === 0, 'normalizeScreenAngle folds strays');
 
+console.log('\nscreenGravity — known answers from a real iPhone (tools/fixtures/motion/)');
+{
+    // Two independent sensors' worth of truth. deviceorientation's angles go
+    // through OUR formula; devicemotion's accelerationIncludingGravity is the
+    // accelerometer saying where down is with no Euler angles involved. On a
+    // still hand they must agree — which checks the formula itself, not just
+    // our arithmetic. (iOS reports a.i.g. as gravity itself: aigSign +1.)
+    const fx = JSON.parse(await readFile(new URL('./fixtures/motion/ios-safari-18_7-landscapes.json', import.meta.url), 'utf8'));
+    let worst = 0;
+    for (const [, beta, gamma, , ax, ay, az] of fx.rows) {
+        const g = screenGravity(beta, gamma, 0);           // angle 0 ⇒ device axes, y flipped
+        const n = Math.hypot(ax, ay, az) * fx.aigSign;
+        worst = Math.max(worst, Math.abs(g.x - ax / n), Math.abs(-g.y - ay / n), Math.abs(g.z - az / n));
+    }
+    ok(worst < 0.08, `the formula agrees with the accelerometer on all ${fx.rows.length} samples (worst axis error ${worst.toFixed(3)})`);
+    const land = fx.rows.filter((r) => r[3] === 90).slice(0, 5);
+    ok(land.length === 5 && land.every(([, b, g, a]) => { const v = screenGravity(b, g, a); return v.y > 0.95 && Math.abs(v.x) < 0.3; }),
+        'ON GLASS: upright in landscape at angle 90 (γ ≈ −84) → gravity runs down the screen');
+    ok(land.every(([, b, g]) => screenGravity(b, g, 270).y < -0.95),
+        '…and the opposite convention (treating it as 270) would have pointed at the ceiling');
+}
+
 console.log('\nscreenGravity — hostile input');
 ok(screenGravity(null, null, 0) === null, 'the all-null event a sensorless device fires → null');
 ok(screenGravity(NaN, 0, 0) === null && screenGravity(0, Infinity, 0) === null, 'NaN / Infinity → null');
