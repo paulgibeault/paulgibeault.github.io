@@ -141,7 +141,7 @@
 import { RendezvousManager, RDV_BUILD } from './p2p/rendezvous.js';
 import { DEFAULT_ICE_SERVERS } from './p2p/p2p-core.js';
 import { MqttCarrier, MultiCarrier, CarrierPool } from './p2p/rendezvous-carriers.js';
-import { readKnownPeers, writeKnownPeers, setKnownPeerPaused, markKnownPeerRevoked, resumePlan, RESUME_WINDOW_MS } from './arcade-known-peers.js';
+import { readKnownPeers, writeKnownPeers, setKnownPeerPaused, setKnownPeerRoomSplit, markKnownPeerRevoked, resumePlan, RESUME_WINDOW_MS } from './arcade-known-peers.js';
 import { ArcadeDiag } from './arcade-diag.js';
 import { isDeviceId, validatePeerEnvelope, validateRevocationEntry } from './arcade-envelope.js';
 import {
@@ -326,6 +326,7 @@ const peerIdentityListeners = []; // fn({deviceId, name, remoteName, isNew, fing
 const revokedListeners = [];      // fn({deviceId, name}) — a verified revocation latched (#32)
 const pairRequestListeners = [];  // fn({deviceId, name}) — peer wants auto-reconnect, user undecided
 const remoteByeListeners = [];    // fn({deviceId, name}) — peer hung up on purpose
+const roomSplitListeners = [];    // fn({deviceId, name, split}) — split latched (true) or cleared (false)
 const presenceListeners = [];     // fn({gameId, deviceId, name, kind}) — remote game mounted/listening
 // One record per DIRECT-link seat, keyed by transport peerId. Consolidates what
 // used to be four parallel structures (identityLinks, announcedTo,
@@ -806,6 +807,24 @@ function isFingerprintSuspect(deviceId, known) {
 // (crypto.randomUUID) or the 'dev-' fallback. Anything else is a peer making
 // ids up — reject before it can touch knownPeers or the reconnect machinery.
 // The shape itself lives in arcade-envelope.js (isDeviceId / DEVICE_ID_RE).
+
+// The split latch's single writer. Listeners fire only on a CHANGE, so a
+// beacon repeating a verdict every minute costs the UI nothing.
+function setRoomSplit(deviceId, split) {
+    if (!deviceId) return;
+    const known = readKnownPeers();
+    const rec = known[deviceId];
+    if (!rec) return;
+    const was = !!rec.roomSplitAt;
+    if (was === !!split) return;
+    if (!setKnownPeerRoomSplit(deviceId, split ? Date.now() : null)) return;
+    ArcadeDiag.log('bridge', split
+        ? `pair ${deviceId}: room split latched — the saved pairings on the two devices no longer meet; an in-person re-pair is needed`
+        : `pair ${deviceId}: room split cleared`);
+    for (const fn of roomSplitListeners) {
+        try { fn({ deviceId, name: rec.name || 'Unnamed device', split: !!split }); } catch (e) {}
+    }
+}
 
 function stampLiveSession() {
     try { localStorage.setItem(LAST_LIVE_SESSION_KEY, String(Date.now())); } catch (e) {}
@@ -1487,7 +1506,11 @@ async function ensureAddon() {
             // never be called, named or shown — it is unreachable state that
             // still costs a carrier subscription per day-topic. The field log
             // of 2026-08-16 carried 8 stored pairs for 4 linked devices.
-            knownPairIds: () => new Set(Object.keys(readKnownPeers()))
+            knownPairIds: () => new Set(Object.keys(readKnownPeers())),
+            // Split beacon (§7.7): the one thing two devices on disjoint rooms
+            // can still both name is each other's device id — pairIds ARE the
+            // remote deviceId here, so the unordered pair is the material.
+            beaconMaterial: (pairId) => [getMyDeviceId(), pairId].sort().join('|')
             // No adoptPartyId: v1.13's restart-resume party continuity died
             // with the party. A re-adopted link rejoins nothing, because a
             // link belongs to no group — the games open on it are the
@@ -1515,7 +1538,22 @@ async function ensureAddon() {
                 if (done !== 'gave-up') stampLiveSession();
             });
         }
-        rdv.addEventListener('pair-established', () => stampLiveSession());
+        rdv.addEventListener('pair-established', (e) => {
+            stampLiveSession();
+            // A ceremony agreed a room again (§7.3): whatever split we saw is history.
+            setRoomSplit((e.detail || {}).pairId, false);
+        });
+        // Split beacon verdicts (§7.7). Latched into knownPeers so the dialog
+        // can say "needs re-pair" from storage, and cleared by any evidence
+        // the pair can meet again: a same-room beacon, or an actual reconnect.
+        rdv.addEventListener('room-split', (e) => setRoomSplit((e.detail || {}).pairId, true));
+        rdv.addEventListener('peer-beacon', (e) => {
+            const d = e.detail || {};
+            if (d.sameRoom) setRoomSplit(d.pairId, false);
+        });
+        for (const healed of ['reconnected', 'recovered-inband']) {
+            rdv.addEventListener(healed, (e) => setRoomSplit((e.detail || {}).pairId, false));
+        }
         rdv.addEventListener('remote-bye', (e) => {
             // The peer hung up on purpose. Drop the link NOW instead of
             // letting it linger 'interrupted' through the repair grace
@@ -1963,7 +2001,11 @@ export const ArcadeP2P = {
             }
         }
         const known = readKnownPeers()[deviceId];
-        return (known && known.paused) ? 'paused' : 'idle';
+        if (known && known.paused) return 'paused';
+        // Not live, and the peer's beacon said its saved pairing cannot meet
+        // ours (§7.7): a Call would ring into silence, so say the real state.
+        if (known && known.roomSplitAt) return 'split';
+        return 'idle';
     },
 
     /**
@@ -2305,6 +2347,21 @@ export const ArcadeP2P = {
         return () => {
             const i = remoteByeListeners.indexOf(fn);
             if (i >= 0) remoteByeListeners.splice(i, 1);
+        };
+    },
+
+    /**
+     * Fires when a peer's split beacon (PROTOCOL.md §7.7) shows the two
+     * devices' saved pairings can no longer meet — `split: true` — and again
+     * when that clears (`split: false`): fn({deviceId, name, split}). While
+     * latched, connectionState() reads 'split' for that device and the only
+     * fix is a fresh in-person ceremony on both devices.
+     */
+    onRoomSplit(fn) {
+        roomSplitListeners.push(fn);
+        return () => {
+            const i = roomSplitListeners.indexOf(fn);
+            if (i >= 0) roomSplitListeners.splice(i, 1);
         };
     },
 

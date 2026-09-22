@@ -29,7 +29,7 @@ const FAST_RDV = `(() => {
     r.options.listenerDelayMs = 800;
     r.options.callerDelayMs = 1600;
     window.__rdvEv = window.__rdvEv || [];
-    for (const t of ['pair-established', 'reconnecting', 'reconnected', 'recovered-inband', 'gave-up', 'remote-bye'])
+    for (const t of ['pair-established', 'reconnecting', 'reconnected', 'recovered-inband', 'gave-up', 'remote-bye', 'peer-beacon', 'room-split'])
         r.addEventListener(t, () => window.__rdvEv.push(t));
     window.__rdvDiag = window.__rdvDiag || [];
     r.addEventListener('diagnostic', (e) => window.__rdvDiag.push((e.detail || {}).msg || ''));
@@ -936,6 +936,106 @@ try {
         check('the skipped pair is named, with its reason',
             said.some((m) => /ghost-disabled-01/.test(m) && /disabled\/paused/.test(m)),
             JSON.stringify(said));
+        await s.ctxH.close(); await s.ctxJ.close();
+    }
+
+    // 15. SPLIT BEACON (#175, PROTOCOL.md §7.7): a pair whose two devices froze
+    //     DIFFERENT rooms can never meet on its day-topics and, until now, could
+    //     not even tell — both Calls rang into silence forever (2026-08-21,
+    //     2026-09-05). Each live episode now beacons a keyed tag of its room on
+    //     a topic derived from the two device ids. Same tag → the peer is online
+    //     in our room (no alarm); different tag → 'room-split', latched into
+    //     knownPeers, shown as "Needs re-pair", and cleared by a fresh ceremony.
+    {
+        console.log('\n  [split beacon: same room is quiet, disjoint rooms are named, a ceremony clears it]');
+        const s = await freshPair('P2');
+        const hDev = await peerDev(s.J); // H's device id, as J knows it
+        const jDev = await peerDev(s.H);
+
+        // Phase 1 — healthy pair, beacons crossed by hand while both episodes
+        // are held open (severed carriers publish nothing, so the pair cannot
+        // heal away underneath the check). H builds today's beacon with its
+        // real room key; J judges it with its own. They must agree.
+        await s.H.evaluate(() => window.__arcadeRdvSever(true));
+        await s.J.evaluate(() => window.__arcadeRdvSever(true));
+        await s.H.evaluate(() => {
+            const pm = window.__arcade.p2p._addon().peerNode;
+            Array.from(pm.peers.values()).forEach(p => { try { p.dataChannel.close(); } catch (e) {} });
+        });
+        for (const p of [s.H, s.J]) {
+            await p.waitForFunction(`(() => { const r = window.__arcade.p2p._rdv(); return [...r.episodes.values()].some(ep => ep.beaconKey && ep.beaconExpected.size === 3); })()`, null, { timeout: 20000 });
+        }
+        const sameTopic = (await s.H.evaluate(() => [...[...window.__arcade.p2p._rdv().episodes.values()][0].beaconSubs.keys()].sort()))
+            .join() === (await s.J.evaluate(() => [...[...window.__arcade.p2p._rdv().episodes.values()][0].beaconSubs.keys()].sort())).join();
+        check('both sides subscribe the same beacon topics (device-id material agrees)', sameTopic);
+        const hBeacon = await s.H.evaluate(() => {
+            const r = window.__arcade.p2p._rdv();
+            return r._beaconFrame([...r.episodes.values()][0]);
+        });
+        const verdict = await s.J.evaluate(async (blob) => {
+            const r = window.__arcade.p2p._rdv();
+            const [pairId, ep] = [...r.episodes.entries()][0];
+            await r._onBeaconBlob(pairId, ep, blob);
+            return { ev: window.__rdvEv.slice(), state: window.__arcade.p2p.connectionState(pairId) };
+        }, hBeacon);
+        check('a same-room beacon is reported as the peer being online', verdict.ev.includes('peer-beacon'), JSON.stringify(verdict.ev));
+        check('…and raises no split', !verdict.ev.includes('room-split') && verdict.state !== 'split', verdict.state);
+        await s.H.evaluate(() => window.__arcadeRdvSever(false));
+        await s.J.evaluate(() => window.__arcadeRdvSever(false));
+        check('healthy pair heals after the beacon check (side A)', await connectedAgain(s.H));
+        check('healthy pair heals after the beacon check (side B)', await connectedAgain(s.J));
+
+        // Phase 2 — the field incident: J's stored pairing re-keyed and froze a
+        // room H never agreed to (a half-committed re-key from before frozen
+        // rooms). Done while connected so the next episode reads it fresh.
+        await s.J.evaluate(async (pairId) => {
+            const { RendezvousCrypto: RC } = await import('./p2p/rendezvous-crypto.js');
+            const base = await RC.derivePairBase(RC.randBytes(32), RC.randBytes(32));
+            const roomBits = await RC.topicBits(base);
+            await window.__arcade.p2p._rdv()._updateRec(pairId, (rec) => { rec.base = base; rec.roomBits = roomBits; return rec; });
+        }, hDev);
+        await s.H.evaluate(() => {
+            const pm = window.__arcade.p2p._addon().peerNode;
+            Array.from(pm.peers.values()).forEach(p => { try { p.dataChannel.close(); } catch (e) {} });
+        });
+        // Real beacons over the dead-drop now: each side's first beacon (t=0 of
+        // its episode) or its reply to the other's must land as a split.
+        const splitH = await s.H.waitForFunction(`window.__rdvEv.includes('room-split')`, null, { timeout: 30000 }).then(() => true).catch(() => false);
+        const splitJ = await s.J.waitForFunction(`window.__rdvEv.includes('room-split')`, null, { timeout: 30000 }).then(() => true).catch(() => false);
+        check('disjoint rooms: side A sees the split via the beacon', splitH);
+        check('disjoint rooms: side B sees the split via the beacon', splitJ);
+        check('side A latched it into knownPeers (connectionState = split)',
+            (await s.H.evaluate((d) => window.__arcade.p2p.connectionState(d), jDev)) === 'split');
+        check('side B latched it into knownPeers (connectionState = split)',
+            (await s.J.evaluate((d) => window.__arcade.p2p.connectionState(d), hDev)) === 'split');
+        const notHealed = (await s.H.evaluate(() => window.__arcade.p2p.status() !== 'connected'))
+            && (await s.J.evaluate(() => window.__arcade.p2p.status() !== 'connected'));
+        check('…and the pair really cannot meet on its day-topics', notHealed);
+        const label = await s.H.evaluate(() => {
+            document.getElementById('menu-multiplayer').click();
+            const el = document.querySelector('.connections-row__status--split');
+            const meta = document.querySelector('.connections-row__meta');
+            const out = { label: el ? el.textContent : null, meta: meta ? meta.textContent : '' };
+            if (window.__arcade.closeConnectionsDialog) window.__arcade.closeConnectionsDialog();
+            return out;
+        });
+        check('the Multiplayer dialog says "Needs re-pair"', /needs re-pair/i.test(label.label || ''), label.label);
+        check('…and points at the fix (New invite code on both devices)', /new invite code/i.test(label.meta), label.meta);
+        const diagSaid = await s.H.evaluate(() => (window.__rdvDiag || []).some((m) => /DIFFERENT room/.test(m)));
+        check('the connection log names the split', diagSaid);
+
+        // Phase 3 — the one repair there is: a fresh in-person ceremony. The new
+        // link verifies keys, disagrees, re-keys, agrees a room — and the latch
+        // clears on both sides.
+        await ceremony(s.H, s.J);
+        const clearedH = await s.H.waitForFunction((d) => window.__arcade.p2p.connectionState(d) === 'connected'
+            && !(JSON.parse(localStorage.getItem('arcade.v1._meta.knownPeers'))[d] || {}).roomSplitAt, jDev, { timeout: 20000 })
+            .then(() => true).catch(() => false);
+        const clearedJ = await s.J.waitForFunction((d) => window.__arcade.p2p.connectionState(d) === 'connected'
+            && !(JSON.parse(localStorage.getItem('arcade.v1._meta.knownPeers'))[d] || {}).roomSplitAt, hDev, { timeout: 20000 })
+            .then(() => true).catch(() => false);
+        check('a fresh ceremony clears the latch (side A)', clearedH);
+        check('a fresh ceremony clears the latch (side B)', clearedJ);
         await s.ctxH.close(); await s.ctxJ.close();
     }
 } catch (e) {

@@ -42,6 +42,7 @@ import {
     setKnownPeerPaused,
     setKnownPeerSyncEnabled,
     setKnownPeerBackupTarget,
+    setKnownPeerRoomSplit,
     markKnownPeerRevoked,
     clearKnownPeerRevoked,
     deleteKnownPeer,
@@ -151,6 +152,19 @@ function renameTests() {
     ok(readKnownPeers()[ID_A].name === 'x'.repeat(60), 'rejected renames leave the stored name alone');
     ok(renameKnownPeer(ID_A, 42) === true && readKnownPeers()[ID_A].name === '42',
         'non-string name is String()-coerced (historical)');
+}
+
+function roomSplitTests() {
+    console.log('\nroom split latch (PROTOCOL.md §7.7)');
+    store.clear();
+    seed({ [ID_A]: entry({ autoReconnect: true }) });
+    ok(setKnownPeerRoomSplit(ID_A, 1758400000000) === true, 'latching writes');
+    ok(readKnownPeers()[ID_A].roomSplitAt === 1758400000000, 'roomSplitAt is stored as the sighting time');
+    ok(setKnownPeerRoomSplit(ID_A, null) === true, 'clearing a latched split writes');
+    ok(!('roomSplitAt' in readKnownPeers()[ID_A]), 'clearing removes the field entirely');
+    ok(setKnownPeerRoomSplit(ID_A, null) === false, 'clearing an unlatched peer is a no-op (no write)');
+    ok(setKnownPeerRoomSplit(ID_B, 1) === false, 'unknown id → false, nothing written');
+    ok(readKnownPeers()[ID_A].autoReconnect === true, 'other fields untouched');
 }
 
 function flagTests() {
@@ -371,6 +385,7 @@ roundTripTests();
 mutateTests();
 renameTests();
 flagTests();
+roomSplitTests();
 revocationTests();
 deleteTests();
 partyStripTests();

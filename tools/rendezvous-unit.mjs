@@ -166,6 +166,57 @@ function roomPolicyTests() {
     }
 }
 
+async function beaconTests() {
+    console.log('\nsplit beacon (PROTOCOL.md §7.7)');
+
+    const material = ['dev-b', 'dev-a'].sort().join('|');
+    const k1 = await RC.beaconKeyFromMaterial(material);
+    const k2 = await RC.beaconKeyFromMaterial(['dev-a', 'dev-b'].sort().join('|'));
+    const kOther = await RC.beaconKeyFromMaterial('dev-a|dev-c');
+    const day = '2026-09-21';
+    ok((await RC.beaconTopicForDay(k1, day)) === (await RC.beaconTopicForDay(k2, day)),
+        'both sides derive the same beacon topic from the same sorted device ids');
+    ok((await RC.beaconTopicForDay(k1, day)) !== (await RC.beaconTopicForDay(kOther, day)),
+        'a different pair of devices gets a different beacon topic');
+    ok((await RC.beaconTopicForDay(k1, day)) !== (await RC.beaconTopicForDay(k1, '2026-09-22')),
+        'beacon topics rotate daily (unlinkable across days)');
+    ok(/^[0-9a-f]{32}$/.test(await RC.beaconTopicForDay(k1, day)), 'beacon topic has the same shape as a room topic');
+    ok(await throwsAsync(() => RC.beaconKeyFromMaterial('')), 'empty material is refused');
+
+    // The tag: same room → same tag; different room → different tag; and it
+    // is neither the day-topic nor any prefix of the room material.
+    const base = await RC.derivePairBase(RC.randBytes(32), RC.randBytes(32));
+    const bits = await RC.topicBits(base);
+    const roomKey = await RC.topicKeyFromBits(bits);
+    const roomKeyAgain = await RC.topicKeyFromBits(bits);
+    const otherRoomKey = await RC.topicKeyFromBits(await RC.topicBits(await RC.derivePairBase(RC.randBytes(32), RC.randBytes(32))));
+    const tag = await RC.beaconTag(roomKey, day);
+    ok(/^[0-9a-f]{16}$/.test(tag), 'beacon tag is 16 hex (8 bytes)');
+    ok(tag === (await RC.beaconTag(roomKeyAgain, day)), 'same room → same tag for the day');
+    ok(tag !== (await RC.beaconTag(otherRoomKey, day)), 'different room → different tag');
+    ok(tag !== (await RC.beaconTag(roomKey, '2026-09-22')), 'tag changes with the day');
+    const topic = await RC.topicForDay(roomKey, day);
+    ok(!topic.startsWith(tag) && !topic.includes(tag), 'tag is not the day-topic nor a prefix of it (domain separation)');
+    ok(!Buffer.from(bits).toString('hex').includes(tag), 'tag is not a prefix/substring of the room material');
+
+    // The judgement, pinned as data (the field cases the shell cannot tell apart).
+    const judge = RendezvousManager._judgeBeacon;
+    const expected = new Map([['2026-09-20', 'a'.repeat(16)], [day, tag], ['2026-09-22', 'c'.repeat(16)]]);
+    ok(judge({ b: 1, d: day, n: '01234567', tag }, expected).verdict === 'same', 'matching tag for a day in the window → same room');
+    const split = judge({ b: 1, d: day, n: '01234567', tag: 'f'.repeat(16) }, expected);
+    ok(split.verdict === 'split' && split.day === day && split.myTag === tag && split.theirTag === 'f'.repeat(16),
+        'different tag for a day in the window → split, naming both tags');
+    ok(judge({ b: 1, d: '2026-09-01', n: '01234567', tag: 'f'.repeat(16) }, expected).verdict === 'ignore',
+        'a beacon for a day OUTSIDE the window is ignored, never read as a split (replay defense)');
+    ok(judge({ b: 1, d: '2026-09-22', n: '01234567', tag: 'c'.repeat(16) }, expected).verdict === 'same',
+        'tomorrow (clock skew) is judged against tomorrow’s expected tag');
+    ok(judge({ b: 2, d: day, tag }, expected).verdict === 'ignore', 'unknown beacon version is ignored');
+    ok(judge({ b: 1, d: 'today', tag }, expected).verdict === 'ignore', 'malformed day is ignored');
+    ok(judge({ b: 1, d: day, tag: 'short' }, expected).verdict === 'ignore', 'malformed tag is ignored');
+    ok(judge(null, expected).verdict === 'ignore' && judge('x', expected).verdict === 'ignore', 'non-objects are ignored');
+    ok(judge({ b: 1, d: day, n: '01234567', tag }, { [day]: tag }).verdict === 'same', 'accepts a plain object of expected tags too');
+}
+
 function codecTests() {
     console.log('\nmqttCodec');
 
@@ -228,6 +279,7 @@ function codecTests() {
     console.log('Rendezvous unit tests — crypto + room policy + MQTT codec');
     await cryptoTests();
     roomPolicyTests();
+    await beaconTests();
     codecTests();
     console.log('');
     if (fail) { console.log(fail + ' check(s) FAILED.'); process.exit(1); }
