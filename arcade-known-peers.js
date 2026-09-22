@@ -11,7 +11,7 @@
  *   { name, remoteName, firstConnectedAt, lastConnectedAt, timesConnected,
  *     fingerprint, fingerprintChangedAt?, pinPendingFingerprint?,
  *     autoReconnect?, paused?, syncEnabled?, backupTarget?, invitesOff?,
- *     userPub?, deviceCertIssuedAt?, revoked? }
+ *     roomSplitAt?, userPub?, deviceCertIssuedAt?, revoked? }
  *
  * `paused` is a display/intent flag only — it says the user hung up and
  * doesn't want this link auto-healed. The actual teardown and the
@@ -151,6 +151,23 @@ export function setKnownPeerPaused(id, paused) {
     return mutateKnownPeers((map) => {
         if (!ownEntry(map, id)) return null;
         map[id].paused = !!paused;
+        return map;
+    });
+}
+
+/**
+ * The split latch (PROTOCOL.md §7.7): the peer's beacon named a room other
+ * than ours, so the two saved pairings can no longer meet and only an
+ * in-person re-pair heals it. `at` is the epoch ms of the sighting; null
+ * clears it (a same-room beacon, a reconnect, or a fresh ceremony). Persisted
+ * so the Multiplayer dialog can say so at once, before the peer's next beacon.
+ */
+export function setKnownPeerRoomSplit(id, at) {
+    return mutateKnownPeers((map) => {
+        if (!ownEntry(map, id)) return null;
+        if (at) map[id].roomSplitAt = Number(at);
+        else if ('roomSplitAt' in map[id]) delete map[id].roomSplitAt;
+        else return null;
         return map;
     });
 }

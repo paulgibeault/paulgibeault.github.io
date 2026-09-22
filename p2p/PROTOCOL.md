@@ -678,6 +678,68 @@ plus a linger (so an episode that settles and immediately re-arms reuses
 warm sockets). The pool changes socket economics only — topics, payloads,
 and cadences on the wire are identical.
 
+### 7.7 Split beacon
+
+A pair whose two devices hold **different rooms** (§7.3) cannot meet on its
+day-topics, and — the sharper problem — cannot observe that it cannot: no
+blob ever arrives on either side, so a split is indistinguishable from a
+peer that is merely offline. Frozen rooms prevent new splits; they cannot
+reconcile one that already exists, and until this section the app rang into
+that silence forever (field incidents 2026-08-21 and 2026-09-05).
+
+The beacon is the one channel a split pair still has. Both devices know
+each other's **device id** from the identity handshake, and that public
+material is enough to name a topic no third party can find:
+
+```
+beaconKey        = HMAC-SHA256 key from SHA-256("qrp2p/rdv/v1/beacon-key|" || material)
+material         = the two device ids, sorted, joined by "|"   (app-supplied)
+beaconTopic(d)   = lowercase_hex( HMAC-SHA256(beaconKey, "beacon/topic/" || d)[0..15] )
+beaconTag(d)     = lowercase_hex( HMAC-SHA256(topicKey,  "beacon/tag/"   || d)[0..7]  )
+```
+
+While an episode is live, each side — in **both** roles — publishes to
+`beaconTopic(today)` a plain-JSON frame (there is no shared secret left to
+seal it with):
+
+```json
+{ "b": 1, "d": "YYYY-MM-DD", "n": "<8 hex>", "tag": "<16 hex>" }
+```
+
+`tag` is `beaconTag(d)` under the sender's frozen room key; `n` is random
+so two same-room beacons are never byte-identical (an episode drops its own
+echoed publishes by exact match). The receiver judges a frame only if `d`
+is inside its own three-day window, and compares `tag` to the value its own
+room yields for that same `d`:
+
+| received tag | meaning | app-visible result |
+|---|---|---|
+| equals ours for `d` | peer is online, in our room | `peer-beacon {sameRoom: true}` |
+| differs | **split** — the two devices froze different rooms | `room-split {day, theirTag, myTag}` |
+| `d` outside our window, or malformed | ignored (a replayed old beacon is not a split) | nothing |
+
+The tag is domain-separated from `topic(d)` by its label, is keyed by the
+room material rather than derived from it, and is truncated: it is neither a
+topic name nor any prefix of `roomBits`, so publishing it does not violate
+§7.3's rule against putting room material or `roomId` on a carrier. It is
+still a per-day function of the room, which is why the whole beacon is
+scoped to a topic only the pair's two devices can compute.
+
+Cadence: the standby ring's (§7.5 — once at episode start, then minutes
+apart), gated by the same republish bound (`canPublish`), and additionally
+**once in reply** to any beacon received (rate-limited, `beaconReplyMinMs`
+20 s) so a device that just launched learns its verdict in seconds. The
+beacon shares the episode's carrier lease and topic-refresh cadence, and
+dies with the episode: a **connected** pair beacons nothing.
+
+The beacon decides nothing about the episode. It is a *report*: the layer
+above latches `room-split` into its own store, shows the user that an
+in-person re-pair is the fix, and clears the latch on a same-room beacon, a
+reconnect, or a fresh ceremony (which agrees a room again, §7.3). Healing a
+split over the beacon itself is out of scope — with no shared secret there
+is nothing to authenticate a re-key with; the user identity layer could sign
+one, and that is the natural follow-up.
+
 ## 8. Security considerations
 
 | threat | defense |
@@ -695,6 +757,8 @@ and cadences on the wire are identical.
 | Reflection (offer ↔ answer ↔ ring) | direction tag in AAD (§7.4) |
 | Recorded traffic + later key theft (forward secrecy) | **NOT provided today** — the per-reconnect ratchet that would bind keys to each new DTLS transcript is removed until a two-sided commit exists (§7.2, §7.5; re-introduction requires a protocol version bump); base confidentiality against the relay still holds |
 | MITM on rendezvous reconnect | new fingerprints travel only inside the AEAD; without `pairBase_n` substitution is impossible |
+| Forged beacon (§7.7) | the beacon is unauthenticated by necessity (a split pair shares no secret). Its topic needs both device ids, so only a device that was itself paired with one of them can find it, and the worst a forged tag does is make the launcher SUGGEST an in-person re-pair — which is harmless to perform. A forged same-room tag cannot suppress a real split: the tag is a keyed MAC of the room the forger does not hold |
+| Replayed beacon | judged only inside the receiver's three-day window and against the tag for the frame's OWN day, so an old beacon is ignored rather than misread as a split (§7.7) |
 | Stranger introduction via rendezvous | no secret → no topic, no key; pairing requires the manual ceremony (§7.1) |
 
 Residual risks, stated honestly: a malicious *direct* peer is inside the
@@ -721,13 +785,25 @@ pair falls outside the resume window, and the standby ring stops at
 silences it, and revocation deletes the secret locally. STUN (when enabled) learns only what STUN always learns: the
 reflexive address of a client that asked for it.
 
+The split beacon (§7.7) adds, per armed pair, one more pseudonymous per-day
+topic and a few tiny plain-JSON writes a day from **both** roles — the
+caller role, write-silent in standby until now, writes here too. The topic
+is an HMAC over the two device ids (random UUIDs, never on the wire
+themselves), so it links nothing an observer of the room topics could not
+already link; the payload is a keyed per-day tag that changes daily with
+the topics. What a relay observer can newly learn is that *some* pair is
+online at both ends and whether those ends agree — never which room, which
+device, or the same pair on another day.
+
 ## 10. Registry
 
 | item | values |
 |---|---|
 | payload codec versions | `1` (packed); legacy deflate (decode-only) |
-| rdv ext frame kinds | `pair` `pair-confirm` `bye` |
+| rdv ext frame kinds | `pair` `pair-confirm` `pair-verify` `bye` |
 | rdv sealed directions | `o` (offer) `a` (answer) `r` (ring) |
+| rdv plain carrier frames | beacon `{b:1, d, n, tag}` (§7.7) |
+| beacon labels | hash prefix `qrp2p/rdv/v1/beacon-key|`; HMAC inputs `beacon/topic/<day>` (beaconKey) and `beacon/tag/<day>` (topicKey) |
 | control frame kinds | `ping` `pong` `ack` `resync` `signal` `ext` |
 | ext namespaces | `rdv` |
 | HKDF info strings | `qrp2p/rdv/v1/{base,topic,aead,confirm,check}` (`qrp2p/rdv/v1/ratchet` is RETIRED with the removed ratchet — reserved, never reuse) |
@@ -759,3 +835,4 @@ resume window 6 h.
 | 1.14 | **relay removed** (§5.6): no node forwards an app frame between links; the hub role, per-party scoping, the `relayed` stamp and its inbound strip are all deleted. `relayed` becomes a reserved legacy field — parsed so a pre-1.14 hub's frame can be refused, never set. Wire-unchanged and backward-compatible in both directions: a 1.14 node speaking to a 1.13 hub simply receives frames it declines, and a 1.13 node speaking to a 1.14 node sees a peer that relays nothing. Which games may talk over a link moves up to the bridge's open-game scopes (`plans/tables-2026-08.md`) |
 | 2.x (`RDV_BUILD` `v2.4`) | `pair-confirm` key-confirmation before persisting; serialized per-pair record writes; `MultiCarrier` fan-out across several public brokers; flap-resend. **Ratchet frozen, then removed** (see §7.5) — the sealed epoch is the fixed literal `1` and the never-reachable `+3` acceptance window was deleted (wire-identical); a per-episode decrypt rate-limit + day-topic-rollover resubscribe added |
 | 3.0 (`RDV_BUILD` `v3.0`) | **Frozen rooms** (§7.3): the topic key is pinned to `rec.roomBits` and no longer follows the base, so a divergent key leaves both devices in the same room failing to decrypt instead of on disjoint topics in permanent silence. Freezing is wire-invisible (the frozen value is what `deriveTopicKey` already produced) and a ceremony keeps the room only when both sides announce the same `roomId`. Pairing frames go to `v: 3` with an optional `room`; a new `pair-verify` frame (§7.1) announces a key check on each live link. **A link coming up no longer re-mints the pairing secret** — it verifies, and re-keys only on disagreement, closing the once-per-session window in which a lost confirmation frame could split a pair |
+| 3.1 (`RDV_BUILD` `v3.1`) | **Split beacon** (§7.7): a pair that split BEFORE rooms were frozen can now see that it did. Each live episode also publishes, on a per-day topic keyed from the two device ids, a keyed tag of the room it holds; a peer whose tag differs is reported as `room-split` and the launcher says "needs re-pair" instead of ringing forever. Additive and wire-compatible: an older build subscribes to no beacon topic and publishes none, so a mixed pair simply learns nothing new |

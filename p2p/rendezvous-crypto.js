@@ -67,6 +67,13 @@ const INFO_AEAD = 'qrp2p/rdv/v1/aead';
 const INFO_CONFIRM = 'qrp2p/rdv/v1/confirm|'; // + role
 const INFO_CHECK = 'qrp2p/rdv/v1/check';
 const AAD_PREFIX = 'qrp2p/rdv/v1|';
+// Split beacon (PROTOCOL.md §7.7): the pair-beacon topic key is hashed from
+// PUBLIC material (the two device ids) because a split pair shares no secret;
+// the tag it carries is keyed by the room, under its own label so it can never
+// collide with a day-topic name.
+const BEACON_KEY_PREFIX = 'qrp2p/rdv/v1/beacon-key|';
+const BEACON_TOPIC_PREFIX = 'beacon/topic/';
+const BEACON_TAG_PREFIX = 'beacon/tag/';
 
 const te = new TextEncoder();
 const td = new TextDecoder();
@@ -221,6 +228,37 @@ export class RendezvousCrypto {
     static async topicForDay(topicKey, dayStr) {
         const mac = new Uint8Array(await crypto.subtle.sign('HMAC', topicKey, te.encode('topic/' + dayStr)));
         return bytesToHex(mac.slice(0, 16));
+    }
+
+    /**
+     * HMAC key for a pair's BEACON topics (PROTOCOL.md §7.7), from material
+     * both devices can name without any shared secret — the app passes the
+     * two device ids in a canonical order. Hashed under a fixed label so
+     * the key is never a function of the ids alone.
+     */
+    static async beaconKeyFromMaterial(material) {
+        if (typeof material !== 'string' || !material) {
+            throw new Error('beacon material must be a non-empty string');
+        }
+        const d = await crypto.subtle.digest('SHA-256', te.encode(BEACON_KEY_PREFIX + material));
+        return crypto.subtle.importKey('raw', d, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    }
+
+    /** The pair's beacon topic for one UTC day — same shape as a room topic. */
+    static async beaconTopicForDay(beaconKey, dayStr) {
+        const mac = new Uint8Array(await crypto.subtle.sign('HMAC', beaconKey, te.encode(BEACON_TOPIC_PREFIX + dayStr)));
+        return bytesToHex(mac.slice(0, 16));
+    }
+
+    /**
+     * What a beacon says about its sender's room for one day: a keyed tag
+     * two devices in the same room compute identically, and a device in any
+     * other room cannot. Keyed by the room's topic key under its own label,
+     * so it is neither a topic name nor any prefix of the room material.
+     */
+    static async beaconTag(topicKey, dayStr) {
+        const mac = new Uint8Array(await crypto.subtle.sign('HMAC', topicKey, te.encode(BEACON_TAG_PREFIX + dayStr)));
+        return bytesToHex(mac.slice(0, 8));
     }
 
     static aad(direction, epoch) {

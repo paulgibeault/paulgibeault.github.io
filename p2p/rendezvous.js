@@ -116,7 +116,7 @@ import { initialMachine, transition, canPublish, tryKinds, takeDecryptToken } fr
 // this at boot: the FIRST question a connection log must answer is "which
 // build produced this?" — field sessions have been burned diagnosing bugs
 // that were already fixed but not actually loaded (stale caches).
-export const RDV_BUILD = 'v3.0 frozen-room';
+export const RDV_BUILD = 'v3.1 split-beacon';
 
 const DB_NAME = 'qrp2p-rendezvous';
 const DB_STORE = 'pairs';
@@ -284,6 +284,14 @@ export class RendezvousManager extends EventTarget {
      * @param {() => Set<string>|null} [options.knownPairIds] - the pairIds the app still
      *        recognizes. Consulted by resumeAll()/standbyAll() to retire stored pairs the
      *        app can no longer reach; omitted or empty means "don't know", never "none".
+     * @param {(pairId: string) => string|null} [options.beaconMaterial] - the PUBLIC
+     *        material both devices of a pair can name with no shared secret (the launcher
+     *        passes the two device ids, sorted). Enables the split beacon (§7.7); omitted
+     *        or returning null means no beacon for that pair.
+     * @param {number[]} [options.beaconScheduleMs] - beacon cadence (default: the standby
+     *        ring's), for BOTH roles
+     * @param {number} [options.beaconReplyMinMs=20000] - a peer's beacon provokes an
+     *        immediate one of ours, at most this often
      */
     constructor(peerManager, options = {}) {
         super();
@@ -303,7 +311,10 @@ export class RendezvousManager extends EventTarget {
             resumeWindowMs: options.resumeWindowMs ?? 6 * 3600 * 1000,
             answerStallMs: options.answerStallMs ?? 30000,
             rearmDelayMs: options.rearmDelayMs ?? 60000,
-            standbyMaxAgeMs: options.standbyMaxAgeMs ?? 30 * 24 * 3600 * 1000
+            standbyMaxAgeMs: options.standbyMaxAgeMs ?? 30 * 24 * 3600 * 1000,
+            beaconMaterial: typeof options.beaconMaterial === 'function' ? options.beaconMaterial : null,
+            beaconScheduleMs: options.beaconScheduleMs || null, // null → standbyScheduleMs
+            beaconReplyMinMs: options.beaconReplyMinMs ?? 20000
         };
         this.pairsByPeerId = new Map(); // peerId → pairId
         this.myRands = new Map();       // peerId → {pairId, rand, tag}
@@ -1488,7 +1499,11 @@ export class RendezvousManager extends EventTarget {
             offerNonce: null, sealedOffer: null, ringNonce: null, sealedRing: null,
             lastShadowAt: 0, publishOnce: null,
             publishMode: null, publishTimers: [], // 'standby'|'active'; replaceable cadence
-            ownBlobs: new Set()
+            ownBlobs: new Set(),
+            // Split beacon (§7.7): its own topic family on the same carrier
+            // lease, the expected tag per day, and the reply/emit throttles.
+            beaconKey: null, beaconSubs: new Map(), beaconExpected: new Map(),
+            lastBeaconPublishAt: 0, lastBeaconVerdict: null, lastBeaconEmitAt: 0
         };
         this.episodes.set(pairId, ep);
         // The key check names the ROOM this episode meets in: two devices
@@ -1521,12 +1536,16 @@ export class RendezvousManager extends EventTarget {
             }
             await this._refreshTopics(pairId, ep); // initial subscribe (topicSubs empty)
             this._diag(`pair ${pairId}: carrier up, subscribed to ${ep.topicSubs.size} day-topic(s)`);
+            await this._startBeacon(pairId, ep);
             // Publishers rotate to a new UTC-day topic at midnight. Without
             // resubscribing, a long-quiet/standby episode is left subscribed
             // only to topics nobody publishes on and goes silently deaf within
             // ~24-48h — breaking the "app open ⇒ reachable" promise. Re-check
             // topics every few hours so a new day-topic is always covered.
-            this._every(ep, RENDEZVOUS_TOPIC_REFRESH_MS, () => this._refreshTopics(pairId, ep).catch(() => {}));
+            this._every(ep, RENDEZVOUS_TOPIC_REFRESH_MS, () => {
+                this._refreshTopics(pairId, ep).catch(() => {});
+                this._refreshBeaconTopics(pairId, ep).catch(() => {});
+            });
             // A broker session that comes BACK mid-episode (socket died in a
             // suspend, broker restarted) re-issues the subscriptions inside
             // the carrier — but everything we published into the dead socket
@@ -1884,6 +1903,142 @@ export class RendezvousManager extends EventTarget {
         const schedule = standby ? this.options.standbyScheduleMs : this.options.retryScheduleMs;
         schedule.forEach(ms => ep.publishTimers.push(this._after(ep, ms, publishOnce)));
         ep.publishTimers.push(this._every(ep, schedule[schedule.length - 1] || 300000, publishOnce));
+    }
+
+    // ---- split beacon (PROTOCOL.md §7.7) ------------------------------------
+    // A pair whose two devices froze DIFFERENT rooms can never meet on its
+    // day-topics — and, worse, can never observe each other failing to. The
+    // beacon is the one thing such a pair can still do: each side publishes,
+    // on a topic derived from material both can name WITHOUT a shared secret
+    // (the two device ids), a keyed tag of the room it holds. Equal tags mean
+    // the peer is online in our room; a different tag is a split, and the
+    // only repair is an in-person re-pair — which is now something the app
+    // can SAY instead of ringing into silence forever (field incidents
+    // 2026-08-21 and 2026-09-05). Shell-side, not machine-modeled: the
+    // beacon decides nothing about the episode, it only reports.
+
+    /** Derives the beacon key and subscribes, if the app gave us material. */
+    async _startBeacon(pairId, ep) {
+        let material = null;
+        try { material = this.options.beaconMaterial ? this.options.beaconMaterial(pairId) : null; } catch (e) {}
+        if (!material) return;
+        try {
+            ep.beaconKey = await RC.beaconKeyFromMaterial(material);
+        } catch (e) {
+            this._diag(`pair ${pairId}: beacon disabled (${e && e.message})`, 'warn');
+            return;
+        }
+        await this._refreshBeaconTopics(pairId, ep);
+        const schedule = this.options.beaconScheduleMs || this.options.standbyScheduleMs;
+        const tick = () => this._publishBeacon(pairId, ep, 'schedule').catch(() => {});
+        schedule.forEach((ms) => this._after(ep, ms, tick));
+        this._every(ep, schedule[schedule.length - 1] || 900000, tick);
+    }
+
+    /**
+     * Keeps the beacon subscriptions and the expected per-day tags on the
+     * current day window, like _refreshTopics does for the room topics.
+     */
+    async _refreshBeaconTopics(pairId, ep) {
+        if (ep.settled || !ep.carrier || !ep.beaconKey) return;
+        const days = RC.daysAround(Date.now());
+        const want = new Map();
+        for (const d of days) {
+            want.set(await RC.beaconTopicForDay(ep.beaconKey, d), d);
+            if (!ep.beaconExpected.has(d)) ep.beaconExpected.set(d, await RC.beaconTag(ep.topicKey, d));
+        }
+        if (ep.settled) return;
+        for (const d of [...ep.beaconExpected.keys()]) if (!days.includes(d)) ep.beaconExpected.delete(d);
+        for (const t of want.keys()) {
+            if (ep.beaconSubs.has(t)) continue;
+            const unsub = ep.carrier.subscribe(t, (blob) => {
+                this._onBeaconBlob(pairId, ep, blob).catch(() => {});
+            });
+            ep.beaconSubs.set(t, unsub);
+            ep.unsubs.push(unsub);
+        }
+        for (const [t, unsub] of [...ep.beaconSubs]) {
+            if (want.has(t)) continue;
+            try { unsub(); } catch (e) {}
+            ep.beaconSubs.delete(t);
+            const i = ep.unsubs.indexOf(unsub);
+            if (i >= 0) ep.unsubs.splice(i, 1);
+        }
+    }
+
+    /** This episode's beacon frame for today, as the string that goes on the wire. */
+    async _beaconFrame(ep) {
+        const d = RC.dayString(Date.now());
+        return JSON.stringify({ b: 1, d, n: hex(RC.randBytes(4)), tag: await RC.beaconTag(ep.topicKey, d) });
+    }
+
+    /**
+     * Publishes one beacon. Gated exactly like the ring/offer (canPublish),
+     * so a pair unseen past the standby horizon beacons no more than it
+     * rings; BOTH roles beacon, because a split is symmetric and either user
+     * may be the one looking at the screen.
+     */
+    async _publishBeacon(pairId, ep, why) {
+        if (ep.settled || !ep.beaconKey || !ep.carrier) return;
+        if (!canPublish(this._machine(pairId), ep.rec.lastSeenAt, Date.now(), this.options).ok) return;
+        try {
+            const blob = await this._beaconFrame(ep);
+            ep.lastBeaconPublishAt = Date.now();
+            this._trackOwnBlob(ep, blob);
+            await ep.carrier.publish(await RC.beaconTopicForDay(ep.beaconKey, RC.dayString(Date.now())), blob);
+            this._diag(`pair ${pairId}: beacon published (${why})`);
+        } catch (e) {
+            this._diag(`pair ${pairId}: beacon publish failed (${e && e.message})`, 'warn');
+        }
+    }
+
+    /**
+     * The one decision a beacon leads to. `expected` maps each day in our
+     * window to the tag OUR room yields for it. Pure, so the field cases can
+     * be pinned in a Node unit test.
+     *
+     * A frame outside the day window is ignored, not judged: a broker that
+     * replays an old beacon must not be able to manufacture a split from a
+     * tag that was simply computed for another day.
+     */
+    static _judgeBeacon(frame, expected) {
+        if (!frame || typeof frame !== 'object' || frame.b !== 1) return { verdict: 'ignore', why: 'not a beacon' };
+        if (typeof frame.d !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(frame.d)) return { verdict: 'ignore', why: 'bad day' };
+        if (typeof frame.tag !== 'string' || !/^[0-9a-f]{16}$/.test(frame.tag)) return { verdict: 'ignore', why: 'bad tag' };
+        const mine = expected instanceof Map ? expected.get(frame.d) : (expected && expected[frame.d]);
+        if (!mine) return { verdict: 'ignore', why: 'day outside window' };
+        if (mine === frame.tag) return { verdict: 'same', day: frame.d };
+        return { verdict: 'split', day: frame.d, theirTag: frame.tag, myTag: mine };
+    }
+
+    async _onBeaconBlob(pairId, ep, blob) {
+        if (ep.settled || !ep.beaconKey) return;
+        if (typeof blob !== 'string' || blob.length > 256) return;
+        if (ep.ownBlobs.has(blob)) return; // our own publish echoed back
+        let frame = null;
+        try { frame = JSON.parse(blob); } catch (e) { return; } // junk on our topic is silence
+        const r = RendezvousManager._judgeBeacon(frame, ep.beaconExpected);
+        if (r.verdict === 'ignore') return;
+        const now = Date.now();
+        // Emit on every CHANGE of verdict and otherwise once a minute: the
+        // app latches this into its own store, and a 15-minute cadence with a
+        // reply on each receipt would otherwise double every event.
+        if (r.verdict !== ep.lastBeaconVerdict || now - ep.lastBeaconEmitAt > 60000) {
+            ep.lastBeaconVerdict = r.verdict;
+            ep.lastBeaconEmitAt = now;
+            if (r.verdict === 'same') {
+                this._diag(`pair ${pairId}: beacon from the peer — same room, so their arcade is open and we can meet`);
+                this._emit('peer-beacon', { pairId, peerId: ep.peerId, sameRoom: true, day: r.day });
+            } else {
+                this._diag(`pair ${pairId}: beacon from the peer names a DIFFERENT room (their tag ${r.theirTag}, ours ${r.myTag} for ${r.day}) — the pair is split and only an in-person re-pair can heal it`, 'warn');
+                this._emit('room-split', { pairId, peerId: ep.peerId, day: r.day, theirTag: r.theirTag, myTag: r.myTag });
+            }
+        }
+        // Answer promptly, so a device that just launched learns its verdict
+        // in seconds rather than at our next scheduled beacon.
+        if (now - ep.lastBeaconPublishAt >= this.options.beaconReplyMinMs) {
+            this._publishBeacon(pairId, ep, 'reply').catch(() => {});
+        }
     }
 
     /**

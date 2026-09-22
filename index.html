@@ -1676,6 +1676,17 @@
                     showToast(name + ' hung up. Call them back from Multiplayer anytime.');
                     if (window.__arcade.renderKnownPeers) window.__arcade.renderKnownPeers();
                 });
+                ArcadeP2P.onRoomSplit(({ name, split }) => {
+                    // The peer's beacon says the two saved pairings can no
+                    // longer meet (PROTOCOL.md §7.7). Until now this state was
+                    // invisible: Call rang forever and the toast blamed the
+                    // network. Say what it is and the one thing that fixes it.
+                    if (split) {
+                        showToast('⚠️ ' + name + ' is online but can\'t be reached — the saved pairings no longer match. '
+                            + 'Use "New invite code" on both devices.', { error: true });
+                    }
+                    if (window.__arcade.renderKnownPeers) window.__arcade.renderKnownPeers();
+                });
                 ArcadeP2P.onRevoked(({ deviceId, name }) => {
                     // A verified revocation latched (#32) — locally initiated
                     // or learned from a peer. The bridge already dropped the
@@ -3024,8 +3035,11 @@
             interrupted: ['🟡 Reconnecting…', 'pending'],
             connecting: ['🟡 Connecting…', 'pending'],
             paused: ['📵 Hung up', 'paused'],
+            split: ['⚠️ Needs re-pair', 'split'],
             idle: ['', '']
         };
+        const SPLIT_ADVICE = 'their device is online, but its saved pairing no longer matches yours — '
+            + 'meet up and use "New invite code" on both devices';
 
         function buildRow(id, peer) {
             const displayName = peer.name || 'Unnamed device';
@@ -3129,7 +3143,12 @@
                                 // may well have closed the dialog. This is the
                                 // answer to something they did — it should
                                 // reach them wherever they are.
-                                if (connState(id, peer) !== 'idle') return;
+                                const now = connState(id, peer);
+                                if (now === 'split') {
+                                    toast('⚠️ ' + displayName + ' can\'t answer: ' + SPLIT_ADVICE + '.', { error: true });
+                                    return;
+                                }
+                                if (now !== 'idle') return;
                                 toast('No answer from ' + displayName + ' yet — they may be offline. '
                                     + 'If calls never connect, use "New invite code" on both devices.');
                             }, 45000);
@@ -3158,7 +3177,8 @@
             meta.textContent = revoked
                 ? 'Revoked — your devices refuse this one until you undo it here'
                 : ('Last connected ' + relativeTime(peer.lastConnectedAt)
-                    + (state === 'idle' && peer.autoReconnect ? ' · listening — Call reaches them while their arcade is open' : ''));
+                    + (state === 'idle' && peer.autoReconnect ? ' · listening — Call reaches them while their arcade is open' : '')
+                    + (state === 'split' ? ' · ' + SPLIT_ADVICE : ''));
             body.appendChild(meta);
 
             const actions = document.createElement('div');

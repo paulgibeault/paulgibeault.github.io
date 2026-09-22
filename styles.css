@@ -813,6 +813,7 @@ a.diag-log__btn { text-align: center; text-decoration: none; }
 .connections-row__status--live { color: var(--online-green); }
 .connections-row__status--pending { color: var(--field-gold); }
 .connections-row__status--paused { color: var(--text-secondary); }
+.connections-row__status--split { color: var(--tactical-red); }
 
 .connections-row__meta {
     font-size: 0.66rem;
