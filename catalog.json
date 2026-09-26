@@ -154,7 +154,6 @@
       "subtitle": "Falling Blocks",
       "icon": "/grav-well/icon.png",
       "url": "/grav-well/",
-      "inDevelopment": true,
       "profile": {
         "subtitle": "A Faithful Falling-Block Stacker",
         "alt": "Gravity Well — glowing tetromino blocks sinking into a starlit stone well",
@@ -205,7 +204,6 @@
       "subtitle": "Season the Pot",
       "icon": "/mr-pepper/icon.png",
       "url": "/mr-pepper/",
-      "inDevelopment": true,
       "profile": {
         "subtitle": "A Falling-Spice Puzzle",
         "alt": "Mr Pepper — two bowls of spice tied with twine, tumbling into a steel pot over a flame",
