@@ -220,6 +220,28 @@
         ],
         "codeUrl": "https://github.com/paulgibeault/mr-pepper"
       }
+    },
+    {
+      "id": "hive-mind",
+      "name": "Hive Mind",
+      "subtitle": "Honeycomb Sweeper",
+      "icon": "/hive-mind/icon.png",
+      "url": "/hive-mind/",
+      "inDevelopment": true,
+      "profile": {
+        "subtitle": "A Fair Honeycomb Minesweeper",
+        "alt": "Hive Mind — a cluster of golden honeycomb cells, one opened on a striped wasp beside a cell reading 1",
+        "descLead": "Uncap every safe cell of the honeycomb and leave the wasps asleep.",
+        "descBody": "Minesweeper on hexagons: six neighbours instead of eight, so the deductions feel different. Every frame is generated and then proven solvable by logic from its opening, so the game never ends on a coin flip. The Orchard hides hornets as well as wasps, with each cell counting both kinds separately. In the Wild, some cells are cracked and their numbers are off by exactly one. There is one Daily Frame for everyone, and any frame can be shared as a code.",
+        "kicker": "A solver vets every frame before you see it, with a node budget rather than a clock, so the same seed gives the same frame on every phone.",
+        "tags": [
+          "HTML5 Canvas",
+          "JS",
+          "PWA",
+          "Arcade SDK"
+        ],
+        "codeUrl": "https://github.com/paulgibeault/hive-mind"
+      }
     }
   ]
 }
