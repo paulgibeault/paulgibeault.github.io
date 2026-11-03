@@ -92,7 +92,11 @@ jobs:
   # test — the gate
   # ===========================================================================
   test:
-    runs-on: ubuntu-latest
+    # PINNED, not ubuntu-latest: -latest moved to 26.04 and Playwright cannot
+    # install chromium there yet ("does not support chromium on
+    # ubuntu26.04-x64"), which failed every app's test and smoke jobs at the
+    # browser install. Move back to -latest once Playwright supports it.
+    runs-on: ubuntu-24.04
     env:
       ARCADE_LAUNCHER: ${{ inputs.launcher && format('{0}/.launcher', github.workspace) || '' }}
     steps:
@@ -235,7 +239,8 @@ jobs:
   # blank frame exit 0, so what it catches is a crashed browser or a failed
   # install, which must not turn the fleet red in warn mode.
   smoke:
-    runs-on: ubuntu-latest
+    # Pinned for the same reason as `test`.
+    runs-on: ubuntu-24.04
     continue-on-error: true
     steps:
       - uses: actions/checkout@v5
