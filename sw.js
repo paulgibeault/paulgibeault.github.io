@@ -1,9 +1,14 @@
 /* Paul's Arcade launcher service worker.
  *
  * Shares the fleet's version/cleanup/skip-waiting contract with every game's
- * sw.js (GAME_INTEGRATION §10 carries the canonical copy) but NOT its fetch
- * strategy: the launcher stays network-first with a cached fallback, because
- * it is the shell that decides which build of everything else the player gets.
+ * sw.js (GAME_INTEGRATION §10 carries the canonical copy). The launcher is
+ * served cache-first from a PINNED RELEASE: a stored pointer names one complete
+ * cache, and only the player's explicit update (arcade-release.js) moves it.
+ *
+ * The pin is data rather than this file because this file changes on every
+ * deploy, and a waiting worker activates by itself once its tabs close. So a
+ * new worker may arrive unasked, but what it serves stays what the player
+ * chose. See plans/offline-first-2026-11.md.
  */
 
 // Written by fleet CI on every deploy (fleet-ci.yml, "Bump patch version").
@@ -21,8 +26,21 @@ const APP_VERSION = '0.0.28';
 const CACHE_PREFIX = 'paul-arcade-';
 const CACHE_NAME = `${CACHE_PREFIX}v${APP_VERSION}`;
 
-// Network-first timeout: on lie-fi, stop waiting on the network and serve the
-// cached shell/asset so first paint stays bounded.
+// The pointer to the release being served. arcade-release.js writes the same
+// names; tools/release-unit.mjs pins the two copies together.
+const POINTER_CACHE = `${CACHE_PREFIX}release`;
+const PIN_KEY = '__release-pin';
+
+async function pinnedVersion() {
+  try {
+    const hit = await (await caches.open(POINTER_CACHE)).match(PIN_KEY);
+    return hit ? (await hit.json()).version || null : null;
+  } catch (e) { return null; }
+}
+
+const cacheNameFor = (version) => `${CACHE_PREFIX}v${version}`;
+
+// Bounds the wait on a file the pinned release doesn't hold, on lie-fi.
 const NET_TIMEOUT_MS = 5000;
 // GENERATED, not maintained — tools/stage.mjs rewrites the region below from
 // the files this deploy actually publishes (tools/inject-precache.mjs). Adding
@@ -43,33 +61,36 @@ const ASSETS = [
 // arcade:precache-end
 
 self.addEventListener('install', (event) => {
-  // Deliberately NOT skipWaiting(). The new worker installs and waits; the
-  // update control in index.html ("Check for Updates", and the automatic
-  // prompt) spots it and offers an explicit reload, then sends the message
-  // below once the player accepts. Activating unannounced would swap the
-  // cache under a running game — and it would also mean the launcher, the one
-  // page that can apply the whole fleet's updates, never has an update of its
-  // own to demonstrate the flow with.
+  // Deliberately NOT skipWaiting(); only the player's accepted update sends
+  // the message below. Activating unannounced would swap the worker under a
+  // running game.
   event.waitUntil((async () => {
+    // Already pinned: this is a routine new worker, not a first install, and
+    // new builds download only when the player asks.
+    const pinned = await pinnedVersion();
+    if (pinned && await caches.has(cacheNameFor(pinned))) return;
+
     const cache = await caches.open(CACHE_NAME);
     // Game icons come from the catalog — the single authoritative game list.
-    // A failed catalog fetch degrades to a shell-only precache; the runtime
-    // network-first cache below backfills icons on first view.
+    // A failed catalog fetch degrades to a shell-only precache.
     let icons = [];
     try {
-      const doc = await (await fetch('./catalog.json')).json();
+      const doc = await (await fetch('./catalog.json', { cache: 'reload' })).json();
       icons = (doc.games || [])
         .map((g) => g && g.icon)
         .filter((i) => typeof i === 'string' && i)
         .map((i) => './' + i.replace(/^\.?\//, ''));
     } catch (e) { console.warn('[sw] catalog icon precache skipped', e && e.message); }
-    // Cache each asset independently. cache.addAll() rejects the WHOLE install
-    // if any single request 404s (a renamed/removed file), which would strand
-    // offline users on the previous version with no diagnostic. Per-asset
-    // add() tolerates gaps and logs them.
+    // Per-asset add(), and past the 10-minute HTTP cache: addAll() rejects the
+    // whole install on one 404, and a stale copy would pin a mixed build.
     await Promise.all([...ASSETS, ...icons].map((asset) =>
-      cache.add(asset).catch((e) => { console.warn('[sw] precache skipped', asset, e && e.message); })
+      cache.add(new Request(asset, { cache: 'reload' }))
+        .catch((e) => { console.warn('[sw] precache skipped', asset, e && e.message); })
     ));
+    // Pin only a shell that can actually boot; a failed install retries later.
+    if (!(await cache.match('./index.html'))) throw new Error('shell precache failed');
+    await (await caches.open(POINTER_CACHE)).put(PIN_KEY,
+      new Response(JSON.stringify({ version: APP_VERSION }), { headers: { 'content-type': 'application/json' } }));
   })());
 });
 
@@ -79,21 +100,19 @@ self.addEventListener('message', (event) => {
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(
-    caches.keys().then((cacheNames) => {
-      return Promise.all(
-        cacheNames
-          // ONLY our own caches. caches.keys() is origin-scoped and the whole
-          // fleet shares paulgibeault.github.io, so the bare `name !==
-          // CACHE_NAME` filter this used to have deleted every game's cache on
-          // each launcher activation — and each game's worker did the same
-          // back. Every app silently destroying every other app's offline
-          // support, on every deploy.
-          .filter((name) => name.startsWith(CACHE_PREFIX) && name !== CACHE_NAME)
-          .map((name) => caches.delete(name))
-      );
-    })
-  );
+  event.waitUntil((async () => {
+    const pinned = await pinnedVersion();
+    const keep = new Set([POINTER_CACHE, CACHE_NAME, cacheNameFor(pinned || APP_VERSION)]);
+    const cacheNames = await caches.keys();
+    await Promise.all(
+      cacheNames
+        // ONLY our own caches. caches.keys() is origin-scoped and the whole
+        // fleet shares paulgibeault.github.io, so an unfiltered cleanup here
+        // deletes every game's offline support on each activation.
+        .filter((name) => name.startsWith(CACHE_PREFIX) && !keep.has(name))
+        .map((name) => caches.delete(name))
+    );
+  })());
   self.clients.claim();
 });
 
@@ -105,23 +124,28 @@ function withTimeout(promise, ms) {
   });
 }
 
-async function networkFirst(request) {
-  const cache = await caches.open(CACHE_NAME);
+async function servingCache() {
+  const pinned = await pinnedVersion();
+  return caches.open(pinned ? cacheNameFor(pinned) : CACHE_NAME);
+}
+
+// A hit never touches the network, so launch needs no connection and can't be
+// slowed by a bad one.
+async function cacheFirst(request) {
+  const cache = await servingCache();
+  const isNav = request.mode === 'navigate';
+  // ignoreSearch: '/?dev=1' is still the cached shell.
+  const hit = await cache.match(request, { ignoreSearch: true });
+  if (hit) return hit;
   try {
     const resp = await withTimeout(fetch(request), NET_TIMEOUT_MS);
-    // Runtime-cache good same-origin GET responses so a missed CACHE_NAME bump
-    // (or an asset added since the last precache) doesn't leave offline users
-    // stranded on a stale/absent entry.
-    if (resp && resp.ok && resp.type === 'basic') {
+    // Fill gaps from a tolerant first install. Only ever a miss, so this can't
+    // replace a pinned file. Navigations are the docs, which stay uncached.
+    if (!isNav && resp && resp.ok && resp.type === 'basic') {
       cache.put(request, resp.clone()).catch(() => {});
     }
     return resp;
   } catch (e) {
-    const isNav = request.mode === 'navigate';
-    // ignoreSearch on navigations so '/?dev=1' (or any query) still matches the
-    // cached shell offline.
-    const cached = await cache.match(request, { ignoreSearch: isNav });
-    if (cached) return cached;
     if (isNav) {
       const shell = (await cache.match('./index.html')) || (await cache.match('./'));
       if (shell) return shell;
@@ -130,6 +154,13 @@ async function networkFirst(request) {
     // surfaces as a noisy failure) — return an explicit error Response.
     return Response.error();
   }
+}
+
+// Game icons live under /<gameId>/ but belong to the launcher's grid.
+async function cachedOrNetwork(request) {
+  const hit = await (await servingCache()).match(request, { ignoreSearch: true });
+  if (hit) return hit;
+  try { return await fetch(request); } catch (e) { return Response.error(); }
 }
 
 self.addEventListener('fetch', (event) => {
@@ -146,11 +177,19 @@ self.addEventListener('fetch', (event) => {
   const scopePath = new URL(self.registration.scope).pathname;
   if (!url.pathname.startsWith(scopePath)) return;
   const rel = url.pathname.slice(scopePath.length);
+  // The update check's own request: answering it from a cache would make the
+  // current release look permanently up to date.
+  if (rel === 'release.json') return;
+  // An update's downloads (arcade-release.js) must see the new build.
+  if (url.searchParams.has('arcade-release')) return;
   const isLauncherAsset =
     !rel.includes('/') ||             // '' (root) or a root-level file
     rel.startsWith('p2p/') ||
     rel.startsWith('images/') ||
     rel.startsWith('sdk/');           // major-pinned SDK URLs (sdk/v3/...)
-  if (!isLauncherAsset) return;
-  event.respondWith(networkFirst(event.request));
+  if (!isLauncherAsset) {
+    if (event.request.destination === 'image') event.respondWith(cachedOrNetwork(event.request));
+    return;
+  }
+  event.respondWith(cacheFirst(event.request));
 });
