@@ -2275,7 +2275,8 @@
     // in the fleet can: getRegistrations() is origin-scoped, and a game in a
     // launcher-sandboxed frame gets the SDK's inert stub instead of the real
     // container — a per-game update button would be dead code in the frame.
-    // One control here covers the launcher and every game.
+    // One control here covers the launcher and every game. The launcher's own
+    // build is a pinned release (arcade-release.js).
     (function swUpdates() {
         const btn = document.getElementById('menu-update');
         const tag = document.getElementById('menu-update-status');
@@ -2296,33 +2297,43 @@
             if (text) tag.removeAttribute('hidden'); else tag.setAttribute('hidden', '');
         }
 
-        // The one path that activates workers. Reloading is not optional: a
-        // worker that skips waiting also claims this page, so without the
-        // reload the launcher would be running old code against a new build's
-        // cache. The reload also remounts any framed game against its own
-        // freshly-activated worker.
-        async function applyAndReload(mod) {
+        // The one path that moves the player to a new build. The release is
+        // staged and verified first, so a failed download changes nothing.
+        // Reloading is not optional: without it the launcher would be running
+        // old code against a new build's cache.
+        async function applyAndReload(mod, release, manifest) {
             if (applying) return;
             applying = true;
+            if (manifest) {
+                setTag('downloading…');
+                try {
+                    await release.install(manifest);
+                } catch (e) {
+                    toast('Update failed — nothing changed. Try again when you have a connection.', { error: true });
+                    setTag('update ready');
+                    applying = false;
+                    return;
+                }
+            }
             setTag('updating…');
+            let sent = 0;
             try {
-                const sent = await mod.apply(navigator);
-                if (!sent) { toast('Already up to date.'); setTag(''); applying = false; return; }
-                await mod.waitForControllerChange(navigator);
+                sent = await mod.apply(navigator);
+                if (sent) await mod.waitForControllerChange(navigator);
             } catch (e) { /* reload anyway — a half-applied update is the worst state */ }
+            if (!manifest && !sent) { toast('Already up to date.'); setTag(''); applying = false; return; }
             location.reload();
         }
 
-        async function offerUpdate(mod, count) {
+        async function offerUpdate(mod, release, manifest) {
             if (applying) return;
-            const what = count > 1 ? `${count} apps have updates` : 'An update is ready';
             const answer = await (window.__arcade && window.__arcade.dialog
                 ? window.__arcade.dialog({
-                    message: `${what}. Reload now to install? Your saves are untouched.`,
-                    okLabel: 'Reload', cancelLabel: 'Later'
+                    message: 'An update is ready. Install it and reload now? Your saves are untouched.',
+                    okLabel: 'Install', cancelLabel: 'Later'
                 })
                 : Promise.resolve(true));
-            if (answer) applyAndReload(mod);
+            if (answer) applyAndReload(mod, release, manifest);
             else setTag('update ready');   // stays flagged so they can take it later
         }
 
@@ -2331,26 +2342,45 @@
             if (window.__arcade && window.__arcade.closeLauncherMenu) window.__arcade.closeLauncherMenu();
             setTag('checking…');
             try {
-                const mod = await import('./arcade-updates.js');
-                const res = await mod.checkAll(navigator);
+                const [mod, release] = await Promise.all([import('./arcade-updates.js'), import('./arcade-release.js')]);
+                const [workers, rel] = await Promise.all([mod.checkAll(navigator), release.check()]);
                 setTag('');
-                if (res.ready) { offerUpdate(mod, res.ready); return; }
-                // errors > 0 with nothing ready almost always means offline —
-                // saying "up to date" then would be a lie the player acts on.
-                toast(res.errors ? 'Could not check for updates — you may be offline.' : 'Everything is up to date.',
-                    res.errors ? { error: true } : undefined);
+                if (workers.ready || rel.available) {
+                    offerUpdate(mod, release, rel.available ? rel.manifest : null);
+                    return;
+                }
+                // Errors with nothing ready almost always mean offline — saying
+                // "up to date" then would be a lie the player acts on.
+                const failed = workers.errors || rel.failed;
+                toast(failed ? 'Could not check for updates — you may be offline.' : 'Everything is up to date.',
+                    failed ? { error: true } : undefined);
             } catch (e) {
                 setTag('');
                 toast('Could not check for updates.', { error: true });
             }
         });
 
-        // Automatic prompt: catches a worker that installed on its own (the
-        // browser re-fetches sw.js periodically) without the player having to
-        // know this menu exists. watch() suppresses first installs, so a
-        // brand-new visitor is never asked to reload a page they just opened.
+        // Passive check: a flag on the menu item and nothing else. No dialog,
+        // no download, and it waits until launch has finished, so it can never
+        // get between the player and the game they picked. Taking the update
+        // is always the player's tap above.
+        const flag = () => { if (!applying) setTag('update ready'); };
+        async function passiveCheck() {
+            try {
+                const release = await import('./arcade-release.js');
+                if ((await release.check()).available) flag();
+            } catch (e) {}
+        }
+        const CHECK_DELAY_MS = 5000;
+        // Dev servers publish no release.json; don't 404 on every boot.
+        if (!/^(127\.|localhost$|0\.0\.0\.0$|::1$)/.test(location.hostname)) {
+            window.addEventListener('load', () => setTimeout(passiveCheck, CHECK_DELAY_MS), { once: true });
+            window.addEventListener('online', passiveCheck);
+        }
+
+        // A worker that installed on its own (the browser re-fetches sw.js).
         import('./arcade-updates.js').then((mod) => {
-            mod.watch(navigator, (scopes) => offerUpdate(mod, scopes.length));
+            mod.watch(navigator, flag);
         }).catch(() => {});
     })();
 </script>

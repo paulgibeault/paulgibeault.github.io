@@ -17,6 +17,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { injectPrecache } from "./inject-precache.mjs";
+import { writeRelease } from "./write-release.mjs";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -25,9 +26,10 @@ export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 // arcade to boot, not the self-hosting guide, and precaching every doc would
 // spend their cache budget on reading material. Prose is fetched live.
 // motion-probe.html is the hardware probe (plans/motion-sensing-2026-09.md
-// WP0): a diagnostic the arcade ships but never boots.
+// WP0): a diagnostic the arcade ships but never boots. release.json is the
+// update check's manifest, which only means anything fetched live.
 export const PRECACHE_EXCLUDE = ["*.md", "plans/", "docs/", "LICENSE", "NOTICE",
-  "motion-probe.html"];
+  "motion-probe.html", "release.json"];
 
 // "assembly" is AssemblyScript source (assembly/sand.ts): the compiled .wasm
 // next to the SDK is what ships, the source is a dev file like tools/.
@@ -59,6 +61,7 @@ export function stage(outDir) {
   // Last, so it sees the finished artifact — the precache list is written
   // from what is actually about to deploy, not from what anyone believes is.
   const precached = injectPrecache(out, { exclude: PRECACHE_EXCLUDE });
+  writeRelease(out, precached);
   return { outDir: out, staged, total: files.length, precached: precached?.length ?? 0 };
 }
 

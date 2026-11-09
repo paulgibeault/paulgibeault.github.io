@@ -246,9 +246,9 @@ function gateD() {
         'CACHE_NAME interpolates APP_VERSION rather than hardcoding a version');
 
     // The cross-game bug. caches.keys() is origin-scoped and the whole fleet
-    // shares paulgibeault.github.io, so a bare `name !== CACHE_NAME` filter
+    // shares paulgibeault.github.io, so a cleanup without the prefix filter
     // deletes every sibling game's cache on each activation.
-    const cleanup = /\.filter\(\((\w+)\) => \1\.startsWith\(CACHE_PREFIX\) && \1 !== CACHE_NAME\)/.test(sw);
+    const cleanup = /\.filter\(\((\w+)\) => \1\.startsWith\(CACHE_PREFIX\) && !keep\.has\(\1\)\)/.test(sw);
     ok(cleanup, 'activate-time cleanup is filtered to CACHE_PREFIX (never deletes sibling apps\' caches)');
 
     // Without this the launcher's update control has nothing to talk to, and
