@@ -32,20 +32,16 @@ newer than a pinned launcher until step 2. The bridge is caps-negotiated.
 stores packs and mounts them as sandboxed `srcdoc` frames, injecting the SDK
 from the pinned release; a game with no pack loads from the network.
 
-Audit of all 14 games booted offline in Chromium: 8 ran clean (pi-game, si-syn,
-hecknsic, sowduku, shuiguo, p2p-chat, grav-well, hive-mind). Remaining: assets
-named in JS strings or `fetch()` (moon-lit, cozy-solitaire, mr-pepper, cardstock,
-audio-tune) and a `new URL()` against the frame location (sand-art). These need
-a small in-frame shim over `fetch` and image loading, backed by the pack.
+Games reach assets named at runtime through an in-frame shim over `fetch` and
+media `src`, backed by the pack. Compiled kernels get their wasm from the
+launcher at mount. All 14 real games mounted from packs in airplane mode
+through the real launcher in Chromium. audio-tune still requests other games'
+sound packs, which stay network-only.
 
-Still open:
-
-- Publish `arcade-pack.json`: an opt-in `fleet-ci.yml` step after staging.
-- Detect game-only deploys. The passive check compares launcher versions only,
-  so each game needs a small version file too.
+`fleet-ci.yml` publishes a pack for callers that set `offline_pack: true`, with
+a small version file so the passive check can flag a game-only deploy.
 
 ## Step 3: fleet rollout
 
-Background-download every pack on first run, show "Ready for offline: n/14",
-fall back to the network for a game with no pack, and explain build mismatches
-in multiplayer. Add real-iPhone airplane-mode and storage-eviction tests.
+Enable `offline_pack` per game, show "Ready for offline: n/14", and explain
+build mismatches in multiplayer. Add real-iPhone airplane-mode and storage-eviction tests.

@@ -76,6 +76,12 @@ on:
           See tools/bump-version.mjs.
         type: boolean
         default: false
+      offline_pack:
+        description: >-
+          Publish arcade-pack.json so the launcher can run this game with no
+          network. See plans/offline-first-2026-11.md.
+        type: boolean
+        default: false
       toolchain_ref:
         description: >-
           Ref of the launcher to take this pipeline's own scripts from (the
@@ -375,6 +381,12 @@ jobs:
         # The same module the smoke job calls, so what gets smoked and what
         # gets published are staged by one implementation.
         run: node "$FLEET_TOOLS/stage-dispatch.mjs" dist
+
+      # After staging, so the pack holds exactly the bytes being published.
+      # The repo name is the deployed path, which a game's own absolute URLs use.
+      - name: Build offline pack
+        if: ${{ inputs.offline_pack }}
+        run: node "$FLEET_TOOLS/build-pack.mjs" dist "${{ github.event.repository.name }}"
 
       - uses: actions/configure-pages@v5
 

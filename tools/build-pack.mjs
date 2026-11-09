@@ -10,11 +10,33 @@
 // the launcher fills from its pinned release when it mounts the game.
 import fs from "node:fs";
 import path from "node:path";
-import { init, parse } from "es-module-lexer";
+import crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { init, parse } from "./vendor/es-module-lexer.js";
+import { artifactFiles } from "./inject-precache.mjs";
 
 const MIME = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".svg": "image/svg+xml",
   ".webp": "image/webp", ".gif": "image/gif", ".woff2": "font/woff2", ".woff": "font/woff", ".ttf": "font/ttf",
   ".mp3": "audio/mpeg", ".ogg": "audio/ogg", ".wav": "audio/wav", ".m4a": "audio/mp4" };
+
+// Files a game can reach only by a name built at runtime (fetch, new Image).
+// Code is excluded because the document already carries it.
+const NOT_ASSET = /^(sw\.js|manifest\.json|LICENSE|NOTICE)$|\.(js|mjs|html|css|map|md)$/i;
+
+// Runs before anything else in the frame and answers those lookups from the
+// pack. Anything it doesn't hold goes to the network as usual.
+const shim = (assets, gameId) => `<script>(function(){
+var A=${JSON.stringify(assets).replace(/<\//g, "<\\/")},O=${JSON.stringify("/" + gameId + "/")};
+function hit(u){try{var s=String(u&&u.url||u);if(/^(data|blob):/i.test(s))return null;
+var p=new URL(s,"http://pack.invalid/").pathname;if(p.indexOf(O)===0)p=p.slice(O.length);else p=p.slice(1);
+return A[decodeURIComponent(p)]||null}catch(e){return null}}
+var f=window.fetch;window.fetch=function(u,o){var h=hit(u);return f.call(window,h||u,h?undefined:o)};
+[HTMLImageElement,HTMLMediaElement,HTMLSourceElement].forEach(function(C){
+var d=Object.getOwnPropertyDescriptor(C.prototype,"src");if(!d)return;
+Object.defineProperty(C.prototype,"src",{configurable:true,enumerable:d.enumerable,get:d.get,set:function(v){d.set.call(this,hit(v)||v)}})});
+var sa=Element.prototype.setAttribute;Element.prototype.setAttribute=function(n,v){
+return sa.call(this,n,String(n).toLowerCase()==="src"&&/^(img|audio|video|source)$/i.test(this.tagName)?(hit(v)||v):v)};
+})();</script>`;
 
 export const ROOT_SCRIPT = (src) => `<!--arcade:root ${src}-->`;
 const isLocal = (u) => !/^([a-z][a-z0-9+.-]*:|\/|#)/i.test(u);
@@ -50,7 +72,7 @@ export async function buildPack(dir, gameId) {
   };
   const inlineCss = (css, fromRel) => css.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/g, (m, _q, raw) => {
     const u = localise(raw);
-    if (!isLocal(u)) return m;
+    if (!isLocal(u) || /^%23/i.test(u)) return m;
     const rel = path.posix.normalize(path.posix.join(path.posix.dirname(fromRel), u.split(/[?#]/)[0]));
     return `url("${dataUrl(MIME[path.extname(rel)] || "application/octet-stream", read(rel))}")`;
   });
@@ -62,6 +84,7 @@ export async function buildPack(dir, gameId) {
     const rawHref = /\bhref=["']?([^"'\s>]+)/i.exec(tag)?.[1];
     const href = rawHref && localise(rawHref);
     if (rel === "manifest" || rel === "icon") return "";
+    if (rel === "preload" && href && isLocal(href)) return "";
     if (rel === "stylesheet" && href && isLocal(href)) {
       const file = href.split("?")[0];
       return `<style>${safeInline(inlineCss(read(file).toString("utf8"), file))}</style>`;
@@ -93,7 +116,21 @@ export async function buildPack(dir, gameId) {
 
   const imports = Object.fromEntries([...modules].map(([rel, url]) => [`pack/${rel}`, url]));
   const map = `<script type="importmap">${JSON.stringify({ imports })}</script>`;
-  // The import map must precede every module, so it goes first in <head>.
-  html = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (h) => h + map) : map + html;
-  return { html, roots: [...roots] };
+  const assets = Object.fromEntries(artifactFiles(dir).filter((f) => !NOT_ASSET.test(f))
+    .map((f) => [f, dataUrl(MIME[path.extname(f)] || (f.endsWith(".json") ? "application/json" : "application/octet-stream"), read(f))]));
+  // The import map must precede every module, and the shim every script.
+  const head = map + shim(assets, gameId);
+  html = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (h) => h + head) : head + html;
+  const version = crypto.createHash("sha256").update(html).update(JSON.stringify([...roots])).digest("hex");
+  return { html, roots: [...roots], version };
+}
+
+// fleet-ci.yml: node build-pack.mjs <stagedDir> <gameId>
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+  const [dir, gameId] = process.argv.slice(2);
+  if (!dir || !gameId) { console.error("usage: node build-pack.mjs <stagedDir> <gameId>"); process.exit(1); }
+  const pack = await buildPack(dir, gameId);
+  fs.writeFileSync(path.join(dir, "arcade-pack.json"), JSON.stringify(pack));
+  fs.writeFileSync(path.join(dir, "arcade-pack.version.json"), JSON.stringify({ version: pack.version }));
+  console.log(`pack for ${gameId}: ${Math.round(pack.html.length / 1024)} KB`);
 }

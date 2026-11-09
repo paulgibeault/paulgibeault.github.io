@@ -16,10 +16,24 @@ export const PACK_CACHE = 'arcade-packs';
 
 const packKey = (gameId) => `__pack/${gameId}`;
 const rootMarker = (src) => `<!--arcade:root ${src}-->`;
-const packUrl = (game) => `${game.url.replace(/\/?$/, '/')}arcade-pack.json`;
+const gameFile = (game, name) => `${game.url.replace(/\/?$/, '/')}${name}`;
+const packUrl = (game) => gameFile(game, 'arcade-pack.json');
 
 function defaults(env) {
     return Object.assign({ fetch: (...a) => fetch(...a), caches: globalThis.caches }, env);
+}
+
+/** A compiled kernel finds its .wasm by URL, which an inline script lacks. */
+async function kernelBinary(src, release) {
+    if (!/\/arcade-sim-[^/]+\.js$/.test(src)) return '';
+    const wasmSrc = src.replace(/\.js$/, '.wasm');
+    const hit = await release.match(`.${wasmSrc}`);
+    if (!hit) return '';
+    const bytes = new Uint8Array(await hit.arrayBuffer());
+    let binary = '';
+    for (const b of bytes) binary += String.fromCharCode(b);
+    const name = wasmSrc.split('/').pop();
+    return `<script>(self.__arcadePackWasm=self.__arcadePackWasm||{})[${JSON.stringify(name)}]="data:application/wasm;base64,${btoa(binary)}";</script>`;
 }
 
 /** The ready-to-mount document for a game, or null to use the network. */
@@ -37,7 +51,7 @@ export async function documentFor(gameId, env) {
             const script = await release.match(`.${src}`);
             if (!script) return null;     // an SDK-less pack can't run
             const text = (await script.text()).replace(/<\/script/gi, '<\\/script');
-            html = html.split(rootMarker(src)).join(`<script>${text}</script>`);
+            html = html.split(rootMarker(src)).join(`${await kernelBinary(src, release)}<script>${text}</script>`);
         }
         return html;
     } catch (err) {
@@ -57,6 +71,27 @@ async function download(game, cache, e) {
     } catch (err) {
         return false;
     }
+}
+
+/**
+ * How many stored packs have a newer deploy. Reads one tiny file per stored
+ * pack and changes nothing, so the passive check can call it freely.
+ */
+export async function updatesAvailable(games, env) {
+    const e = defaults(env);
+    const cache = await e.caches.open(PACK_CACHE);
+    const results = await Promise.all(games.map(async (game) => {
+        try {
+            const hit = await cache.match(packKey(game.id));
+            if (!hit) return false;
+            const res = await e.fetch(gameFile(game, 'arcade-pack.version.json'), { cache: 'no-store' });
+            if (!res.ok) return false;
+            return (await res.json()).version !== (await hit.json()).version;
+        } catch (err) {
+            return false;
+        }
+    }));
+    return results.filter(Boolean).length;
 }
 
 /** First run: fetch only packs not yet stored, so nothing updates unasked. */
@@ -79,4 +114,4 @@ export async function downloadAll(games, env) {
     return results.filter(Boolean).length;
 }
 
-export default { PACK_CACHE, documentFor, downloadMissing, downloadAll };
+export default { PACK_CACHE, documentFor, updatesAvailable, downloadMissing, downloadAll };

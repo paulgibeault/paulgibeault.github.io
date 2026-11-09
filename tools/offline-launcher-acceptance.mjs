@@ -31,13 +31,19 @@ const gameDir = path.join(tmp, "game");
 fs.cpSync(new URL("./fixtures/starter-app", import.meta.url), gameDir, { recursive: true });
 const gameIndex = path.join(gameDir, "index.html");
 fs.writeFileSync(gameIndex, fs.readFileSync(gameIndex, "utf8").replaceAll("starter-app", GAME));
-const packJson = JSON.stringify(await buildPack(gameDir, GAME));
+const pack = await buildPack(gameDir, GAME);
+const packJson = JSON.stringify(pack);
+let gameVersion = pack.version;
 
 let live = build("1.0.0");
 const requests = [];
 const server = http.createServer((req, res) => {
   const p = decodeURIComponent(req.url.split("?")[0]);
   requests.push(p);
+  if (p === `/${GAME}/arcade-pack.version.json`) {
+    res.writeHead(200, { "content-type": "application/json" });
+    return res.end(JSON.stringify({ version: gameVersion }));
+  }
   if (p === `/${GAME}/arcade-pack.json`) {
     res.writeHead(200, { "content-type": "application/json" });
     return res.end(packJson);
@@ -82,7 +88,10 @@ const accept = async () => {
 try {
   await page.goto(origin + "/");
   await page.waitForFunction(() => navigator.serviceWorker.controller, null, { timeout: 30000 });
-  await page.waitForFunction(async () => (await caches.keys()).includes("paul-arcade-release"));
+  for (let i = 0; !(await page.evaluate(async () => (await caches.keys()).includes("paul-arcade-release"))); i++) {
+    if (i > 80) throw new Error("the release was never pinned");
+    await new Promise((r) => setTimeout(r, 250));
+  }
   check("first visit pins the deployed release", (await pin()) === "1.0.0", await pin());
 
   live = build("2.0.0");
@@ -108,11 +117,19 @@ try {
   check("an accepted update lands", (await pin()) === "2.0.0" && (await build_()) === "2.0.0", `${await pin()} ${await build_()}`);
   check("the old release is cleaned up", !(await page.evaluate(() => caches.keys())).includes("paul-arcade-v1.0.0"));
 
-  await page.waitForFunction(async (g) => {
-    const c = await caches.open("arcade-packs");
-    return !!(await c.match(`__pack/${g}`));
-  }, GAME, { timeout: 20000 });
+  // Polled from here: waitForFunction does not hold on an async predicate.
+  for (let i = 0; !(await page.evaluate(async (g) =>
+    !!(await (await caches.open("arcade-packs")).match(`__pack/${g}`)), GAME)); i++) {
+    if (i > 80) throw new Error("the pack was never stored");
+    await new Promise((r) => setTimeout(r, 250));
+  }
   check("the game's pack is stored for offline", true);
+
+  gameVersion = "a-newer-game-deploy";
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector("#menu-update-status").textContent === "update ready", null, { timeout: 15000 });
+  check("a game-only deploy is flagged", true);
+  gameVersion = pack.version;
 
   await context.setOffline(true);
   await page.reload();
