@@ -10,6 +10,7 @@ import { chromium } from "playwright";
 import { stage, PRECACHE_EXCLUDE } from "./stage.mjs";
 import { precacheList } from "./inject-precache.mjs";
 import { writeRelease } from "./write-release.mjs";
+import { buildPack } from "./build-pack.mjs";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "offline-launcher-"));
 const TYPES = { ".html": "text/html", ".js": "text/javascript", ".json": "application/json", ".css": "text/css", ".wasm": "application/wasm" };
@@ -24,11 +25,23 @@ function build(version) {
   return dir;
 }
 
+// The fixture game, published under a real catalog id so the launcher offers it.
+const GAME = JSON.parse(fs.readFileSync(new URL("../catalog.json", import.meta.url), "utf8")).games[0].id;
+const gameDir = path.join(tmp, "game");
+fs.cpSync(new URL("./fixtures/starter-app", import.meta.url), gameDir, { recursive: true });
+const gameIndex = path.join(gameDir, "index.html");
+fs.writeFileSync(gameIndex, fs.readFileSync(gameIndex, "utf8").replaceAll("starter-app", GAME));
+const packJson = JSON.stringify(await buildPack(gameDir, GAME));
+
 let live = build("1.0.0");
 const requests = [];
 const server = http.createServer((req, res) => {
   const p = decodeURIComponent(req.url.split("?")[0]);
   requests.push(p);
+  if (p === `/${GAME}/arcade-pack.json`) {
+    res.writeHead(200, { "content-type": "application/json" });
+    return res.end(packJson);
+  }
   const file = path.join(live, p.endsWith("/") ? p + "index.html" : p);
   if (!file.startsWith(live) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); return res.end(); }
   res.writeHead(200, { "content-type": TYPES[path.extname(file)] || "application/octet-stream", "cache-control": "max-age=0" });
@@ -95,11 +108,26 @@ try {
   check("an accepted update lands", (await pin()) === "2.0.0" && (await build_()) === "2.0.0", `${await pin()} ${await build_()}`);
   check("the old release is cleaned up", !(await page.evaluate(() => caches.keys())).includes("paul-arcade-v1.0.0"));
 
+  await page.waitForFunction(async (g) => {
+    const c = await caches.open("arcade-packs");
+    return !!(await c.match(`__pack/${g}`));
+  }, GAME, { timeout: 20000 });
+  check("the game's pack is stored for offline", true);
+
   await context.setOffline(true);
   await page.reload();
   check("airplane mode boots the launcher", (await build_()) === "2.0.0", await build_());
   check("airplane mode renders the game grid", await page.waitForFunction(
     () => document.querySelectorAll(".launcher-grid > *").length > 0, null, { timeout: 10000 }).then(() => true, () => false));
+
+  await page.evaluate((g) => { location.hash = `#app=${g}`; location.reload(); }, GAME);
+  const frame = page.locator(`iframe[data-game-id="${GAME}"]`);
+  await frame.waitFor({ state: "attached", timeout: 15000 });
+  await page.waitForFunction((g) => document.querySelector(`iframe[data-game-id="${g}"]`).hasAttribute("srcdoc"), GAME, { timeout: 10000 });
+  check("the game mounts from its pack", true);
+  check("the frame keeps its opaque-origin sandbox", (await frame.getAttribute("sandbox")) === "allow-scripts allow-downloads");
+  await page.waitForFunction(() => document.querySelector("#game-loading").classList.contains("hidden"), null, { timeout: 15000 });
+  check("the game finishes its handshake in airplane mode", !(await page.locator("#game-error").isVisible()));
 } catch (e) {
   failed++;
   console.log("  ✗ threw: " + e.message.split("\n")[0]);

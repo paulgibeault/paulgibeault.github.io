@@ -2183,7 +2183,8 @@
                 if (window.__arcade.ui) window.__arcade.ui.clearGame(gid);
                 if (window.__arcade.motion) window.__arcade.motion.clearGame(gid);
             },
-            closeLauncherMenu: () => { if (window.__arcade.closeLauncherMenu) window.__arcade.closeLauncherMenu(); }
+            closeLauncherMenu: () => { if (window.__arcade.closeLauncherMenu) window.__arcade.closeLauncherMenu(); },
+            packDocument: (gid) => import('./arcade-packs.js').then((m) => m.documentFor(gid))
         };
 
         // Launcher-owned glue handed to the extracted message router
@@ -2308,6 +2309,9 @@
                 setTag('downloading…');
                 try {
                     await release.install(manifest);
+                    // Per-game and best effort: a game that can't refresh keeps its pack.
+                    const packs = await import('./arcade-packs.js');
+                    await packs.downloadAll(window.__arcade.catalog || []);
                 } catch (e) {
                     toast('Update failed — nothing changed. Try again when you have a connection.', { error: true });
                     setTag('update ready');
@@ -2369,6 +2373,9 @@
             try {
                 const release = await import('./arcade-release.js');
                 if ((await release.check()).available) flag();
+                // First run only: makes each game playable offline.
+                const packs = await import('./arcade-packs.js');
+                await packs.downloadMissing(window.__arcade.catalog || []);
             } catch (e) {}
         }
         const CHECK_DELAY_MS = 5000;

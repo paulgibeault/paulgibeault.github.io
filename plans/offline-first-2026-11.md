@@ -28,10 +28,21 @@ newer than a pinned launcher until step 2. The bridge is caps-negotiated.
 
 ## Step 2: game packs
 
-`tools/stage.mjs` emits one self-contained pack per game; the launcher mounts
-it as a sandboxed `srcdoc` frame, opaque origin preserved. Audit first what
-each game loads (images, CSS `url()`, audio, `fetch()`, wasm, workers). Prove on
-Hive Mind and Si Syndicate, on real phones.
+`tools/build-pack.mjs` turns a staged game into one document. `arcade-packs.js`
+stores packs and mounts them as sandboxed `srcdoc` frames, injecting the SDK
+from the pinned release; a game with no pack loads from the network.
+
+Audit of all 14 games booted offline in Chromium: 8 ran clean (pi-game, si-syn,
+hecknsic, sowduku, shuiguo, p2p-chat, grav-well, hive-mind). Remaining: assets
+named in JS strings or `fetch()` (moon-lit, cozy-solitaire, mr-pepper, cardstock,
+audio-tune) and a `new URL()` against the frame location (sand-art). These need
+a small in-frame shim over `fetch` and image loading, backed by the pack.
+
+Still open:
+
+- Publish `arcade-pack.json`: an opt-in `fleet-ci.yml` step after staging.
+- Detect game-only deploys. The passive check compares launcher versions only,
+  so each game needs a small version file too.
 
 ## Step 3: fleet rollout
 
