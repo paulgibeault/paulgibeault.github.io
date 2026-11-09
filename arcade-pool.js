@@ -114,12 +114,21 @@ export function initIframePool(host) {
         }
     }
 
+    // Mount the stored offline pack when there is one, else the network. The
+    // sandbox attribute is already set by the time either navigation starts.
+    function loadFrame(iframe, gameId, src) {
+        const network = () => { iframe.removeAttribute('srcdoc'); iframe.src = src; };
+        if (!host.packDocument) { network(); return; }
+        host.packDocument(gameId).then((doc) => {
+            if (doc) iframe.srcdoc = doc; else network();
+        }, network);
+    }
+
     function ensureIframe(gameId, src, name) {
         let entry = pool.get(gameId);
         if (entry) return entry;
         evictLRU({ makingRoom: true, newActiveId: gameId });
         const iframe = document.createElement('iframe');
-        iframe.src = src;
         iframe.dataset.gameId = gameId;
         // No allow-same-origin: games run with an OPAQUE origin, so they
         // cannot open ANY of this origin's storage — other apps' state,
@@ -138,6 +147,7 @@ export function initIframePool(host) {
         iframe.setAttribute('title', name);
         iframe.hidden = true;
         iframeHost.appendChild(iframe);
+        loadFrame(iframe, gameId, src);
         entry = { iframe, name, src };
         pool.set(gameId, entry);
         return entry;
@@ -248,7 +258,7 @@ export function initIframePool(host) {
         host.clearGameUi(gid);
         entry.customTitle = '';
         beginGameLoad(gid, entry.name);
-        try { entry.iframe.src = entry.src || entry.iframe.src; } catch (e) {}
+        try { loadFrame(entry.iframe, gid, entry.src || entry.iframe.src); } catch (e) {}
     });
     document.getElementById('game-error-back').addEventListener('click', () => {
         host.closeLauncherMenu();

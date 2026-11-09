@@ -28,13 +28,20 @@ newer than a pinned launcher until step 2. The bridge is caps-negotiated.
 
 ## Step 2: game packs
 
-`tools/stage.mjs` emits one self-contained pack per game; the launcher mounts
-it as a sandboxed `srcdoc` frame, opaque origin preserved. Audit first what
-each game loads (images, CSS `url()`, audio, `fetch()`, wasm, workers). Prove on
-Hive Mind and Si Syndicate, on real phones.
+`tools/build-pack.mjs` turns a staged game into one document. `arcade-packs.js`
+stores packs and mounts them as sandboxed `srcdoc` frames, injecting the SDK
+from the pinned release; a game with no pack loads from the network.
+
+Games reach assets named at runtime through an in-frame shim over `fetch` and
+media `src`, backed by the pack. Compiled kernels get their wasm from the
+launcher at mount. All 14 real games mounted from packs in airplane mode
+through the real launcher in Chromium. audio-tune still requests other games'
+sound packs, which stay network-only.
+
+`fleet-ci.yml` publishes a pack for callers that set `offline_pack: true`, with
+a small version file so the passive check can flag a game-only deploy.
 
 ## Step 3: fleet rollout
 
-Background-download every pack on first run, show "Ready for offline: n/14",
-fall back to the network for a game with no pack, and explain build mismatches
-in multiplayer. Add real-iPhone airplane-mode and storage-eviction tests.
+Enable `offline_pack` per game, show "Ready for offline: n/14", and explain
+build mismatches in multiplayer. Add real-iPhone airplane-mode and storage-eviction tests.

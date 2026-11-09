@@ -114,7 +114,10 @@
     // root alias working in those cases (the binary is a root file too).
     var here = (typeof document !== 'undefined' && document.currentScript && document.currentScript.src)
         || (typeof location !== 'undefined' ? location.href : '');
-    var binaryUrl = new URL('arcade-sim-sand.wasm', here).href;
+    // An offline pack runs this script inline, with no URL to be beside; the
+    // launcher supplies the binary directly (arcade-packs.js).
+    var packed = typeof self !== 'undefined' && self.__arcadePackWasm && self.__arcadePackWasm['arcade-sim-sand.wasm'];
+    var binaryUrl = packed || new URL('arcade-sim-sand.wasm', here).href;
 
     // FNV-1a, the same derivation Arcade.rng.hash uses, so a string seed here
     // and a string seed there mean the same number.

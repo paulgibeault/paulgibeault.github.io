@@ -2183,7 +2183,8 @@
                 if (window.__arcade.ui) window.__arcade.ui.clearGame(gid);
                 if (window.__arcade.motion) window.__arcade.motion.clearGame(gid);
             },
-            closeLauncherMenu: () => { if (window.__arcade.closeLauncherMenu) window.__arcade.closeLauncherMenu(); }
+            closeLauncherMenu: () => { if (window.__arcade.closeLauncherMenu) window.__arcade.closeLauncherMenu(); },
+            packDocument: (gid) => import('./arcade-packs.js').then((m) => m.documentFor(gid))
         };
 
         // Launcher-owned glue handed to the extracted message router
@@ -2301,13 +2302,16 @@
         // staged and verified first, so a failed download changes nothing.
         // Reloading is not optional: without it the launcher would be running
         // old code against a new build's cache.
-        async function applyAndReload(mod, release, manifest) {
+        async function applyAndReload(mod, release, manifest, gameUpdates) {
             if (applying) return;
             applying = true;
-            if (manifest) {
+            if (manifest || gameUpdates) {
                 setTag('downloading…');
                 try {
-                    await release.install(manifest);
+                    if (manifest) await release.install(manifest);
+                    // Per-game and best effort: a game that can't refresh keeps its pack.
+                    const packs = await import('./arcade-packs.js');
+                    await packs.downloadAll(window.__arcade.catalog || []);
                 } catch (e) {
                     toast('Update failed — nothing changed. Try again when you have a connection.', { error: true });
                     setTag('update ready');
@@ -2321,11 +2325,11 @@
                 sent = await mod.apply(navigator);
                 if (sent) await mod.waitForControllerChange(navigator);
             } catch (e) { /* reload anyway — a half-applied update is the worst state */ }
-            if (!manifest && !sent) { toast('Already up to date.'); setTag(''); applying = false; return; }
+            if (!manifest && !gameUpdates && !sent) { toast('Already up to date.'); setTag(''); applying = false; return; }
             location.reload();
         }
 
-        async function offerUpdate(mod, release, manifest) {
+        async function offerUpdate(mod, release, manifest, gameUpdates) {
             if (applying) return;
             const answer = await (window.__arcade && window.__arcade.dialog
                 ? window.__arcade.dialog({
@@ -2333,7 +2337,7 @@
                     okLabel: 'Install', cancelLabel: 'Later'
                 })
                 : Promise.resolve(true));
-            if (answer) applyAndReload(mod, release, manifest);
+            if (answer) applyAndReload(mod, release, manifest, gameUpdates);
             else setTag('update ready');   // stays flagged so they can take it later
         }
 
@@ -2342,11 +2346,13 @@
             if (window.__arcade && window.__arcade.closeLauncherMenu) window.__arcade.closeLauncherMenu();
             setTag('checking…');
             try {
-                const [mod, release] = await Promise.all([import('./arcade-updates.js'), import('./arcade-release.js')]);
-                const [workers, rel] = await Promise.all([mod.checkAll(navigator), release.check()]);
+                const [mod, release, packs] = await Promise.all([import('./arcade-updates.js'), import('./arcade-release.js'), import('./arcade-packs.js')]);
+                const [workers, rel, gameUpdates] = await Promise.all([
+                    mod.checkAll(navigator), release.check(), packs.updatesAvailable(window.__arcade.catalog || [])
+                ]);
                 setTag('');
-                if (workers.ready || rel.available) {
-                    offerUpdate(mod, release, rel.available ? rel.manifest : null);
+                if (workers.ready || rel.available || gameUpdates) {
+                    offerUpdate(mod, release, rel.available ? rel.manifest : null, gameUpdates);
                     return;
                 }
                 // Errors with nothing ready almost always mean offline — saying
@@ -2368,7 +2374,11 @@
         async function passiveCheck() {
             try {
                 const release = await import('./arcade-release.js');
-                if ((await release.check()).available) flag();
+                const packs = await import('./arcade-packs.js');
+                const games = window.__arcade.catalog || [];
+                if ((await release.check()).available || await packs.updatesAvailable(games)) flag();
+                // First run only: makes each game playable offline.
+                await packs.downloadMissing(window.__arcade.catalog || []);
             } catch (e) {}
         }
         const CHECK_DELAY_MS = 5000;
