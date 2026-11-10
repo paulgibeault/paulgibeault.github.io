@@ -44,6 +44,8 @@ async function mount(page, gameId, src, name) {
         if (!frame) await page.waitForTimeout(50);
     }
     if (!frame) throw new Error('fixture frame never appeared: ' + gameId);
+    // The frame's URL commits before its SDK script runs.
+    await frame.waitForFunction(() => !!window.Arcade, null, { timeout: 15000 });
     await frame.evaluate(() => window.Arcade.ready);
     return frame;
 }

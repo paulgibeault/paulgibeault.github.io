@@ -198,6 +198,8 @@ try {
         }
         ok(!!frame, 'bridged fixture frame mounted');
         if (frame) {
+            // The frame's URL commits before its SDK script runs.
+            await frame.waitForFunction(() => !!window.Arcade, null, { timeout: 15000 });
             await frame.evaluate(() => window.Arcade.ready);
             ok(await frame.evaluate(() => window.Arcade.settings.powerSaver()) === true,
                 'an opaque-origin game receives powerSaver=true in welcome.settings');

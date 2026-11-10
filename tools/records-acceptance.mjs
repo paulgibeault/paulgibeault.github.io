@@ -154,6 +154,10 @@ try {
         if (!frame) await page.waitForTimeout(50);
     }
     if (!frame) throw new Error('game frame never appeared');
+    // A URL match means the navigation committed, not that the SDK script ran.
+    // The launcher sets a frame's src only after an async pack lookup, so on a
+    // slow runner the frame is often found before `Arcade` exists.
+    await frame.waitForFunction(() => !!window.Arcade, null, { timeout: 15000 });
     await frame.evaluate(() => window.Arcade.ready);
     await page.evaluate(() => window.__arcade.records.open());
     await page.click(`#records-dialog-tabs .records-tab[data-game-id="${B}"]`); // make B the active tab
