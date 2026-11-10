@@ -1441,12 +1441,38 @@ and the launcher live on the same origin, sloppy scopes will collide.
 
 > **Framed reality check:** a game's SW only ever controls **standalone**
 > visits to `/<gameId>/` — an opaque-origin launcher frame can't be controlled
-> by any service worker, so in-launcher play always hits the network/HTTP
-> cache. The SDK shims `navigator.serviceWorker` with an inert stub inside
+> by any service worker. In-launcher offline play comes from the game's
+> **offline pack** instead (§13a `offline_pack`, and "Offline packs" below);
+> a game with no stored pack loads from the network. The SDK shims `navigator.serviceWorker` with an inert stub inside
 > frames (register() rejects catchably; the real getter would throw
 > `SecurityError`). Keep registration fire-and-forget with a `.catch`, never
 > `await navigator.serviceWorker.ready` on your boot path, and wrap any SW
 > code that runs **before** the SDK loads in try/catch.
+
+### Offline packs
+
+With `offline_pack: true` (§13a), CI turns your staged artifact into one
+document, `arcade-pack.json`, plus a small `arcade-pack.version.json`. The
+launcher downloads it on first run and mounts it as a sandboxed `srcdoc` frame,
+so your game runs inside the arcade with no network. The launcher supplies the
+SDK from its own pinned release, so your game always runs against the launcher
+it talks to. Packs refresh only when the player accepts an update; a deploy of
+your game alone is flagged by the update check.
+
+What a pack covers, and what to avoid:
+
+- [ ] ES modules, including dynamic `import("./x.js")` with a literal path,
+  and cycles. Classic scripts, stylesheets, inline `<style>` and CSS `url()`.
+- [ ] Files reached at runtime through `fetch()` or an image/audio/video
+  `src` (property or `setAttribute`). A shim answers these from the pack.
+- [ ] **Not covered:** XMLHttpRequest, `new Worker`, CSS set from JS
+  (`el.style.backgroundImage = "url(...)"`), and dynamic imports with a
+  computed path. Each of these goes to the network and fails offline.
+- [ ] Don't build URLs from `location.href` or `document.currentScript.src`:
+  in a pack these are `about:srcdoc` or empty. Use relative paths.
+- [ ] Don't fetch another game's files; packs hold only your own artifact.
+- [ ] Every non-code file in your artifact ships in the pack, so large assets
+  cost every player storage. Moon Lit's 20 MB pack is the current ceiling.
 
 Start from the reference worker at
 [`tools/templates/game-sw.js`](tools/templates/game-sw.js) — it encodes every
@@ -1723,6 +1749,8 @@ jobs:
       # version (§10). Drop this (and relax contents: to read) only for an
       # app with no sw.js.
       version_bump: true
+      # Publish the game's offline pack so the launcher can run it with no network.
+      offline_pack: true
 ```
 
 This repo calls the same pipeline, with `uses: ./.github/workflows/fleet-ci.yml`
@@ -1912,7 +1940,9 @@ Opt-in inputs for apps that need more (pass under `with:` in the caller):
 `ARCADE_LAUNCHER`) and runs `npm run acceptance` after the app's tests;
 `browsers: "chromium webkit"` installs Playwright browsers for the test
 tier; `version_bump: true` auto-bumps the patch version on each deploy
-(requires `contents: write` in the caller's permissions).
+(requires `contents: write` in the caller's permissions); `offline_pack: true`
+publishes `arcade-pack.json` and `arcade-pack.version.json` so the launcher
+can run the game offline (§10 "Offline packs"). Every catalog game sets it.
 
 ### What `version_bump: true` rewrites
 

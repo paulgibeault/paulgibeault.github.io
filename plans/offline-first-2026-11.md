@@ -43,5 +43,12 @@ a small version file so the passive check can flag a game-only deploy.
 
 ## Step 3: fleet rollout
 
-Enable `offline_pack` per game, show "Ready for offline: n/14", and explain
-build mismatches in multiplayer. Add real-iPhone airplane-mode and storage-eviction tests.
+Done 2026-11-09: all 14 catalog games set `offline_pack: true` and serve packs
+live. audio-tune first needed its Pages source moved from branch builds to
+GitHub Actions. Game authors' rules are in GAME_INTEGRATION §10 "Offline packs".
+
+Remaining:
+
+- A "Ready for offline: n/14" indicator, and a notice when paired devices run
+  different launcher releases.
+- Real-iPhone airplane-mode and storage-eviction tests.
