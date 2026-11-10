@@ -379,6 +379,19 @@ body.app-in-game .launcher-menu__panel {
     border-radius: 3px;
     text-transform: uppercase;
 }
+/* A read-only row (e.g. "Ready for offline"): laid out like an item, but
+   not a control, so no hover and not a .launcher-menu__item (which closes
+   the menu on click). */
+.launcher-menu__status {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    padding: 6px 10px;
+}
+.launcher-menu__status[hidden] { display: none; }
 .launcher-menu__item--disabled,
 .launcher-menu__item--disabled:hover {
     color: var(--text-secondary);

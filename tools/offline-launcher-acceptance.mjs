@@ -26,7 +26,10 @@ function build(version) {
 }
 
 // The fixture game, published under a real catalog id so the launcher offers it.
-const GAME = JSON.parse(fs.readFileSync(new URL("../catalog.json", import.meta.url), "utf8")).games[0].id;
+// Only this one game serves a pack, so "ready for offline" counts it alone.
+const CATALOG = JSON.parse(fs.readFileSync(new URL("../catalog.json", import.meta.url), "utf8")).games;
+const GAME = CATALOG[0].id;
+const TOTAL = CATALOG.length;
 const gameDir = path.join(tmp, "game");
 fs.cpSync(new URL("./fixtures/starter-app", import.meta.url), gameDir, { recursive: true });
 const gameIndex = path.join(gameDir, "index.html");
@@ -79,6 +82,13 @@ const pin = () => page.evaluate(async () => {
   return hit ? (await hit.json()).version : null;
 });
 const tag = () => page.locator("#menu-update-status").textContent();
+const menuOpen = () => page.evaluate(() => document.getElementById("launcher-menu").dataset.open === "true");
+const openMenu = async () => { if (!(await menuOpen())) await page.locator("#launcher-menu-toggle").click(); };
+const closeMenu = async () => { if (await menuOpen()) await page.locator("#launcher-menu-toggle").click(); };
+const offlineCount = (text) => page.waitForFunction((t) => {
+  const row = document.getElementById("menu-offline");
+  return !row.hidden && document.getElementById("menu-offline-status").textContent === t;
+}, text, { timeout: 15000 }).then(() => true, () => false);
 const accept = async () => {
   await page.locator("#launcher-menu-toggle").click();
   await page.locator("#menu-update").click();
@@ -125,6 +135,21 @@ try {
   }
   check("the game's pack is stored for offline", true);
 
+  await openMenu();
+  check(`the menu shows ready for offline 1/${TOTAL}`, await offlineCount(`1/${TOTAL}`),
+    await page.locator("#menu-offline").textContent());
+  await closeMenu();
+  await page.evaluate(async (g) => (await caches.open("arcade-packs")).delete(`__pack/${g}`), GAME);
+  await openMenu();
+  check(`a missing pack counts as not ready (0/${TOTAL})`, await offlineCount(`0/${TOTAL}`),
+    await page.locator("#menu-offline-status").textContent());
+  // The passive check re-runs on "online"; its download lands with the menu open.
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+  check("the count follows a background download without reopening the menu", await offlineCount(`1/${TOTAL}`),
+    await page.locator("#menu-offline-status").textContent());
+  check("the count raises no dialog", (await page.getByRole("button", { name: "Install", exact: true }).count()) === 0);
+  await closeMenu();
+
   gameVersion = "a-newer-game-deploy";
   await page.reload();
   await page.waitForFunction(() => document.querySelector("#menu-update-status").textContent === "update ready", null, { timeout: 15000 });
@@ -136,6 +161,10 @@ try {
   check("airplane mode boots the launcher", (await build_()) === "2.0.0", await build_());
   check("airplane mode renders the game grid", await page.waitForFunction(
     () => document.querySelectorAll(".launcher-grid > *").length > 0, null, { timeout: 10000 }).then(() => true, () => false));
+  await openMenu();
+  check(`airplane mode still counts 1/${TOTAL} ready`, await offlineCount(`1/${TOTAL}`),
+    await page.locator("#menu-offline-status").textContent());
+  await closeMenu();
 
   await page.evaluate((g) => { location.hash = `#app=${g}`; location.reload(); }, GAME);
   const frame = page.locator(`iframe[data-game-id="${GAME}"]`);
