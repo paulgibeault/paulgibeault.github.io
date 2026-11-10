@@ -610,7 +610,7 @@ Two things remain **untrusted** as always, and keep their hard guards:
 True multi-tenant isolation (untrusted third-party apps, user-added app URLs, a capability/permission model) remains the **v2 epic** — the storage bridge built here is its foundation piece, pulled forward.
 
 Known trade-offs of the opaque-frame move:
-- **No service worker inside launcher frames** — a game's SW cannot control an opaque-origin frame, so offline play *inside the launcher* falls back to the HTTP cache (standalone visits to the game's URL still register its SW normally). The SDK shims `navigator.serviceWorker` with an inert stub in frames so legacy registration code degrades gracefully.
+- **No service worker inside launcher frames** — a game's SW cannot control an opaque-origin frame. Offline play *inside the launcher* comes from the game's offline pack, which the launcher stores and mounts as a sandboxed `srcdoc` frame (GAME_INTEGRATION §10 "Offline packs"; standalone visits to the game's URL still register its SW normally). The SDK shims `navigator.serviceWorker` with an inert stub in frames so legacy registration code degrades gracefully.
 - **Raw `localStorage` access from game code no longer works when framed** — everything must go through the SDK (all catalog games already do); legacy-key migrations that read pre-SDK keys become safe no-ops in frames.
 
 ---
