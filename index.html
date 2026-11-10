@@ -524,6 +524,11 @@
                 <span class="launcher-menu__item-label">Check for Updates</span>
                 <span class="launcher-menu__item-tag" id="menu-update-status" hidden></span>
             </button>
+            <div class="launcher-menu__status" id="menu-offline" hidden title="Games stored on this device that play with no connection">
+                <span class="launcher-menu__item-icon" aria-hidden="true">✈</span>
+                <span class="launcher-menu__item-label">Ready for offline</span>
+                <span class="launcher-menu__item-tag" id="menu-offline-status"></span>
+            </div>
         </div>
         <div class="launcher-menu__section" id="menu-install-section" hidden>
             <button type="button" class="launcher-menu__item" id="install-btn" title="Install as PWA">
@@ -2366,6 +2371,33 @@
             }
         });
 
+        // "Ready for offline: n/total" — a quiet row under this button. It is
+        // counted when the menu opens and again as each background pack lands,
+        // so it follows downloads with no polling. Key lookups only (see
+        // readiness() in arcade-packs.js), and it never raises anything.
+        const offlineRow = document.getElementById('menu-offline');
+        const offlineTag = document.getElementById('menu-offline-status');
+        let counting = false, recount = false;
+        async function showReadiness() {
+            const games = window.__arcade && window.__arcade.catalog;
+            if (!offlineRow || !('caches' in window) || !Array.isArray(games) || !games.length) return;
+            if (counting) { recount = true; return; }
+            counting = true;
+            try {
+                const { ready, total, missing } = await (await import('./arcade-packs.js')).readiness(games);
+                offlineTag.textContent = `${ready}/${total}`;
+                const names = games.filter((g) => missing.includes(g.id)).map((g) => g.name || g.id);
+                offlineRow.title = 'Games stored on this device that play with no connection'
+                    + (names.length ? `. Not yet: ${names.join(', ')}` : '');
+                offlineRow.removeAttribute('hidden');
+            } catch (e) {
+            } finally {
+                counting = false;
+                if (recount) { recount = false; showReadiness(); }
+            }
+        }
+        document.querySelectorAll('[data-launcher-menu-toggle]').forEach((t) => t.addEventListener('click', showReadiness));
+
         // Passive check: a flag on the menu item and nothing else. No dialog,
         // no download, and it waits until launch has finished, so it can never
         // get between the player and the game they picked. Taking the update
@@ -2378,7 +2410,7 @@
                 const games = window.__arcade.catalog || [];
                 if ((await release.check()).available || await packs.updatesAvailable(games)) flag();
                 // First run only: makes each game playable offline.
-                await packs.downloadMissing(window.__arcade.catalog || []);
+                await packs.downloadMissing(window.__arcade.catalog || [], undefined, showReadiness);
             } catch (e) {}
         }
         const CHECK_DELAY_MS = 5000;

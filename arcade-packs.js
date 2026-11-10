@@ -94,14 +94,40 @@ export async function updatesAvailable(games, env) {
     return results.filter(Boolean).length;
 }
 
-/** First run: fetch only packs not yet stored, so nothing updates unasked. */
-export async function downloadMissing(games, env) {
+/**
+ * How many games would mount offline right now: a stored pack plus a pinned
+ * release to take the SDK from. Only looks up keys, never reads a pack's
+ * body, so the menu can ask whenever it is shown. Never throws.
+ */
+export async function readiness(games, env) {
+    const e = defaults(env);
+    const total = games.length;
+    const none = { ready: 0, total, missing: games.map((g) => g.id) };
+    try {
+        if (!await pinned(e)) return none;
+        const cache = await e.caches.open(PACK_CACHE);
+        const stored = await Promise.all(games.map((g) => cache.match(packKey(g.id)).then(Boolean, () => false)));
+        const missing = games.filter((g, i) => !stored[i]).map((g) => g.id);
+        return { ready: total - missing.length, total, missing };
+    } catch (err) {
+        return none;
+    }
+}
+
+/**
+ * First run: fetch only packs not yet stored, so nothing updates unasked.
+ * `onStored(gameId)` fires as each pack lands, so a readiness count can follow.
+ */
+export async function downloadMissing(games, env, onStored) {
     const e = defaults(env);
     const cache = await e.caches.open(PACK_CACHE);
     let got = 0;
     for (const game of games) {
         if (await cache.match(packKey(game.id))) continue;
-        if (await download(game, cache, e)) got++;
+        if (await download(game, cache, e)) {
+            got++;
+            if (onStored) try { onStored(game.id); } catch (err) {}
+        }
     }
     return got;
 }
@@ -114,4 +140,4 @@ export async function downloadAll(games, env) {
     return results.filter(Boolean).length;
 }
 
-export default { PACK_CACHE, documentFor, updatesAvailable, downloadMissing, downloadAll };
+export default { PACK_CACHE, documentFor, updatesAvailable, readiness, downloadMissing, downloadAll };
