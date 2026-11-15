@@ -240,6 +240,29 @@
         ],
         "codeUrl": "https://github.com/paulgibeault/hive-mind"
       }
+    },
+    {
+      "id": "orbital",
+      "name": "Orbital Courier",
+      "subtitle": "Gravity Slingshots",
+      "icon": "/orbital/icon.png",
+      "url": "/orbital/",
+      "inDevelopment": true,
+      "profile": {
+        "subtitle": "A Courier for the Solar System",
+        "alt": "Orbital Courier — a parcel slingshotting past a ringed blue planet, its trail curving away from a glowing sun",
+        "descLead": "Deliver parcels across a living solar system.",
+        "descBody": "Hop off small worlds and swoop through real gravity summed from every planet, moon and comet. Flybys earn you speed, a live forecast sketches where you're headed, and Flight School teaches prograde burns, slingshots and launch windows. Level 2, the Outer Run, asks for real orbital technique.",
+        "kicker": "Real orbital mechanics, tuned to be fun rather than hard.",
+        "tags": [
+          "HTML5 Canvas",
+          "JS",
+          "Web Audio",
+          "PWA",
+          "Arcade SDK"
+        ],
+        "codeUrl": "https://github.com/paulgibeault/orbital"
+      }
     }
   ]
 }
