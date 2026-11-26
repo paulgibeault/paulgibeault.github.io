@@ -225,7 +225,6 @@
       "subtitle": "Honeycomb Sweeper",
       "icon": "/hive-mind/icon.png",
       "url": "/hive-mind/",
-      "inDevelopment": true,
       "profile": {
         "subtitle": "A Fair Honeycomb Minesweeper",
         "alt": "Hive Mind — a cluster of golden honeycomb cells, one opened on a striped wasp beside a cell reading 1",
